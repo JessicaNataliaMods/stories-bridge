@@ -50,7 +50,12 @@ class PathsTests(unittest.TestCase):
         self.assertEqual(report['CrossAreaConnections'], 4)
         self.assertEqual(self.addresses[0], (35, 0))
         self.assertEqual(self.addresses[1], (36, 0))
-        self.assertEqual(regions[36]['navLinks'][0], 35 << 10)
+        # SA stores a link in the area of its own position (x=0 -> area 36),
+        # even though it is attached to node 0 in area 35.
+        self.assertEqual(len(regions[35]['navs']), 0)
+        self.assertEqual(regions[36]['navs'][0][2:4], (35, 0))
+        self.assertEqual(regions[35]['navLinks'][0], 36 << 10)
+        self.assertEqual(regions[36]['navLinks'][0], 36 << 10)
 
     def test_ped_lights_and_no_navigation(self):
         regions, _ = self.native()
@@ -62,7 +67,7 @@ class PathsTests(unittest.TestCase):
     def test_ps2_padding_does_not_become_native_flags(self):
         regions, _ = self.native()
         self.assertEqual(regions[35]['nodes'][0][11], 0x0f1001)
-        self.assertEqual(regions[35]['navs'][0][7:], (0x49, 2))
+        self.assertEqual(regions[36]['navs'][0][7:], (0x49, 2))
 
     def test_dead_disabled_water_roadblock_and_speed_mapping(self):
         self.source[128 + 16] = 0xb1  # dead end, off, roadblock, one link
@@ -102,8 +107,8 @@ class PathsTests(unittest.TestCase):
 
     def test_reserved_dynamic_array_corruption_rejected(self):
         raw = bytearray(self.payloads[35])
-        # 2 nodes, one nav, 2 links; reserved addresses follow real links.
-        raw[20 + 2 * 28 + 14 + 2 * 4] = 0
+        # 2 nodes, no nav (stored by position in area 36), 2 links; reserved addresses follow real links.
+        raw[20 + 2 * 28 + 2 * 4] = 0
         self.payloads[35] = bytes(raw)
         with self.assertRaisesRegex(ValueError, 'reserved dynamic path'):
             validator.parse_archive(pack_img(self.payloads))

@@ -92,8 +92,10 @@ def encode_graph(graph):
     addresses = {ident: (a, i) for a, ids in enumerate(regions) for i, ident in enumerate(ids)}
     nav_regions = [[] for _ in range(64)]
     for ident, nav in enumerate(navs):
-        # Attach nav records to their owner node's area, even at tile borders.
-        nav_regions[addresses[nav[2]][0]].append(ident)
+        # SA stores a car path link in the area containing the link's own
+        # position (31462 of 31466 retail SA links), not its attached node's
+        # area; the attachment address may point into a neighbouring area.
+        nav_regions[area(nav[0], nav[1])].append(ident)
     if any(len(ids) > 1024 for ids in nav_regions):
         raise ValueError('Native SA navigation address exceeds 10-bit local index')
     nav_addresses = {ident: (a << 10) | i for a, ids in enumerate(nav_regions) for i, ident in enumerate(ids)}

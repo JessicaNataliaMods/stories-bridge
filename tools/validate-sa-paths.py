@@ -106,7 +106,9 @@ def check_graph(regions):
         for nav in r['navs']:
             if nav[2] not in regions or nav[3] >= regions[nav[2]]['cars']:
                 raise ValueError('Native navigation points to nonexistent vehicle node')
-            if nav[2] != area or not -100 <= nav[4] <= 100 or not -100 <= nav[5] <= 100 or nav[6] < 0 or nav[7] & 128 or nav[8] & ~7:
+            # Native SA files store each link in the area of its own position.
+            stored = (nav[0] + 24000) // 6000 + 8 * ((nav[1] + 24000) // 6000)
+            if stored != area or not -100 <= nav[4] <= 100 or not -100 <= nav[5] <= 100 or nav[6] < 0 or nav[7] & 128 or nav[8] & ~7:
                 raise ValueError('Invalid native navigation direction/width/flags/area')
     if any((b_area, b, a_area, a) not in edges for a_area, a, b_area, b in edges):
         raise ValueError('Native graph has an asymmetric connection')

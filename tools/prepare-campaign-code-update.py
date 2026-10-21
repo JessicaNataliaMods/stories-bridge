@@ -29,7 +29,8 @@ def mutable_profile(relative, version):
     # Converted zones (v82) and timecycle (v83) are regenerated; other data stays shared.
     return (version >= 32 and relative.as_posix() == 'data/script/main.scm') or \
            (version >= 82 and relative.as_posix() in ('data/gta.dat', 'data/lcs/info.zon', 'data/lcs/map.zon')) or \
-           (version >= 83 and relative.as_posix() == 'data/timecyc.dat')
+           (version >= 83 and relative.as_posix() == 'data/timecyc.dat') or \
+           (version >= 84 and relative.as_posix() == 'models/lcs/paths.img')
 
 
 def replace_mutable(target, data):
@@ -341,6 +342,27 @@ def prepare(base, output, version, notes, refresh, original_data):
         replace_mutable(target, text.encode('ascii'))
         cycle_report.update(rom=str(rom), native=str(native), outputSha256=digest(target))
         campaign['timecycle83'] = cycle_report
+    if version >= 84:
+        # Navigation re-exported by tools/ps2_paths.py with SA's storage rule
+        # (each car path link in the area of its own position).
+        navigation = ROOT/'out/ps2-navigation-v84'
+        audit = tool_module('traffic_profile').audit
+        graph = audit.validate(navigation/'paths.img')
+        conversion = json.loads((navigation/'conversion.json').read_text())
+        if graph['PathsImgSha256'] != conversion['pathsImgSha256'] or not graph['VehicleNodes'] or not graph['PedNodes']:
+            raise ValueError('Converted navigation missing or hash mismatch')
+        target = output/'models/lcs/paths.img'
+        replace_mutable(target, (navigation/'paths.img').read_bytes())
+        for row in campaign['preservedApprovedResources']:
+            if row['relative'] == 'models/lcs/paths.img':
+                row['sha256'] = digest(target)
+        preview_path = output/'metadata/map-preview.json'
+        preview = json.loads(preview_path.read_text())
+        preview['navigation']['graph'] = graph
+        preview_path.write_text(json.dumps(preview, indent=2))
+        (output/'metadata/navigation.json').write_text(json.dumps(dict(conversion=conversion, nativeValidation=graph), indent=2), encoding='utf-8')
+        campaign['navigation84'] = dict(source=str(navigation), pathsImgSha256=graph['PathsImgSha256'],
+                                        linkStorage='area of link position (native SA rule)', gameExecuted=False)
     (output/'metadata/campaign.json').write_text(json.dumps(campaign, indent=2))
     preview = json.loads((output/'metadata/map-preview.json').read_text())
     preview['version'] = str(version)

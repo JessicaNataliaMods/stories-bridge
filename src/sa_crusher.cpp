@@ -4,6 +4,7 @@
 #include "lcs/route_vehicle_native.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace lcs {
@@ -185,7 +186,11 @@ SaCrusherResolve sa_crusher_resolve(uintptr_t pool_root,uint16_t body,uint16_t l
             const auto position=matrix?matrix+0x30:entity+4;
             const auto* at=model==body?body_at:lid_at;
             for(int i=0;i<3;++i)if(!close(*reinterpret_cast<const float*>(position+i*4),at[i])){
-                unavailable_reason=model==body?"crushercrushB instance is not at its IPL placement":"crushertop instance is not at its IPL placement";return SaCrusherResolve::unavailable;}
+                static char placement[160];
+                const auto* p=reinterpret_cast<const float*>(position);
+                std::snprintf(placement,sizeof(placement),"%s instance is not at its IPL placement: slot=%d found=(%.3f,%.3f,%.3f) matrix=%d",
+                    model==body?"crushercrushB":"crushertop",int(slot),p[0],p[1],p[2],matrix?1:0);
+                unavailable_reason=placement;return SaCrusherResolve::unavailable;}
             auto& target=model==body?out.body:out.lid;
             if(target){unavailable_reason=model==body?"duplicate crushercrushB building":"duplicate crushertop building";return SaCrusherResolve::unavailable;}
             target=entity;
