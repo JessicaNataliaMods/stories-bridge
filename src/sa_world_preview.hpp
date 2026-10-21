@@ -16,14 +16,19 @@ inline unsigned preview_physical_flags(unsigned flags,const WorldRenderRule& rul
 }
 template<class Remove,class Add>
 inline void preview_apply_physical_membership(unsigned& flags,const WorldRenderRule& rule,
-        bool was_big,bool dummy_pool,bool promoted_dummy,Remove remove,Add add) {
+        bool was_big,bool dummy_pool,bool promoted_dummy,bool lod_linked,Remove remove,Add add) {
     // Population detaches an owned CDummyObject from CSector::Dummies while
     // leaving it allocated. Keep it detached and preserve its BIG flag until
     // native demotion; all other physical entities still receive collision flags.
     if(dummy_pool && promoted_dummy)return;
-    if(was_big)remove();
+    // Relink only an entity that is actually in SA's LOD lists. An entity
+    // detached by its owner (story overlay, population) stays detached: an
+    // Add here would be repeated by that owner's own re-Add, leaving a second
+    // CSector node that CWorld::ShutDown dispatches after deleting the entity.
+    const bool relink=was_big && lod_linked;
+    if(relink)remove();
     flags=preview_physical_flags(flags,rule);
-    if(was_big)add();
+    if(relink)add();
 }
 struct IslandZone { int level; std::array<float,6> bounds; };
 inline int preview_level(const std::vector<IslandZone>& zones,const float* position) {

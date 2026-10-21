@@ -27,21 +27,27 @@ int main() {
     check(lcs::preview_physical_flags(flags,track)==flags);
     unsigned promoted_dummy_flags=(1u<<8)|(1u<<27);
     int removes=0,adds=0;
-    lcs::preview_apply_physical_membership(promoted_dummy_flags,track,true,true,true,
+    lcs::preview_apply_physical_membership(promoted_dummy_flags,track,true,true,true,true,
         [&](){++removes;},[&](){++adds;});
     check(promoted_dummy_flags==((1u<<8)|(1u<<27)) && removes==0 && adds==0);
     unsigned big_dummy_flags=(1u<<8)|(1u<<27);
-    lcs::preview_apply_physical_membership(big_dummy_flags,track,true,true,false,
+    lcs::preview_apply_physical_membership(big_dummy_flags,track,true,true,false,true,
         [&](){++removes;},[&](){++adds;});
     check((big_dummy_flags&1u) && !(big_dummy_flags&(1u<<8)) && removes==1 && adds==1);
     unsigned ordinary_physical_flags=1u<<27;
-    lcs::preview_apply_physical_membership(ordinary_physical_flags,track,false,false,false,
+    lcs::preview_apply_physical_membership(ordinary_physical_flags,track,false,false,false,false,
         [&](){++removes;},[&](){++adds;});
     check((ordinary_physical_flags&1u) && !(ordinary_physical_flags&(1u<<8)) && removes==1 && adds==1);
     unsigned building_flags=(1u<<8)|(1u<<27);
-    lcs::preview_apply_physical_membership(building_flags,track,true,false,true,
+    lcs::preview_apply_physical_membership(building_flags,track,true,false,true,true,
         [&](){++removes;},[&](){++adds;});
     check((building_flags&1u) && !(building_flags&(1u<<8)) && removes==2 && adds==2);
+    // A BIG building already detached by the story overlay is demoted in its
+    // flags only; the overlay's later restore performs the single Add.
+    unsigned detached_flags=(1u<<8)|(1u<<27);
+    lcs::preview_apply_physical_membership(detached_flags,track,true,false,false,false,
+        [&](){++removes;},[&](){++adds;});
+    check((detached_flags&1u) && !(detached_flags&(1u<<8)) && removes==2 && adds==2);
     ordinary.physical=false;
     check(lcs::preview_physical_flags(256,ordinary)==256);
     // Simulate the road pass forcing back/front culling before drawing. Both

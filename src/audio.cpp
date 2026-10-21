@@ -209,24 +209,54 @@ StepResult AudioAdapter::dispatch(Vm& vm,Thread& t,uint16_t opcode) {
             return StepResult::continued;
         }
         if(!listener){t.diagnostic="Original one-off spatial listener unavailable";return StepResult::unsupported;}
-        sound_random_=sound_random_*1664525u+1013904223u;
-        uint32_t index=0;float range=0;int volume=0,frequency=0;unsigned jitter=0;
-        // LCS AudioLogic::ProcessOneShotScriptObject. Script sound IDs are
-        // not SA IDs. Read original samples instead of forwarding 018C.
+        audio_random_.regenerate(); // Event-owned variation, as in play_car_jerk.
+        uint32_t index=0;float range=0;int volume=0;std::optional<uint32_t> frequency;
+        // Fixed frequency, or the sample's base frequency moved by
+        // RandomDisplacement(base>>shift) when shift is set.
+        unsigned shift=0;int32_t displacement=0;
+        // Retail LCS PS2 cAudioManager::ProcessOneShotScriptObject
+        // (SLUS_214.23 0x1B1DF0, 88-entry jump table 0x3B26C0). The script IDs
+        // are the retail numbering: the re-LCS eScriptSounds order is the VC one
+        // and lacks the 20 LCS entries 52..71, so bullet/glass/box/collision
+        // sounds start at 72. Sample indices are the retail bank-0 operands.
+        // Script sound IDs are not SA IDs; read original samples, never 018C.
+        const auto fixed=[&](uint32_t sample,float r,int v,uint32_t f){index=sample;range=r;volume=v;frequency=f;};
         switch(id) {
-        case 3:index=SFX_COL_GATE;range=40;volume=60;frequency=10600;jitter=5;break;
-        case 5:index=SFX_COL_CAR_PANEL_2;range=80;volume=60;frequency=22000;jitter=5;break;
-        case 18:index=SFX_BOMB_BEEP;range=40;volume=70;frequency=20159;break;
+        case 0:fixed(SFX_ALARM,80,90,14000);break;
+        case 3:fixed(SFX_COL_GATE,40,60,10600);displacement=audio_random_.displacement(10600>>5);break;
+        case 5:fixed(SFX_COL_CAR_PANEL_2,80,60,22000);displacement=audio_random_.displacement(22000>>5);break;
+        case 18:fixed(SFX_BOMB_BEEP,40,70,20159);break;
         case 35:index=SFX_SEAPLANE_LOW;range=1000;volume=100;break;
-        case 12:case 52:case 53:case 54:index=SFX_BULLET_WALL_1+sound_random_%3;range=50;volume=90+(sound_random_>>8)%20;jitter=5;break;
-        case 57:case 58:index=SFX_GLASS_SMASH;range=60;volume=id==57?70:60;break;
-        case 59:index=SFX_GLASS_CRACK;range=60;volume=70;break;
-        case 60:index=SFX_GLASS_SHARD_1+sound_random_%4;range=55;volume=25;frequency=19000;break;
-        case 61:case 62:index=id==61?SFX_WOODEN_BOX_SMASH:SFX_CARDBOARD_BOX_SMASH;range=60;volume=80+(sound_random_>>8)%20;frequency=18600;break;
-        case 63:index=SFX_COL_CAR_1+sound_random_%5;range=60;volume=70+(sound_random_>>8)%30;jitter=4;break;
-        case 64:index=SFX_TYRE_BUMP;range=60;volume=60+(sound_random_>>8)%30;jitter=4;break;
-        case 65:index=SFX_HIT_BALL;range=60;volume=60+(sound_random_>>8)%30;jitter=4;break;
-        case 67:index=SFX_BULLET_SHELL_HIT_GROUND_2;range=20;volume=30+(sound_random_>>8)%20;frequency=11000;break;
+        // 52..63: retail fixed 12000Hz, volume127, 40m one-shots.
+        case 52:case 53:case 54:fixed(SFX_AMMU_AA+uint32_t(id-52),40,127,12000);break;
+        case 55:case 56:case 57:case 58:case 59:fixed(SFX_C_OR_D_UNK_1+uint32_t(id-55),40,127,12000);break;
+        case 60:fixed(SFX_C_OR_D_UNK_3,40,127,12000);break;
+        case 61:fixed(SFX_C_OR_D_UNK_6,40,127,12000);break;
+        case 62:case 63:fixed(SFX_DOCK_BA+uint32_t(id-62),40,127,12000);break;
+        case 64:case 65:fixed(SFX_COLT45_LEFT,40,70,20159);break;
+        case 66:fixed(SFX_PIZZA_THROW,40,70,20159);break;
+        case 67:fixed(SFX_R_OR_S_UNK1,40,70,20159);break;
+        case 68:fixed(SFX_GATE_START_CLU,70,100,20159);break;
+        case 69:fixed(SFX_GATE_STOP_CLU,40,50,20159);break;
+        case 12:case 72:case 73:case 74:
+            index=SFX_BULLET_WALL_1+audio_random_.table(one_shot_counter_%5)%3;range=35;shift=5;
+            volume=int(audio_random_.table(2)%20)+90;break;
+        case 76:index=SFX_PAY_PHONE;range=80;volume=80;break;
+        case 77:case 78:index=SFX_GLASS_SMASH;range=60;volume=id==77?70:60;break;
+        case 79:index=SFX_GLASS_CRACK;range=60;volume=70;break;
+        case 80:
+            index=SFX_GLASS_SHARD_1+(audio_random_.table(4)&3);range=55;
+            frequency=uint32_t(19000+audio_random_.displacement(2000));volume=uint8_t(audio_random_.displacement(11)+25);break;
+        case 81:case 82:
+            index=id==81?SFX_WOODEN_BOX_SMASH:SFX_CARDBOARD_BOX_SMASH;range=60;
+            frequency=uint32_t(18600+audio_random_.displacement(1500));volume=int(audio_random_.table(2)%20)+80;break;
+        case 83:index=SFX_COL_CAR_1+audio_random_.table(3)%5;range=60;shift=4;volume=int(audio_random_.table(2)%30)+70;break;
+        case 84:case 85:index=id==84?SFX_TYRE_BUMP:SFX_HIT_BALL;range=60;shift=4;volume=int(audio_random_.table(2)%30)+60;break;
+        case 87:
+            index=SFX_BULLET_SHELL_HIT_GROUND_2;range=10;
+            frequency=uint32_t(10600+audio_random_.displacement(600));volume=int(audio_random_.table(2)%7)+10;break;
+        // 19/20 queue ped comments 200/201 and 86 selects its sample from the
+        // player's contact surface; neither backend is mounted here.
         default:t.diagnostic="Original one-off sound requires implementation: "+std::to_string(id);return StepResult::unsupported;
         }
         const auto camera=listener();
@@ -237,9 +267,11 @@ StepResult AudioAdapter::dispatch(Vm& vm,Thread& t,uint16_t opcode) {
         if(distance>=range)return StepResult::continued;
         if(distance>=range/5)volume=int(volume*std::pow((range-distance)/(range-range/5),2.f));
         volume=std::min(127,volume);if(volume<=0)return StepResult::continued;
+        ++one_shot_counter_; // retail counter is advanced for every queued one-shot
         auto effect=archive_.sample(index);
-        if(frequency)effect.frequency=uint32_t(frequency);
-        if(jitter){const auto offset=effect.frequency>>jitter;effect.frequency=uint32_t(int(effect.frequency)+int((sound_random_>>16)%(2*offset+1))-int(offset));}
+        if(frequency)effect.frequency=*frequency;
+        if(shift)effect.frequency=uint32_t(int64_t(effect.frequency)+audio_random_.displacement(effect.frequency>>shift));
+        effect.frequency=uint32_t(int64_t(effect.frequency)+displacement);
         for(size_t i=0;i<effect.pcm.size();i+=2){int16_t value;std::memcpy(&value,effect.pcm.data()+i,2);value=int16_t(int(value)*volume/127);std::memcpy(effect.pcm.data()+i,&value,2);}
         if(!play_effect(effect)){t.diagnostic="Original spatial one-off PCM playback failed";return StepResult::unsupported;}
         return StepResult::continued;

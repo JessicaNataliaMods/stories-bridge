@@ -35,7 +35,7 @@ class AudioAdapter {
     std::array<Slot,2> slots_;
     std::optional<int32_t> pending_announcement_;
     bool announcement_started_=false;
-    uint32_t sound_random_=0x4c4353;
+    uint8_t one_shot_counter_=0; // AudioManager's per-queued-sample counter
     SourceAudioRandom audio_random_;
     // AudioLogic::Initialise and ProcessMissionAudio own these source values.
     // PreloadMissionAudio clears the per-slot phone marker; none of the

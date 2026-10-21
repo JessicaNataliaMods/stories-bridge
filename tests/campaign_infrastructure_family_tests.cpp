@@ -15,9 +15,9 @@ static Vm program(uint16_t opcode,const std::vector<int32_t>& inputs,size_t outp
 int main(){try{
     ScmImage image;image.variable_space=image.main_size=64;image.bytes.resize(64);NativeAdapter adapter(image);adapter.world_ready=true;
     adapter.bind_model(12,105,"test_ped",ModelKind::ped);adapter.bind_model(123,445,"test_car",ModelKind::vehicle);
-    NativeCall packet;size_t calls=0;bool accept=true,condition=true,entered=false;
+    NativeCall packet;size_t calls=0;bool accept=true,condition=true,entered=false;int32_t radio=0;
     adapter.execute=guard_native_executor([&](const NativeCall& call){++calls;packet=call;NativeResult r;r.executed=accept;r.condition=condition;r.native_entered=entered;
-        for(size_t i=0;i<7;++i)r.values[i]=int32_t(i+101);if(call.opcode==0x0298)r.values[0]=-1;return r;});
+        for(size_t i=0;i<7;++i)r.values[i]=int32_t(i+101);if(call.opcode==0x0298)r.values[0]=-1;if(call.opcode==0x051E)r.values[0]=radio;return r;});
     auto step=[&](Vm& vm,Thread& t){t.ip=64;vm.backend=[&](Vm& v,Thread& thread,uint16_t op){return adapter.dispatch(v,thread,op);};return vm.step(t,0);};
     const auto x=entity_bits(20.f),y=entity_bits(-10.f),z=entity_bits(-100.f);
     struct Case{uint16_t source,native;std::vector<int32_t> inputs,expected;size_t outputs;};
@@ -73,5 +73,12 @@ int main(){try{
     accept=true;entered=false;adapter.bind_model(124,800,"out_of_bank",ModelKind::vehicle);
     auto bad_counter=program(COMMAND_GET_NUM_OF_MODELS_KILLED_BY_PLAYER,{124},1);Thread invalid_counter;const auto before_counter=calls;
     check(step(bad_counter,invalid_counter)==StepResult::unsupported && calls==before_counter && invalid_counter.ip==64,"Valid streaming model outside actual 800-row kill bank cannot index native memory");
+    // Retail 051E stores eRadioID-1: -1 emergency scanner .. 12 off.
+    for(const auto& row:std::vector<std::pair<int32_t,int32_t>>{{-1,-1},{0,8},{2,0},{10,9},{11,10},{12,10}}) {
+        radio=row.first;auto vm=program(COMMAND_GET_RADIO_CHANNEL,{},1);Thread t;
+        check(step(vm,t)==StepResult::continued && t.locals[0]==row.second,"Native station is shifted by retail -1 before the original station mapping");
+    }
+    for(int32_t invalid:{-2,13}){radio=invalid;auto vm=program(COMMAND_GET_RADIO_CHANNEL,{},1);Thread t;
+        check(step(vm,t)==StepResult::unsupported && t.ip==64 && t.diagnostic.find(std::to_string(invalid))!=std::string::npos,"Unknown native station is refused with its value");}
     std::cout<<"PASS: fourteen original radar/fire/path/kill/vehicle/pickup operations, exact parameter expansion, source unsigned counter and no-replay faults; engine mocked\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -4,6 +4,7 @@
 #include "sa_world_preview.hpp"
 #include "lcs/sa_executor.hpp"
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -140,6 +141,59 @@ NativeResult change_building(const SaWorldSectorBuildingRef& ref,bool restore){
 }
 // Do not turn an executor exception into a retry: it may already have entered the engine.
 NativeResult packet(const NativeCall& call){try{return execute_sa(call);}catch(const std::exception& e){NativeResult r;r.native_entered=true;r.diagnostic=e.what();return r;}}
+}
+namespace {
+struct MembershipFinding {uint8_t problem,list;uint16_t index;uintptr_t entity;uint16_t model;uint32_t flags;int8_t pool;int32_t slot;};
+struct MembershipAudit {MembershipFinding found[24];uint32_t count;uint32_t nodes;bool readable;};
+// Pool tables: buildings 0xB74498, dummies 0xB744A0 (0x38), objects 0xB7449C (0x19C).
+bool audit_slot(uintptr_t entity,int8_t* pool,int32_t* slot,bool* freed){
+    static const uintptr_t roots[3]={0xB74498,0xB744A0,0xB7449C};static const uint32_t strides[3]={0x38,0x38,0x19C};
+    for(int8_t p=0;p<3;++p){uintptr_t items=0,flags=0;int32_t count=0;if(!pool_info(roots[p],&items,&flags,&count))continue;
+        if(entity<items || entity>=items+uintptr_t(count)*strides[p] || (entity-items)%strides[p])continue;
+        *pool=p;*slot=int32_t((entity-items)/strides[p]);*freed=(*reinterpret_cast<const uint8_t*>(flags+*slot)&128)!=0;return true;}
+    *pool=-1;*slot=-1;*freed=false;return false;
+}
+void audit_list(MembershipAudit* audit,uintptr_t head,uint8_t list,uint16_t index,uint32_t next_offset){
+    uintptr_t seen[256];uint32_t seen_count=0;
+    auto node=*reinterpret_cast<const uintptr_t*>(head);
+    for(uint32_t guard=0;node && guard<100000;++guard,node=*reinterpret_cast<const uintptr_t*>(node+next_offset)){
+        ++audit->nodes;const auto entity=*reinterpret_cast<const uintptr_t*>(node);
+        uint8_t problem=0;int8_t pool=-1;int32_t slot=-1;bool freed=false;
+        const bool pooled=entity && audit_slot(entity,&pool,&slot,&freed);
+        const auto vtable=entity?*reinterpret_cast<const uintptr_t*>(entity):0;
+        const auto flags=entity?*reinterpret_cast<const uint32_t*>(entity+0x1C):0;
+        const bool big=(flags&(1u<<8))!=0;
+        if(!entity || freed || vtable==0x863C40)problem=1;                    // destroyed member
+        else {for(uint32_t i=0;i<seen_count;++i)if(seen[i]==entity){problem=2;break;}} // repeated node
+        if(!problem && (list==0)!=big)problem=3;                              // list contradicts BIG flag
+        if(!problem && !pooled)problem=4;                                     // not a native pool entity
+        if(seen_count<256)seen[seen_count++]=entity;
+        if(problem && audit->count<24)audit->found[audit->count++]={problem,list,index,entity,
+            entity?*reinterpret_cast<const uint16_t*>(entity+0x22):uint16_t(0xFFFF),flags,pool,slot};
+        else if(problem)++audit->count;
+    }
+}
+bool run_membership_audit(MembershipAudit* audit){
+    __try{
+        // ms_aLodPtrLists 30x30 single-link {item,next}; ms_aSectors 120x120
+        // {buildings,dummies} double-link {item,next,prev} (CWorld::ShutDown 0x564050).
+        for(uint16_t i=0;i<900;++i)audit_list(audit,0xB99EB8+4u*i,0,i,4);
+        for(uint16_t i=0;i<14400;++i){audit_list(audit,0xB7D0B8+8u*i,1,i,4);audit_list(audit,0xB7D0B8+8u*i+4,2,i,4);}
+        audit->readable=true;return true;
+    }__except(EXCEPTION_EXECUTE_HANDLER){audit->readable=false;return false;}
+}
+}
+std::vector<std::string> sa_world_membership_audit(){
+    MembershipAudit audit{};std::vector<std::string> lines;
+    if(!run_membership_audit(&audit)){lines.push_back("World membership audit unreadable after "+std::to_string(audit.nodes)+" nodes");return lines;}
+    static const char* problems[]={"","destroyed-member","repeated-node","list-contradicts-BIG","non-pool-entity"};
+    static const char* lists[]={"lod","sector-buildings","sector-dummies"};
+    lines.push_back("World membership audit: nodes="+std::to_string(audit.nodes)+" findings="+std::to_string(audit.count));
+    for(uint32_t i=0;i<audit.count && i<24;++i){const auto& f=audit.found[i];char text[256];
+        std::snprintf(text,sizeof(text),"World membership finding: %s list=%s index=%u entity=%08X model=%u flags=%08X pool=%d slot=%d",
+            problems[f.problem],lists[f.list],unsigned(f.index),unsigned(f.entity),unsigned(f.model),unsigned(f.flags),int(f.pool),int(f.slot));
+        lines.emplace_back(text);}
+    return lines;
 }
 void sa_world_sector_world_retiring() noexcept {
     // Every receipt is tagged with the current world generation. Advance before

@@ -142,6 +142,19 @@ bool promoted_dummy_matches(const std::vector<PromotedDummyLink>& links,uintptr_
         [](const PromotedDummyLink& link,uintptr_t address){return link.address<address;});
     return owner!=links.end() && owner->address==entity;
 }
+// CWorld::ms_aLodPtrLists: 30x30 CPtrListSingleLink heads at 0xB99EB8
+// (CWorld::ShutDown walks 0xB99EB8..0xB9ACC8), node {item,next}. A BIG
+// entity is linked there by CEntity::Add; absence means its owner detached it.
+bool in_lod_lists(uintptr_t entity) {
+    for(uintptr_t list=0xB99EB8;list<0xB9ACC8;list+=4) {
+        auto node=*reinterpret_cast<const uintptr_t*>(list);
+        for(int guard=0;node && guard<200000;++guard) {
+            if(*reinterpret_cast<const uintptr_t*>(node)==entity)return true;
+            node=*reinterpret_cast<const uintptr_t*>(node+4);
+        }
+    }
+    return false;
+}
 // Plugin-SDK CEntity: 0x38-byte buildings/dummies, flags at 0x1C,
 // model index at 0x22, CPlaceable matrix at 0x14. Read pools every frame;
 // never keep an entity pointer across a new game or a streaming operation.
@@ -170,7 +183,7 @@ bool apply_pool(uintptr_t address,const WorldRenderRule* rules,const float* came
                 const bool was_big=(bits&(1u<<8))!=0;
                 const bool is_dummy_pool=address==0xB744A0;
                 const bool promoted=is_dummy_pool && promoted_dummy_matches(promoted_dummies,entity);
-                preview_apply_physical_membership(bits,rule,was_big,is_dummy_pool,promoted,
+                preview_apply_physical_membership(bits,rule,was_big,is_dummy_pool,promoted,was_big && !promoted && in_lod_lists(entity),
                     [entity](){reinterpret_cast<void(__thiscall*)(void*)>(0x534AE0)(reinterpret_cast<void*>(entity));},
                     [entity](){reinterpret_cast<void(__thiscall*)(void*)>(0x533020)(reinterpret_cast<void*>(entity));});
             }
@@ -184,6 +197,28 @@ bool apply_pool(uintptr_t address,const WorldRenderRule* rules,const float* came
                 loaded=info && *reinterpret_cast<const uintptr_t*>(info+0x1C) && *reinterpret_cast<const unsigned char*>(info+0xC)==255;
             }
             if(preview_lod_visible(rule,level,std::sqrt(squared),multiplier,loaded))bits|=128;else bits&=~128u;
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+// Script objects (CREATE_OBJECT) and dummies promoted to CObject live in the
+// object pool (0xB7449C, 0x19C-byte CObject). They share the converted map
+// models' single-sided PS2 geometry, so apply the same scoped CULLNONE; no
+// LOD/sector policy applies to dynamic objects.
+bool bind_object_pool(const WorldRenderRule* rules) {
+    __try {
+        const auto pool=*reinterpret_cast<const uintptr_t*>(0xB7449C);if(!pool)return true;
+        const auto items=*reinterpret_cast<const uintptr_t*>(pool);
+        const auto flags=*reinterpret_cast<const uintptr_t*>(pool+4);
+        const auto size=*reinterpret_cast<const int*>(pool+8);
+        if(!items || !flags || size<0 || size>200000)return false;
+        for(int i=0;i<size;++i) {
+            if(*reinterpret_cast<const unsigned char*>(flags+i)&128)continue;
+            const auto entity=items+0x19C*size_t(i);
+            const auto id=*reinterpret_cast<const unsigned short*>(entity+0x22);
+            if(id>=20000 || !rules[id].owned)continue;
+            *reinterpret_cast<unsigned*>(entity+0x1C)&=~(1u<<27);
+            if(!bind_atomic_culling(*reinterpret_cast<const uintptr_t*>(entity+0x18)))return false;
         }
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER){return false;}
@@ -230,7 +265,8 @@ bool SaWorldPreview::service() {
     std::vector<PromotedDummyLink> promoted_dummies;
     if(!promoted_dummy_links(promoted_dummies))return false;
     return apply_pool(0xB74498,rules_.data(),camera,level,multiplier,promoted_dummies) &&
-           apply_pool(0xB744A0,rules_.data(),camera,level,multiplier,promoted_dummies);
+           apply_pool(0xB744A0,rules_.data(),camera,level,multiplier,promoted_dummies) &&
+           bind_object_pool(rules_.data());
 }
 std::uint64_t SaWorldPreview::double_sided_draws() const {return no_cull_draws;}
 bool SaWorldPreview::culling_healthy() const {return !culling_failed;}

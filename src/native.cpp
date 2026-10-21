@@ -3315,8 +3315,13 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
     if(opcode==COMMAND_GET_RADIO_CHANNEL) {
         // Both engines have different station IDs. Preserve native off and
         // map the genres of user-selected SA stations to original counterparts.
-        static constexpr int32_t stations[]={10,8,4,0,8,3,8,0,4,2,7,9,10,10};
-        const auto id=result.values[0];if(id<0 || size_t(id)>=std::size(stations)){thread.diagnostic="Unknown native radio channel";return StepResult::unsupported;}
+        // The table is indexed by SA eRadioID, but retail 051E stores
+        // int8(GetCurrentRadioStationID())-1 (0x48D1D0): script values are
+        // -1 (emergency scanner) .. 12 (off). Original LCS reports the
+        // police/taxi scanner as -1 (Script7 GET_RADIO_CHANNEL).
+        static constexpr int32_t stations[]={-1,8,4,0,8,3,8,0,4,2,7,9,10,10};
+        const auto id=int64_t(result.values[0])+1;
+        if(id<0 || size_t(id)>=std::size(stations)){thread.diagnostic="Unknown native radio channel: "+std::to_string(result.values[0]);return StepResult::unsupported;}
         vm.store(thread,stations[id]);return StepResult::continued;
     }
     if(opcode==COMMAND_GET_CAR_MODEL) {

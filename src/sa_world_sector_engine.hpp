@@ -4,6 +4,7 @@
 #include <functional>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace lcs {
@@ -49,4 +50,9 @@ SaWorldSectorEngine make_sa_world_sector_engine(const std::filesystem::path& wor
 // Call immediately before native CWorld::ShutDown so retained pool receipts
 // from the retiring world can no longer be used against a rebuilt SA world.
 void sa_world_sector_world_retiring() noexcept;
+// Read-only audit of CWorld LOD/sector building/dummy lists, run just before
+// native CWorld::ShutDown. It reports nodes whose entity is already destroyed
+// (free pool slot or CPlaceable vtable), repeated within one list, or linked in
+// a list that contradicts its BIG flag. Nothing is unlinked or repaired.
+std::vector<std::string> sa_world_membership_audit();
 }

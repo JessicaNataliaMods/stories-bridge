@@ -1674,6 +1674,9 @@ void __cdecl on_world_shutdown(){
     // actual world boundary, before native code destroys any sector members.
     retire_campaign_world();
     lcs::sa_world_sector_world_retiring();
+    // Exit crash evidence: report any sector member that ShutDown would
+    // dispatch after its destruction. Read-only; native teardown is unchanged.
+    try{for(const auto& line:lcs::sa_world_membership_audit())log(line);}catch(...){}
     original_world_shutdown();
 }
 void __cdecl on_world_restart(){

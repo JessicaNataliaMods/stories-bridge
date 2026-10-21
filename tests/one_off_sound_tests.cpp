@@ -51,19 +51,23 @@ int main(int argc,char** argv){try {
     Vm original(image);Thread airport;airport.name="aportpk";airport.ip=206453;
     auto args=airport;args.ip+=2;
     for(float value:{1.f,2.f,3.f})original.store(args,bits(value));
-    check(original.parameter(args)==63,"Reported airport sound is original metal collision ID 63");
+    check(original.parameter(args)==63,"Reported airport sound is original ID 63");
     original.backend=[&](Vm& vm,Thread& t,uint16_t op){return audio.dispatch(vm,t,op);};
     check(original.step(airport,0)==StepResult::continued && airport.ip==args.ip && calls==1,"Exact unmodified airport command advances only after PCM playback");
-    bool original_variant=false;
-    for(uint32_t index=SFX_COL_CAR_1;index<SFX_COL_CAR_1+5;++index){const auto source=archive.sample(index);if(source.pcm.size()==played.pcm.size())original_variant=true;}
-    check(original_variant && played.frequency>0,"Effect comes from original collision samples");
+    // Retail jump table 0x3B26C0: 63 is a fixed 12000Hz/127 SFX_DOCK_BB one-shot, inside range/5 at full volume.
+    check(played.pcm==archive.sample(SFX_DOCK_BB).pcm && played.frequency==12000,"Airport ID 63 uses the retail sample and fixed frequency");
     auto command=[&](int32_t id){Vm vm(image);Thread thread;thread.ip=206453;auto arguments=thread;arguments.ip+=2;
         for(float value:{1.f,2.f,3.f})vm.store(arguments,bits(value));
         vm.memory[arguments.ip+1]=uint8_t(id);vm.backend=original.backend;return vm.step(thread,0);};
     playback_ok=false;check(command(63)==StepResult::unsupported,"PCM backend failure cannot silently succeed");playback_ok=true;
     camera={1000,1000,1000};const auto before=calls;check(command(63)==StepResult::continued && calls==before,"Original out-of-range effect culling performs no playback");
-    camera={};for(int id:{3,5,12,18,35,52,53,54,57,58,59,60,61,62,63,64,65,67})check(command(id)==StepResult::continued,"Supported spatial sound family failed");
-    check(command(69)==StepResult::unsupported,"Unknown IDs remain explicit rather than forwarding unrelated SA audio");
+    camera={};for(int id:{0,3,5,12,18,35,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,72,73,74,76,77,78,79,80,81,82,83,84,85,87})
+        check(command(id)==StepResult::continued,"Supported spatial sound family failed");
+    check(command(68)==StepResult::continued && played.pcm.size()==archive.sample(SFX_GATE_START_CLU).pcm.size() && played.pcm!=archive.sample(SFX_GATE_START_CLU).pcm && played.frequency==20159,"Retail 68 is the gate start clunk, not an unknown ID");
+    check(command(77)==StepResult::continued && played.pcm.size()==archive.sample(SFX_GLASS_SMASH).pcm.size(),"Retail glass break is 77, shifted past the LCS-only 52..71 entries");
+    {Vm gate_vm(image);Thread gate;gate.ip=99173;gate_vm.backend=original.backend;camera={1250,-812,14};const auto before_gate=calls;
+     check(gate_vm.step(gate,0)==StepResult::continued && gate.ip==99190 && calls==before_gate+1 && played.frequency==20159,"Reported MAIN gate thread IP 99173 (sound 68 before SLIDE_OBJECT) advances with the retail gate clunk");camera={};}
+    for(int id:{19,20,75,86,88})check(command(id)==StepResult::unsupported,"Unknown or unmounted IDs remain explicit rather than forwarding unrelated SA audio");
     audio.listener={};camera={1000,1000,1000};
     for(int id:{1,7,8,9,10,13,14,16,70}){const auto before_frontend=calls;
         check(command(id)==StepResult::continued && calls==before_frontend+1,"Frontend effect ignores world distance and does not require a spatial listener");
@@ -73,5 +77,5 @@ int main(int argc,char** argv){try {
     const auto purchase=archive.frontend_effect(13),denied=archive.frontend_effect(14);
     check(purchase.pcm!=denied.pcm && denied.pcm.size()>=purchase.pcm.size(),"Denied purchase preserves original lowered left/right pitch and centre layer");
     playback_ok=false;check(command(13)==StepResult::unsupported,"Purchase sound backend failure cannot be reported as played");
-    std::cout<<"PASS: exact aportpk IP 206453, original PCM variants, spatial attenuation/range, dedicated effect callback, playback failure and 18 sound IDs; gameExecuted=false\n";return 0;
+    std::cout<<"PASS: exact aportpk IP 206453, original PCM variants, spatial attenuation/range, dedicated effect callback, playback failure and 38 retail sound IDs; gameExecuted=false\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
