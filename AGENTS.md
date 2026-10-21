@@ -1,5 +1,7 @@
 # Regras do projeto
 
+Uso atual exclusivamente local: não autenticar, acionar conectores, fazer fetch/push ou publicar no GitHub sem uma nova solicitação explícita. Commits locais e verificações offline são permitidos.
+
 Leia CONVENTIONS.md uma vez por contexto. O código canônico fica neste repositório `stories-bridge`; o diretório irmão `private-bridge` é exclusivamente local e nunca deve ser publicado.
 
 - **Sem assets ou dados confidenciais no Git**, inclusive no histórico: ROMs, executáveis, SCM, DFF/TXD/COL, áudio, animações, dumps, tabelas de mapa extraídas, fixtures originais, metadados privados, credenciais e logs ficam no privado. Não seguir links locais para preparar um commit. Não usar `git add -f` ou contornar os hooks.

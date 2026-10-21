@@ -1,5 +1,7 @@
 # Convenções de execução e economia de quota
 
+Decisão21/10: manter o repositório local. Não conectar/autenticar/publicar no GitHub sem nova solicitação explícita.
+
 ## Separação obrigatória público/privado — 21/10/2026
 
 `stories-bridge` é a única fonte canônica publicável. Todos os arquivos de jogo,
