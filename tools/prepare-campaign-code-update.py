@@ -26,13 +26,22 @@ def immutable(relative):
 
 
 def mutable_profile(relative, version):
-    # v82 registers converted zones in gta.dat; every other data file stays shared.
+    # Converted zones (v82) and timecycle (v83) are regenerated; other data stays shared.
     return (version >= 32 and relative.as_posix() == 'data/script/main.scm') or \
-           (version >= 82 and relative.as_posix() == 'data/gta.dat')
+           (version >= 82 and relative.as_posix() in ('data/gta.dat', 'data/lcs/info.zon', 'data/lcs/map.zon')) or \
+           (version >= 83 and relative.as_posix() == 'data/timecyc.dat')
 
 
-def convert_zones_module():
-    spec = importlib.util.spec_from_file_location('convert_zones', ROOT/'tools/convert-zones.py')
+def replace_mutable(target, data):
+    # A file copied from the base may be a hardlink shared with the rollback:
+    # write a new inode instead of modifying the shared one.
+    temporary = target.with_name(target.name + '.new')
+    temporary.write_bytes(data)
+    os.replace(temporary, target)
+
+
+def tool_module(name):
+    spec = importlib.util.spec_from_file_location(name.replace('-', '_'), ROOT/'tools'/(name+'.py'))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -71,7 +80,9 @@ def prepare(base, output, version, notes, refresh, original_data):
                     linked += 1
             else:
                 if target.exists() and target.stat().st_nlink != 1:
-                    raise ValueError('Mutable stage metadata shares an inode: '+str(relative))
+                    if not mutable_profile(relative, version):
+                        raise ValueError('Mutable stage metadata shares an inode: '+str(relative))
+                    target.unlink()  # drop only this stage's link to a regenerated data file
                 shutil.copy2(source, target)
     source_asi = ROOT/'build/Release/LcsSaBridge.asi'
     target_asi = output/'LcsSaBridge.asi'
@@ -302,19 +313,17 @@ def prepare(base, output, version, notes, refresh, original_data):
         # name zones replace SA's INFO.ZON, one LCS map zone replaces MAP.ZON.
         source_zones = output/'metadata/lcs-source/DATA/GTA3.ZON.bin'
         gxt = output/'text/american.gxt'
-        info, mapzones, zone_report = convert_zones_module().convert(source_zones.read_bytes().decode('ascii'), gxt)
+        info, mapzones, zone_report = tool_module('convert-zones').convert(source_zones.read_bytes().decode('ascii'), gxt)
         written = {}
         for name, text in (('info.zon', info), ('map.zon', mapzones)):
             target = output/'data/lcs'/name
-            if target.exists() and target.stat().st_nlink != 1:
-                raise ValueError('Mutable zone file shares a rollback inode: '+name)
-            target.write_bytes(text.encode('ascii'))
+            replace_mutable(target, text.encode('ascii'))
             written[name] = digest(target)
         profile = output/'data/gta.dat'
         lines = (base/'data/gta.dat').read_text(encoding='ascii').splitlines()
         replaced = {r'IPL DATA\MAP.ZON': r'IPL DATA\LCS\MAP.ZON', r'IPL DATA\INFO.ZON': r'IPL DATA\LCS\INFO.ZON'}
-        if sum(line in replaced for line in lines) != 2:
-            raise ValueError('Base gta.dat must register exactly the native SA MAP.ZON and INFO.ZON')
+        if sum(line in replaced for line in lines) != 2 and sum(line in replaced.values() for line in lines) != 2:
+            raise ValueError('Base gta.dat must register exactly the native or converted MAP.ZON and INFO.ZON')
         temporary = profile.with_suffix('.dat.new')
         temporary.write_text('\n'.join(replaced.get(line, line) for line in lines) + '\n', encoding='ascii')
         os.replace(temporary, profile)  # breaks the shared rollback inode
@@ -322,6 +331,16 @@ def prepare(base, output, version, notes, refresh, original_data):
                            gxtSha256=digest(gxt), infoSha256=written['info.zon'], mapSha256=written['map.zon'],
                            profileSha256=digest(profile))
         campaign['zones82'] = zone_report
+    if version >= 83:
+        # Retail LCS timecycle (GAME.DTZ) over the user's native SA timecyc.dat
+        # (tools/convert-timecyc.py); SA-only fields stay native.
+        rom = ROOT/'local/originals/lcs-ps2'
+        native = pathlib.Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])/'data/timecyc.dat'
+        text, cycle_report = tool_module('convert-timecyc').convert_files(rom, native)
+        target = output/'data/timecyc.dat'
+        replace_mutable(target, text.encode('ascii'))
+        cycle_report.update(rom=str(rom), native=str(native), outputSha256=digest(target))
+        campaign['timecycle83'] = cycle_report
     (output/'metadata/campaign.json').write_text(json.dumps(campaign, indent=2))
     preview = json.loads((output/'metadata/map-preview.json').read_text())
     preview['version'] = str(version)

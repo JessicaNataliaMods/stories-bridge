@@ -287,6 +287,16 @@ def validate_campaign(package, map_report):
         for native,converted in (('IPL DATA\\MAP.ZON','IPL DATA\\LCS\\MAP.ZON'),('IPL DATA\\INFO.ZON','IPL DATA\\LCS\\INFO.ZON')):
             if expected_profile.count(native+'\n')!=1:raise ValueError('Base profile lacks native zone registration')
             expected_profile=expected_profile.replace(native+'\n',converted+'\n')
+    if campaign.get('version',0)>=83:
+        # Converted timecycle must regenerate byte-identically from GAME.DTZ and native SA data.
+        cycle=campaign['timecycle83']
+        spec=importlib.util.spec_from_file_location('convert_timecyc',pathlib.Path(__file__).with_name('convert-timecyc.py'))
+        timecyc=importlib.util.module_from_spec(spec);spec.loader.exec_module(timecyc)
+        text,regenerated=timecyc.convert_files(cycle['rom'],cycle['native'])
+        if regenerated['sourceChunkSha256']!=cycle['sourceChunkSha256'] or regenerated['nativeSha256']!=cycle['nativeSha256']:
+            raise ValueError('Timecycle conversion inputs changed')
+        if (package/'data/timecyc.dat').read_bytes()!=text.encode('ascii') or digest(package/'data/timecyc.dat')!=cycle['outputSha256']:
+            raise ValueError('Converted timecycle does not match its source')
     fleet_ids=set()
     fleet_handling=set()
     if campaign.get('vehicleFleet'):
