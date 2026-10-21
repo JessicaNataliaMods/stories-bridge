@@ -242,6 +242,70 @@ void report_fast_vehicles() {
         log(text);
     }
 }
+// Lane evidence (read-only): the car path link SA's autopilot is following
+// (vehicle +0x3A4/+0x3A6, links at 0x96F974[area]+index*14), the lane bytes
+// it reads (+0xB) and the car's measured signed offset from that link.
+struct LaneSample {int32_t slot;uint16_t model,link,next;int8_t lane,next_lane;uint8_t status,lanes,width;
+                   float position[3],forward[2],link_position[2],link_dir[2],lateral,along;uint8_t raw[16];};
+size_t collect_lane_samples(LaneSample* out,size_t capacity) {
+    size_t used=0;
+    __try {
+        const auto focus=*reinterpret_cast<const uint8_t*>(0xB7CD74);if(focus>1)return 0;
+        const auto player=*reinterpret_cast<const uintptr_t*>(0xB7CD98+uintptr_t(focus)*0x190);if(!player)return 0;
+        const auto player_matrix=*reinterpret_cast<const uintptr_t*>(player+0x14);
+        const auto* me=reinterpret_cast<const float*>(player_matrix?player_matrix+0x30:player+4);
+        const auto pool=*reinterpret_cast<const uintptr_t*>(0xB74494);if(!pool)return 0;
+        const auto items=*reinterpret_cast<const uintptr_t*>(pool),flags=*reinterpret_cast<const uintptr_t*>(pool+4);
+        const auto count=*reinterpret_cast<const int32_t*>(pool+8);
+        if(!items || !flags || count<0 || count>10000)return 0;
+        for(int32_t slot=0;slot<count && used<capacity;++slot) {
+            if(*reinterpret_cast<const uint8_t*>(flags+slot)&128)continue;
+            const auto vehicle=items+0xA18*uintptr_t(slot);
+            const auto driver=*reinterpret_cast<const uintptr_t*>(vehicle+0x460);
+            if(!driver || driver==player)continue;
+            const auto matrix=*reinterpret_cast<const uintptr_t*>(vehicle+0x14);if(!matrix)continue;
+            const auto* p=reinterpret_cast<const float*>(matrix+0x30);
+            if(std::fabs(p[0]-me[0])>60.f || std::fabs(p[1]-me[1])>60.f)continue;
+            const auto link=*reinterpret_cast<const uint16_t*>(vehicle+0x3A4);
+            if(link==0xFFFF)continue;
+            const auto navs=*reinterpret_cast<const uintptr_t*>(0x96F974+4*uintptr_t(link>>10));if(!navs)continue;
+            const auto nav=navs+14*uintptr_t(link&0x3FF);
+            auto& s=out[used++];
+            s.slot=slot;s.model=*reinterpret_cast<const uint16_t*>(vehicle+0x22);s.link=link;
+            s.next=*reinterpret_cast<const uint16_t*>(vehicle+0x3A6);
+            s.lane=*reinterpret_cast<const int8_t*>(vehicle+0x3B7);s.next_lane=*reinterpret_cast<const int8_t*>(vehicle+0x3B8);
+            s.status=uint8_t(*reinterpret_cast<const uint8_t*>(vehicle+0x36)>>3);
+            for(int k=0;k<3;++k)s.position[k]=p[k];
+            s.forward[0]=*reinterpret_cast<const float*>(matrix+0x10);s.forward[1]=*reinterpret_cast<const float*>(matrix+0x14);
+            s.link_position[0]=*reinterpret_cast<const int16_t*>(nav)/8.f;s.link_position[1]=*reinterpret_cast<const int16_t*>(nav+2)/8.f;
+            s.link_dir[0]=*reinterpret_cast<const int8_t*>(nav+8)/100.f;s.link_dir[1]=*reinterpret_cast<const int8_t*>(nav+9)/100.f;
+            s.width=*reinterpret_cast<const uint8_t*>(nav+0xA);s.lanes=*reinterpret_cast<const uint8_t*>(nav+0xB);
+            const float dx=p[0]-s.link_position[0],dy=p[1]-s.link_position[1];
+            s.along=dx*s.link_dir[0]+dy*s.link_dir[1];
+            s.lateral=dx*s.link_dir[1]-dy*s.link_dir[0]; // + = right of the link direction
+            for(int k=0;k<16;++k)s.raw[k]=*reinterpret_cast<const uint8_t*>(vehicle+0x3B0+k);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return used;
+}
+uint32_t last_lane_sample=0;unsigned lane_sample_lines=0;
+void report_lane_samples(uint32_t now) {
+    if(lane_sample_lines>=600 || now-last_lane_sample<3000)return;
+    last_lane_sample=now;
+    LaneSample found[6];const auto count=collect_lane_samples(found,6);
+    for(size_t i=0;i<count;++i) {
+        const auto& s=found[i];char raw[40];
+        for(int k=0;k<16;++k)std::snprintf(raw+2*k,3,"%02X",s.raw[k]);
+        char text[400];
+        std::snprintf(text,sizeof(text),"Traffic lane evidence: slot=%d model=%u status=%u pos=(%.1f,%.1f,%.1f) fwd=(%.2f,%.2f) link=%u:%u next=%u:%u "
+            "linkPos=(%.1f,%.1f) linkDir=(%.2f,%.2f) lanes=L%u/R%u width=%u lane=%d nextLane=%d lateral=%.2f along=%.1f raw3B0=%s",
+            int(s.slot),unsigned(s.model),unsigned(s.status),s.position[0],s.position[1],s.position[2],s.forward[0],s.forward[1],
+            unsigned(s.link>>10),unsigned(s.link&0x3FF),unsigned(s.next>>10),unsigned(s.next&0x3FF),
+            s.link_position[0],s.link_position[1],s.link_dir[0],s.link_dir[1],unsigned(s.lanes&7),unsigned((s.lanes>>3)&7),unsigned(s.width),
+            int(s.lane),int(s.next_lane),s.lateral,s.along,raw);
+        log(text);++lane_sample_lines;
+    }
+}
 struct Campaign {
     lcs::ScmImage image;
     lcs::NativeAdapter adapter;
@@ -1192,6 +1256,7 @@ struct Campaign {
         });
         frame_updates.run("spatial-mission-speech",lcs::UpdateScope::auxiliary,now,"Cannot update original positioned mission speech",[&](){return audio.tick_spatial();});
         report_fast_vehicles();
+        report_lane_samples(now);
         for(const auto& event:events)if(event.result==lcs::StepResult::unsupported || event.result==lcs::StepResult::failed) {
             const auto fault=runtime.failure(event.id);
             if(!fault) {
@@ -1350,6 +1415,7 @@ void retire_campaign_world() {
     campaign.reset();
     world_preview.reset();player_skins.reset();gameplay_skins.reset();
     reported_fast_vehicles.clear();
+    last_lane_sample=0;
     bindings.clear();equivalent_bindings.clear();marker_process={};
     inspected_world=false;world_failure=false;last_game_time=0;
     last_bootstrap_stage=UINT32_MAX;
