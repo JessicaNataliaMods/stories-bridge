@@ -105,8 +105,8 @@ def check_graph(regions):
                     end = regions[lower[0]]['nodes'][lower[1]]
                     if (end[2] - nav[0]) * nav[4] + (end[3] - nav[1]) * nav[5] <= 0:
                         raise ValueError('Native navigation direction does not point at its lower-address endpoint')
-                elif packed != 65535:
-                    raise ValueError('Pedestrian connection must have invalid navigation sentinel')
+                elif packed != 0:
+                    raise ValueError('Pedestrian connection must carry the native zero navigation address')
                 edges[(area, i, a, b)] = j
                 cross_area += area != a
         if sorted(used) != list(range(len(r['targets']))):
@@ -169,7 +169,7 @@ def compare_ps2(regions, rom, directory):
         n = r['nodes'][local]
         is_car = ident < vehicles
         expected_flags = (a & 63) | ((a & 128) >> 1) | ((b & 1) << 7)
-        expected_flags |= (((a >> 5) & 1) | (32 if is_car and (b & 24) else 16)) << 8
+        expected_flags |= (((a >> 5) & 1) | ((32 if b & 24 else 16) if is_car else 0)) << 8
         expected_flags |= (c & 15) << 16
         if tuple(n[2:5]) != xyz or n[9] != (width * 2 if is_car else width) or n[10] != group or n[11] != expected_flags or (local < r['cars']) != is_car:
             raise ValueError('Original position/width/group/node flags/type changed')

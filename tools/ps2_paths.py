@@ -79,7 +79,8 @@ def node_flags(node, vehicle):
     # Only semantic bits are transferred. PS2 padding/unused bits contain 0xAA.
     first = (a & 0x3f) | ((a & 0x80) >> 1) | ((b & 1) << 7)
     speed = (b >> 3) & 3
-    second = ((a & 0x20) >> 5) | (0x20 if vehicle and speed else 0x10)
+    # Highway/not-highway are vehicle flags: retail SA ped nodes never set bits 12/13.
+    second = ((a & 0x20) >> 5) | ((0x20 if speed else 0x10) if vehicle else 0)
     return first | (second << 8) | ((c & 15) << 16)
 
 
@@ -144,7 +145,8 @@ def encode_graph(graph):
             for j in range(n[6], n[6] + (n[9] & 15)):
                 connection = graph['connections'][j]
                 links.extend(struct.pack('<HH', *addresses[connection & 0x3fff]))
-                nav_links.extend(struct.pack('<H', nav_addresses[graph['vehicleLinks'][j]] if ident < graph['vehicles'] else 0xffff))
+                # Retail SA pedestrian links carry navigation address 0 (all 80686).
+                nav_links.extend(struct.pack('<H', nav_addresses[graph['vehicleLinks'][j]] if ident < graph['vehicles'] else 0))
                 lengths.append(graph['lengths'][j])
                 intersections.append(((connection >> 15) & 1) | (((connection >> 14) & 1) << 1))
             base += n[9] & 15

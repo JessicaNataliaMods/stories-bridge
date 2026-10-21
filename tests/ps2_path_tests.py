@@ -61,7 +61,8 @@ class PathsTests(unittest.TestCase):
         regions, _ = self.native()
         r = regions[35]
         self.assertEqual(r['intersections'][1], 3)
-        self.assertEqual(r['navLinks'][1], 65535)
+        self.assertEqual(r['navLinks'][1], 0)
+        self.assertEqual(r['nodes'][1][11] & 0x3000, 0)  # no highway flags on pedestrian nodes
         self.assertEqual(r['nodes'][1][9], 16)
 
     def test_ps2_padding_does_not_become_native_flags(self):
