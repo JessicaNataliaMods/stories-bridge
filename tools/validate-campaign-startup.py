@@ -122,6 +122,7 @@ def validate(package,source,validation_build=None):
     if campaign.get('version',0)>=64:paths.append('metadata/lcs-source/AUDIO/MUSIC/CITY.VB.bin')
     if campaign.get('version',0)>=66:
         paths+=['metadata/lcs-source/DATA/DEFAULT.IDE.bin','metadata/lcs-source/DATA/HANDLING.CFG.bin']
+    if campaign.get('version',0)>=82:paths+=['data/lcs/info.zon','data/lcs/map.zon','metadata/lcs-source/DATA/GTA3.ZON.bin']
     if campaign.get('version',0)>=63:
         paths+=['metadata/script-marker-resources.json','markers/rw-assets/lcs_marker1.dff',
                 'markers/rw-assets/lcs_marker2.dff','markers/rw-assets/lcs_marker5.dff',

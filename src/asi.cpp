@@ -66,6 +66,8 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "lcs/pause_menu.hpp"
 #include <array>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -198,6 +200,47 @@ void prepare_initial_car_reward_hooks() {
     initial_car_reward_hooks_attempted=true;
     if(!lcs::sa_install_car_reward_hook())
         log("Reward storage hooks refused before native garage processing");
+}
+// Traffic evidence (read-only): non-player vehicles moving faster than ~300 km/h.
+// CPhysical::m_vecMoveSpeed (+0x44) is in units per 1/50 s, so km/h = |v|*180.
+struct FastVehicle {int32_t slot;uint8_t generation,status;uint16_t model;float position[3],speed[3];};
+size_t collect_fast_vehicles(FastVehicle* out,size_t capacity) {
+    size_t used=0;
+    __try {
+        const auto pool=*reinterpret_cast<const uintptr_t*>(0xB74494);if(!pool)return 0;
+        const auto items=*reinterpret_cast<const uintptr_t*>(pool),flags=*reinterpret_cast<const uintptr_t*>(pool+4);
+        const auto count=*reinterpret_cast<const int32_t*>(pool+8);
+        if(!items || !flags || count<0 || count>10000)return 0;
+        const auto focus=*reinterpret_cast<const uint8_t*>(0xB7CD74);
+        const auto player=focus<2?*reinterpret_cast<const uintptr_t*>(0xB7CD98+uintptr_t(focus)*0x190):0;
+        for(int32_t slot=0;slot<count && used<capacity;++slot) {
+            const auto generation=*reinterpret_cast<const uint8_t*>(flags+slot);if(generation&128)continue;
+            const auto vehicle=items+0xA18*uintptr_t(slot);
+            const auto driver=*reinterpret_cast<const uintptr_t*>(vehicle+0x460);
+            if(player && driver==player)continue;
+            const auto* v=reinterpret_cast<const float*>(vehicle+0x44);
+            const float squared=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
+            if(!(squared>1.7f*1.7f))continue;
+            const auto matrix=*reinterpret_cast<const uintptr_t*>(vehicle+0x14);
+            const auto* p=reinterpret_cast<const float*>(matrix?matrix+0x30:vehicle+4);
+            out[used++]={slot,generation,uint8_t(*reinterpret_cast<const uint8_t*>(vehicle+0x36)>>3),
+                         *reinterpret_cast<const uint16_t*>(vehicle+0x22),{p[0],p[1],p[2]},{v[0],v[1],v[2]}};
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return used;
+}
+std::set<std::pair<int32_t,uint8_t>> reported_fast_vehicles;
+void report_fast_vehicles() {
+    FastVehicle found[16];const auto count=collect_fast_vehicles(found,16);
+    for(size_t i=0;i<count;++i) {
+        const auto& f=found[i];
+        if(reported_fast_vehicles.size()>512 || !reported_fast_vehicles.insert({f.slot,f.generation}).second)continue;
+        char text[256];
+        std::snprintf(text,sizeof(text),"Traffic speed evidence: vehicle slot=%d gen=%u model=%u status=%u pos=(%.1f,%.1f,%.1f) speed=(%.3f,%.3f,%.3f) kmh=%.0f",
+            int(f.slot),unsigned(f.generation),unsigned(f.model),unsigned(f.status),f.position[0],f.position[1],f.position[2],
+            f.speed[0],f.speed[1],f.speed[2],std::sqrt(f.speed[0]*f.speed[0]+f.speed[1]*f.speed[1]+f.speed[2]*f.speed[2])*180.0f);
+        log(text);
+    }
 }
 struct Campaign {
     lcs::ScmImage image;
@@ -1148,6 +1191,7 @@ struct Campaign {
             return ok;
         });
         frame_updates.run("spatial-mission-speech",lcs::UpdateScope::auxiliary,now,"Cannot update original positioned mission speech",[&](){return audio.tick_spatial();});
+        report_fast_vehicles();
         for(const auto& event:events)if(event.result==lcs::StepResult::unsupported || event.result==lcs::StepResult::failed) {
             const auto fault=runtime.failure(event.id);
             if(!fault) {
@@ -1305,6 +1349,7 @@ void retire_campaign_world() {
     // two Process callbacks, retaining stale handles and a halted VM otherwise.
     campaign.reset();
     world_preview.reset();player_skins.reset();gameplay_skins.reset();
+    reported_fast_vehicles.clear();
     bindings.clear();equivalent_bindings.clear();marker_process={};
     inspected_world=false;world_failure=false;last_game_time=0;
     last_bootstrap_stage=UINT32_MAX;

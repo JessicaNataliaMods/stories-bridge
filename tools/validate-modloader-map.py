@@ -270,6 +270,23 @@ def validate_campaign(package, map_report):
     base=pathlib.Path(campaign['basePackage'])
     original_profile=(base/'data/gta.dat').read_text()
     expected_profile=original_profile.replace('COLFILE 0 MODELS\\LCS\\WORLD.COL','IDE DATA\\LCS\\CAMPAIGN-ANCHORS.IDE\nCOLFILE 0 MODELS\\LCS\\WORLD.COL')+'IPL DATA\\LCS\\CAMPAIGN-ANCHORS.IPL\n'
+    if campaign.get('version',0)>=82:
+        # Converted zones replace the native SA INFO.ZON/MAP.ZON registrations
+        # and must regenerate byte-identically from the user's GTA3.ZON.
+        zones=campaign['zones82']
+        spec=importlib.util.spec_from_file_location('convert_zones',pathlib.Path(__file__).with_name('convert-zones.py'))
+        converter=importlib.util.module_from_spec(spec);spec.loader.exec_module(converter)
+        source=package/zones['source']
+        if digest(source)!=zones['sourceSha256'] or digest(package/'text/american.gxt')!=zones['gxtSha256']:
+            raise ValueError('Zone conversion inputs changed')
+        info,mapzones,_=converter.convert(source.read_bytes().decode('ascii'),package/'text/american.gxt')
+        for name,text,key in (('info.zon',info,'infoSha256'),('map.zon',mapzones,'mapSha256')):
+            mounted=package/'data/lcs'/name
+            if mounted.read_bytes()!=text.encode('ascii') or digest(mounted)!=zones[key]:
+                raise ValueError('Converted zone file does not match its source: '+name)
+        for native,converted in (('IPL DATA\\MAP.ZON','IPL DATA\\LCS\\MAP.ZON'),('IPL DATA\\INFO.ZON','IPL DATA\\LCS\\INFO.ZON')):
+            if expected_profile.count(native+'\n')!=1:raise ValueError('Base profile lacks native zone registration')
+            expected_profile=expected_profile.replace(native+'\n',converted+'\n')
     fleet_ids=set()
     fleet_handling=set()
     if campaign.get('vehicleFleet'):

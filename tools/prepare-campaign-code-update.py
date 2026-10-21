@@ -6,6 +6,7 @@ unchanged data/model/audio assets use local hardlinks to avoid duplicating GBs.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -22,6 +23,19 @@ def digest(path):
 
 def immutable(relative):
     return relative.parts[0] in ('data', 'models', 'anim', 'text') or relative.parts[:2] == ('metadata', 'lcs-source')
+
+
+def mutable_profile(relative, version):
+    # v82 registers converted zones in gta.dat; every other data file stays shared.
+    return (version >= 32 and relative.as_posix() == 'data/script/main.scm') or \
+           (version >= 82 and relative.as_posix() == 'data/gta.dat')
+
+
+def convert_zones_module():
+    spec = importlib.util.spec_from_file_location('convert_zones', ROOT/'tools/convert-zones.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def prepare(base, output, version, notes, refresh, original_data):
@@ -48,7 +62,7 @@ def prepare(base, output, version, notes, refresh, original_data):
             if relative.parts[0] == 'metadata' and source.name.endswith('-notes.md'):
                 continue
             target = output/relative
-            if immutable(relative) and not (version >= 32 and relative.as_posix() == 'data/script/main.scm'):
+            if immutable(relative) and not mutable_profile(relative, version):
                 if target.exists():
                     if target.is_symlink() or target.stat().st_size != source.stat().st_size or digest(target) != digest(source):
                         raise ValueError('Existing immutable stage resource differs: '+str(relative))
@@ -283,6 +297,31 @@ def prepare(base, output, version, notes, refresh, original_data):
             sourceTypes=[2,5],nativeTypeAliases=False,frameCall='725067',shutdownCall='723391',
             resourceManifest='metadata/script-marker-resources.json',gameExecuted=False,
             visualGameplayVerified=False)
+    if version >= 82:
+        # Native SA zones from the user's GTA3.ZON (tools/convert-zones.py): LCS
+        # name zones replace SA's INFO.ZON, one LCS map zone replaces MAP.ZON.
+        source_zones = output/'metadata/lcs-source/DATA/GTA3.ZON.bin'
+        gxt = output/'text/american.gxt'
+        info, mapzones, zone_report = convert_zones_module().convert(source_zones.read_bytes().decode('ascii'), gxt)
+        written = {}
+        for name, text in (('info.zon', info), ('map.zon', mapzones)):
+            target = output/'data/lcs'/name
+            if target.exists() and target.stat().st_nlink != 1:
+                raise ValueError('Mutable zone file shares a rollback inode: '+name)
+            target.write_bytes(text.encode('ascii'))
+            written[name] = digest(target)
+        profile = output/'data/gta.dat'
+        lines = (base/'data/gta.dat').read_text(encoding='ascii').splitlines()
+        replaced = {r'IPL DATA\MAP.ZON': r'IPL DATA\LCS\MAP.ZON', r'IPL DATA\INFO.ZON': r'IPL DATA\LCS\INFO.ZON'}
+        if sum(line in replaced for line in lines) != 2:
+            raise ValueError('Base gta.dat must register exactly the native SA MAP.ZON and INFO.ZON')
+        temporary = profile.with_suffix('.dat.new')
+        temporary.write_text('\n'.join(replaced.get(line, line) for line in lines) + '\n', encoding='ascii')
+        os.replace(temporary, profile)  # breaks the shared rollback inode
+        zone_report.update(source='metadata/lcs-source/DATA/GTA3.ZON.bin', sourceSha256=digest(source_zones),
+                           gxtSha256=digest(gxt), infoSha256=written['info.zon'], mapSha256=written['map.zon'],
+                           profileSha256=digest(profile))
+        campaign['zones82'] = zone_report
     (output/'metadata/campaign.json').write_text(json.dumps(campaign, indent=2))
     preview = json.loads((output/'metadata/map-preview.json').read_text())
     preview['version'] = str(version)
@@ -291,7 +330,7 @@ def prepare(base, output, version, notes, refresh, original_data):
     preserved = 0
     for source in base.rglob('*'):
         relative = source.relative_to(base)
-        if source.is_file() and immutable(relative) and not (version >= 32 and relative.as_posix() == 'data/script/main.scm'):
+        if source.is_file() and immutable(relative) and not mutable_profile(relative, version):
             if digest(source) != digest(output/relative):
                 raise ValueError('Original immutable resource changed: '+str(relative))
             preserved += 1

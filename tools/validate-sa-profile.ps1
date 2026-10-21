@@ -49,6 +49,16 @@ foreach($taskProfile in @((Join-Path $taskGame 'data\default.dat'),$ProfileFile)
                 $taskCarrierAudit=Get-Content -LiteralPath (Join-Path $taskWorld 'metadata\campaign-anchors.json') -Raw|ConvertFrom-Json
                 if($taskCarrierAudit.gameExecuted -or $taskCarrierAudit.approvedMapMediaChanged){throw 'Invalid campaign carrier audit'}
             }
+            elseif($taskType -eq 'IPL' -and $taskRelative -in @('DATA\LCS\INFO.ZON','DATA\LCS\MAP.ZON')){
+                # Converted LCS zones (tools/convert-zones.py): one zone section only, navigation type 0 or map type 3.
+                $taskZoneType=if($taskRelative -ieq 'DATA\LCS\INFO.ZON'){'0'}else{'3'}
+                $taskZoneLines=@([IO.File]::ReadLines($taskPath) | ForEach-Object {$_.Trim()} | Where-Object {$_})
+                if($taskZoneLines.Count -lt 3 -or $taskZoneLines[0] -ne 'zone' -or $taskZoneLines[-1] -ne 'end'){throw "Invalid converted zone file: $taskRelative"}
+                foreach($taskZone in $taskZoneLines[1..($taskZoneLines.Count-2)]){
+                    $taskZ=@($taskZone -split ',' | ForEach-Object {$_.Trim()})
+                    if($taskZ.Count -ne 10 -or $taskZ[1] -ne $taskZoneType -or $taskZ[0].Length -gt 7 -or $taskZ[9].Length -gt 7){throw "Invalid converted zone row: $taskZone"}
+                }
+            }
             elseif($taskType -eq 'IPL' -and $taskRelative -notin @('DATA\MAP.ZON','DATA\INFO.ZON') -and $taskRelative -notmatch '^DATA\\LCS\\WORLD[0-9]*\.IPL$'){throw "Unexpected SA world placement file: $taskRelative"}
         }
     }
