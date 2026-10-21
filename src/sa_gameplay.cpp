@@ -1,0 +1,302 @@
+#include <windows.h>
+#include "sa_gameplay.hpp"
+#include "lcs/sa_executor.hpp"
+#include <fstream>
+#include <sstream>
+#include <cstring>
+#include <algorithm>
+namespace lcs {
+namespace {
+uintptr_t load_native(const char* path,const char* alias,int animations,int32_t* index,bool registered=false) {
+#ifdef LCS_GAMEPLAY_ANIMATION_LOAD
+    return LCS_GAMEPLAY_ANIMATION_LOAD(path,alias,animations,index,registered);
+#else
+    uintptr_t stream=0;
+    __try {
+        const auto count=*reinterpret_cast<const int32_t*>(0xB4EA30),total=*reinterpret_cast<const int32_t*>(0xB4EA2C);
+        if(count<0 || count>180 || total<0 || animations<=0)return 0;
+        // Aliases belong exclusively to this package. Never replace a block
+        // supplied by another plugin or load a block twice into the registry.
+        const auto existing=reinterpret_cast<uintptr_t(__cdecl*)(const char*)>(0x4D3940)(alias);
+        if(existing && (!registered || *reinterpret_cast<const uint8_t*>(existing+0x10)))return 0;
+        if(!existing && count>=180)return 0;
+        // A previously owned unloaded block keeps its hierarchy range. New
+        // blocks must fit before LoadAnimFile can write the fixed SA stores.
+        if((!existing || !*reinterpret_cast<const int32_t*>(existing+0x18)) && total+animations>2500)return 0;
+        stream=reinterpret_cast<uintptr_t(__cdecl*)(int,int,const char*)>(0x7ECEF0)(2,1,path);
+        if(!stream)return 0;
+        const char uncompressed[1][32]={};
+        reinterpret_cast<void(__cdecl*)(uintptr_t,bool,const void*)>(0x4D47F0)(stream,true,uncompressed);
+        const auto closed=reinterpret_cast<int(__cdecl*)(uintptr_t,void*)>(0x7ECE20)(stream,nullptr);stream=0;
+        if(!closed)return 0;
+        const auto block=reinterpret_cast<uintptr_t(__cdecl*)(const char*)>(0x4D3940)(alias);
+        *index=reinterpret_cast<int32_t(__cdecl*)(const char*)>(0x4D3990)(alias);
+        if(!block || *index<0 || *index>=180 || !*reinterpret_cast<const uint8_t*>(block+0x10))return 0;
+        reinterpret_cast<void(__cdecl*)(int32_t)>(0x4D3FB0)(*index);
+        return block;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        if(stream)reinterpret_cast<int(__cdecl*)(uintptr_t,void*)>(0x7ECE20)(stream,nullptr);
+        return 0;
+    }
+#endif
+}
+bool fade_owned(int32_t handle,uintptr_t hierarchy) {
+#ifdef LCS_GAMEPLAY_ANIMATION_FADE
+    return LCS_GAMEPLAY_ANIMATION_FADE(handle,hierarchy);
+#else
+    __try {
+        const auto ped=reinterpret_cast<uintptr_t(__cdecl*)(int32_t)>(0x54FF90)(handle);
+        if(!ped)return true; // entity already deleted: its associations died with it
+        const auto clump=*reinterpret_cast<const uintptr_t*>(ped+0x18);if(!clump)return false;
+        const auto offset=*reinterpret_cast<const uint32_t*>(0xB5F878);if(offset>4096)return false;
+        const auto data=*reinterpret_cast<const uintptr_t*>(clump+offset);if(!data)return false;
+        auto link=*reinterpret_cast<const uintptr_t*>(data);unsigned visited=0;
+        while(link) {
+            if(++visited>1024)return false;
+            const auto association=link-4;
+            if(*reinterpret_cast<const uintptr_t*>(association+0x14)==hierarchy) {
+                *reinterpret_cast<float*>(association+0x1C)=-8.0f;
+                *reinterpret_cast<uint16_t*>(association+0x2E)|=8;
+            }
+            link=*reinterpret_cast<const uintptr_t*>(link);
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+#endif
+}
+uintptr_t play_native(int32_t handle,uintptr_t block,const char* animation,uint16_t flags,bool blend=false) {
+#ifdef LCS_GAMEPLAY_ANIMATION_PLAY
+    return LCS_GAMEPLAY_ANIMATION_PLAY(handle,block,animation,flags,blend);
+#else
+    __try {
+        const auto ped=reinterpret_cast<uintptr_t(__cdecl*)(int32_t)>(0x54FF90)(handle);if(!ped)return 0;
+        const auto clump=*reinterpret_cast<const uintptr_t*>(ped+0x18);if(!clump)return 0;
+        const auto hierarchy=reinterpret_cast<uintptr_t(__cdecl*)(const char*,uintptr_t)>(0x4D42F0)(animation,block);if(!hierarchy)return 0;
+        const auto association=blend ? reinterpret_cast<uintptr_t(__cdecl*)(uintptr_t,uintptr_t,int,float)>(0x4D4410)(clump,hierarchy,flags,3.0f) :
+            reinterpret_cast<uintptr_t(__cdecl*)(uintptr_t,uintptr_t,int)>(0x4D4330)(clump,hierarchy,flags);
+        if(!association)return 0;
+        *reinterpret_cast<float*>(association+0x24)=1.0f;return hierarchy;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
+#endif
+}
+enum class RiotStatus {error,removed,interrupted,paused,ready,playing};
+RiotStatus riot_status(int32_t handle,uintptr_t hierarchy,bool stop_loop) {
+#ifdef LCS_GAMEPLAY_RIOT_STATUS
+    return static_cast<RiotStatus>(LCS_GAMEPLAY_RIOT_STATUS(handle,hierarchy,stop_loop));
+#else
+    __try {
+        const auto ped=reinterpret_cast<uintptr_t(__cdecl*)(int32_t)>(0x54FF90)(handle);
+        if(!ped)return RiotStatus::removed;
+        // SDK CPed::m_ePedState at 0x530; ePedState from gta-reversed/Plugin-SDK.
+        // https://github.com/gta-reversed/gta-reversed/blob/master/source/game_sa/Enums/ePedState.h
+        const auto state=*reinterpret_cast<const int32_t*>(ped+0x530);
+        if(state==9 || state==16 || state==17)return RiotStatus::interrupted;
+        if(!reinterpret_cast<bool(__thiscall*)(uintptr_t)>(0x5E3960)(ped))return RiotStatus::paused;
+        if(!hierarchy)return RiotStatus::ready;
+        const auto clump=*reinterpret_cast<const uintptr_t*>(ped+0x18);if(!clump)return RiotStatus::error;
+        const auto offset=*reinterpret_cast<const uint32_t*>(0xB5F878);if(offset>4096)return RiotStatus::error;
+        const auto data=*reinterpret_cast<const uintptr_t*>(clump+offset);if(!data)return RiotStatus::error;
+        auto link=*reinterpret_cast<const uintptr_t*>(data);unsigned visited=0;
+        while(link) {
+            if(++visited>1024)return RiotStatus::error;
+            const auto association=link-4;
+            if(*reinterpret_cast<const uintptr_t*>(association+0x14)==hierarchy) {
+                if(stop_loop)*reinterpret_cast<uint16_t*>(association+0x2E)&=~uint16_t(2);
+                return *reinterpret_cast<const float*>(association+0x1C)<0 ? RiotStatus::ready : RiotStatus::playing;
+            }
+            link=*reinterpret_cast<const uintptr_t*>(link);
+        }
+        return RiotStatus::ready;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return RiotStatus::error;}
+#endif
+}
+void release_ref(int32_t index) {
+#ifdef LCS_GAMEPLAY_ANIMATION_RELEASE
+    LCS_GAMEPLAY_ANIMATION_RELEASE(index);
+#else
+    __try {reinterpret_cast<void(__cdecl*)(int32_t)>(0x4D3FF0)(index);}
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+#endif
+}
+std::optional<bool> resident_block(uintptr_t block) {
+#ifdef LCS_GAMEPLAY_ANIMATION_RESIDENT
+    return LCS_GAMEPLAY_ANIMATION_RESIDENT(block);
+#else
+    __try {return bool(*reinterpret_cast<const uint8_t*>(block+0x10));}
+    __except(EXCEPTION_EXECUTE_HANDLER) {return {};}
+#endif
+}
+bool acquire_ref(int32_t index) {
+#ifdef LCS_GAMEPLAY_ANIMATION_ACQUIRE
+    return LCS_GAMEPLAY_ANIMATION_ACQUIRE(index);
+#else
+    __try {reinterpret_cast<void(__cdecl*)(int32_t)>(0x4D3FB0)(index);return true;}
+    __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+#endif
+}
+}
+NativeGameplayAnimations::NativeGameplayAnimations(const std::filesystem::path& directory) {
+    const bool bundled=std::filesystem::exists(directory/"LG00.ifp.bin");
+    const auto suffix=bundled?".ifp.bin":".ifp";
+    std::set<std::string> logical_blocks;
+    std::ifstream input(directory/"index.tsv");std::string line;
+    if(!input)throw std::runtime_error("Original mission gesture index missing");
+    while(std::getline(input,line)) {
+        std::istringstream row(line);int state=0,flags=0;Gesture gesture;
+        if(!(row>>state>>gesture.block>>gesture.animation>>flags) || state<1 || state>255 || gesture.block.size()!=4 || gesture.block.substr(0,2)!="LG" ||
+           !std::all_of(gesture.block.begin()+2,gesture.block.end(),[](char c){return c>='0' && c<='9';}) || gesture.animation.empty() || gesture.animation.size()>23 || (flags&~31))
+            throw std::runtime_error("Invalid original mission gesture row");
+        if(bundled) {
+            if(!(row>>gesture.logical_block) || gesture.block!="LG00" || gesture.logical_block.size()!=4 || gesture.logical_block.substr(0,2)!="LG" ||
+               !std::all_of(gesture.logical_block.begin()+2,gesture.logical_block.end(),[](char c){return c>='0' && c<='9';}))throw std::runtime_error("Invalid original logical gesture group");
+        }else gesture.logical_block=gesture.block;
+        std::string extra;if(row>>extra)throw std::runtime_error("Trailing mission gesture fields");
+        logical_blocks.insert(gesture.logical_block);
+        gesture.flags=uint16_t(flags);if(!gestures_.emplace(state,gesture).second)throw std::runtime_error("Duplicate original mission gesture state");
+        auto block=blocks_.find(gesture.block);
+        if(block==blocks_.end()) {
+            const auto path=directory/(gesture.block+suffix);auto archive=AnimationArchive::load_anpk(path);
+            if(archive.name!=gesture.block)throw std::runtime_error("Mission gesture block name differs");
+            block=blocks_.emplace(gesture.block,Block{path,std::move(archive)}).first;
+        }
+        if(std::none_of(block->second.archive.animations.begin(),block->second.archive.animations.end(),[&](const Animation& a){return a.name==gesture.animation;}))throw std::runtime_error("Declared original gesture absent from its block");
+    }
+    if(gestures_.size()!=71 || logical_blocks.size()!=25 || blocks_.size()!=(bundled?1u:25u))throw std::runtime_error("Incomplete original mission gesture package");
+    std::ifstream named_index(directory/"named"/"index.tsv");
+    if(!named_index)throw std::runtime_error("Original named animation index missing");
+    while(std::getline(named_index,line)) {
+        std::istringstream row(line);std::string name,alias,extra;
+        if(!(row>>name>>alias) || row>>extra || name.empty() || name.size()>8 || alias.size()!=4 || alias.substr(0,2)!="LN" ||
+           !std::all_of(alias.begin()+2,alias.end(),[](char c){return c>='0' && c<='9';}) || !named_blocks_.emplace(name,alias).second)
+            throw std::runtime_error("Invalid original named animation index");
+        auto path=directory/"named"/(alias+suffix);auto archive=AnimationArchive::load_anpk(path);
+        if(archive.name!=alias || !blocks_.emplace(alias,Block{path,std::move(archive)}).second)throw std::runtime_error("Conflicting named animation block");
+    }
+    const auto riot=named_blocks_.find("riot");
+    if(riot==named_blocks_.end())throw std::runtime_error("Original RIOT block missing");
+    const auto& animations=blocks_.at(riot->second).archive.animations;
+    for(size_t i=0;i<RiotWaitCycle::names.size();++i) {
+        const auto name=RiotWaitCycle::names[i];
+        const auto found=std::find_if(animations.begin(),animations.end(),[&](const Animation& a){return _stricmp(a.name.c_str(),std::string(name).c_str())==0;});
+        if(found==animations.end())throw std::runtime_error("Original RIOT animation absent: "+std::string(name));
+        riot_names_[i]=found->name; // Preserve actual original archive spelling.
+    }
+}
+NativeGameplayAnimations::~NativeGameplayAnimations() {
+    if(!sa_executor_profile_matches())return;
+    for(const auto& pose:poses_)fade_owned(pose.first,pose.second.hierarchy);
+    for(const auto& pose:riots_)if(pose.second.hierarchy)fade_owned(pose.first,pose.second.hierarchy);
+    for(const auto& block:blocks_)if(block.second.reference_held)release_ref(block.second.index);
+}
+bool NativeGameplayAnimations::request(int32_t state,bool load) {
+    if(!sa_executor_profile_matches())return false;
+    const auto gesture=gestures_.find(state);if(gesture==gestures_.end())return false;
+    if(!load){requested_.erase(gesture->second.logical_block);return true;}
+    auto& block=blocks_.at(gesture->second.block);
+    if(!block.native){block.native=load_native(block.path.string().c_str(),gesture->second.block.c_str(),int(block.archive.animations.size()),&block.index);block.reference_held=bool(block.native);}
+    if(!block.native)return false;requested_.insert(gesture->second.logical_block);return true;
+}
+std::optional<bool> NativeGameplayAnimations::named(const std::string& name,uint16_t action) {
+    if(!sa_executor_profile_matches() || action>2)return {};
+    const auto found=named_blocks_.find(name);if(found==named_blocks_.end())return {};
+    auto& block=blocks_.at(found->second);
+    if(action==0) {
+        if(block.native) {
+            const auto resident=resident_block(block.native);if(!resident)return {};
+            if(!*resident)block.native=0;
+        }
+        if(!block.native){block.native=load_native(block.path.string().c_str(),found->second.c_str(),int(block.archive.animations.size()),&block.index,block.registered);block.reference_held=bool(block.native);}
+        else if(!block.reference_held){if(!acquire_ref(block.index))return {};block.reference_held=true;}
+        if(!block.native)return {};
+        block.registered=true;return true;
+    }
+    if(!block.native)return action==2;
+    // Private files are loaded through CAnimManager, not CStreaming. Query
+    // the actual native block instead of an unrelated streaming load flag.
+    const auto resident=resident_block(block.native);if(!resident)return {};
+    if(action==1)return *resident;
+    if(name=="riot") {
+        while(!riots_.empty())if(!clear(riots_.begin()->first))return {};
+    }
+    // This namespace is owned by this package and separate from gesture poses.
+    if(block.reference_held){release_ref(block.index);block.reference_held=false;}
+    const auto removed=execute_sa({0x04EF,{},found->second});
+    if(!removed.executed)return {};
+    // REMOVE_ANIMATION permits delayed eviction while associations still
+    // reference a block. Retain its registry identity and reacquire on a later
+    // request; never register a duplicate or release our reference twice.
+    return true;
+}
+std::optional<bool> NativeGameplayAnimations::waiting(int32_t actor) const {
+    const auto riot=riots_.find(actor);
+    const auto pose=poses_.find(actor);
+    if(riot==riots_.end() && pose==poses_.end())return false;
+    if(!sa_executor_profile_matches())return {};
+    const auto hierarchy=riot!=riots_.end()?riot->second.hierarchy:pose->second.hierarchy;
+    const auto status=riot_status(actor,hierarchy,false);
+    if(status==RiotStatus::error)return {};
+    if(status==RiotStatus::removed || status==RiotStatus::interrupted)return false;
+    // RIOT remains a script wait between its owned animation cycles. A plain
+    // pose stops blocking once SA has removed/faded its association.
+    return riot!=riots_.end() || status==RiotStatus::playing || status==RiotStatus::paused;
+}
+bool NativeGameplayAnimations::clear(int32_t actor) {
+    const auto riot=riots_.find(actor);
+    if(riot!=riots_.end()) {
+        if(!sa_executor_profile_matches() || (riot->second.hierarchy && !fade_owned(actor,riot->second.hierarchy)))return false;
+        riots_.erase(riot);
+    }
+    const auto pose=poses_.find(actor);if(pose==poses_.end())return true;
+    if(!sa_executor_profile_matches() || !fade_owned(actor,pose->second.hierarchy))return false;
+    poses_.erase(pose);return true;
+}
+bool NativeGameplayAnimations::play(int32_t actor,int32_t state,int32_t duration,bool repeat) {
+    if(!sa_executor_profile_matches())return false;
+    if(state!=0 && riots_.count(actor))return true; // LCS permits only explicit clear to replace RIOT.
+    if(state==29) {
+        if(!sa_executor_profile_matches())return false;
+        const auto named_riot=named("riot",1);
+        if(!named_riot || !*named_riot)return false; // Original REQUEST/HAS_ANIMATION_LOADED must complete.
+        const auto control=sa_char_in_control(actor);if(!control)return false;if(!*control)return true;
+        if(!clear(actor))return false;
+        riots_.emplace(actor,RiotPose{}); // Animation is selected by Wait(), on the next actor tick.
+        return true;
+    }
+    const auto gesture=gestures_.find(state);
+    if(!sa_executor_profile_matches() || gesture==gestures_.end())return false;
+    // Standard PED animations are resident in LCS without a LOAD_NON_STANDARD
+    // command. A nonstandard request makes every gesture in that block usable.
+    if(state<36 && !request(state,true))return false;
+    if(!requested_.count(gesture->second.logical_block))return false;
+    const auto control=sa_char_in_control(actor);if(!control)return false;if(!*control)return true;
+    if(!clear(actor))return false;
+    const auto hierarchy=play_native(actor,blocks_.at(gesture->second.block).native,gesture->second.animation.c_str(),uint16_t(gesture->second.flags | (repeat?2:0)));
+    if(!hierarchy)return false;
+    // Only standard wait states use the script timeout. Nonstandard mission
+    // gestures keep the original association's fade/freeze/loop lifetime.
+    poses_[actor]={hierarchy,state<36 && duration>=0,now_+uint32_t(std::max(duration,0))};return true;
+}
+bool NativeGameplayAnimations::tick(uint32_t now) {
+    now_=now;
+    for(auto riot=riots_.begin();riot!=riots_.end();) {
+        const auto actor=riot->first;auto& pose=riot->second;
+        const auto status=riot_status(actor,pose.hierarchy,pose.cycle.expired(now));
+        if(status==RiotStatus::error)return false;
+        if(status==RiotStatus::removed){riot=riots_.erase(riot);continue;}
+        if(status==RiotStatus::interrupted){++riot;if(!clear(actor))return false;continue;}
+        if(status==RiotStatus::ready) {
+            const auto selected=pose.cycle.choose(now,random_(),random_());
+            const auto& block=blocks_.at(named_blocks_.at("riot"));
+            if(!block.native)return false;
+            pose.hierarchy=play_native(actor,block.native,riot_names_[selected].c_str(),pose.cycle.flags(),true);
+            if(!pose.hierarchy)return false;
+        }
+        ++riot;
+    }
+    for(auto pose=poses_.begin();pose!=poses_.end();) {
+        if(!pose->second.timed || int32_t(now-pose->second.deadline)<0){++pose;continue;}
+        const auto actor=pose->first;++pose;if(!clear(actor))return false;
+    }
+    return true;
+}
+}

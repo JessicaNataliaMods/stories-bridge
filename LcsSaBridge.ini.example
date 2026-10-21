@@ -1,0 +1,3 @@
+[LCS]
+; Point this at your own extracted PS2 input; never commit a local configuration.
+DataDirectory=..\private-bridge\originals\lcs-ps2

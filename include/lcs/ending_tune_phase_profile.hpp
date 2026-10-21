@@ -1,0 +1,13 @@
+#pragma once
+#include <cstdint>
+#include <initializer_list>
+namespace lcs {
+template<class Match> bool original_ending_tune_phase_profile(Match match) {
+    // The two mutually exclusive main-loop audio paths. CALL operands may
+    // belong to earlier mods; preserve them and require the original this ABI.
+    return match(0x53E7B7,{0xb9,0x90,0xbc,0xb6,0x00,0xe8}) &&
+        match(0x53E7C1,{0xd9,0x05,0x38,0x50,0x8d,0x00}) &&
+        match(0x53E986,{0xb9,0x90,0xbc,0xb6,0x00,0xe8}) &&
+        match(0x53E990,{0x8b,0x15,0x38,0x70,0xc1,0x00});
+}
+}

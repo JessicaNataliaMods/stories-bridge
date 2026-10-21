@@ -1,0 +1,12 @@
+#!/bin/sh
+for runner in py python3 python; do
+  if [ "$runner" = py ]; then
+    if command -v py >/dev/null 2>&1 && py -3 --version >/dev/null 2>&1; then
+      exec py -3 tools/check-public-tree.py --tracked
+    fi
+  elif command -v "$runner" >/dev/null 2>&1 && "$runner" --version >/dev/null 2>&1; then
+    exec "$runner" tools/check-public-tree.py --tracked
+  fi
+done
+echo "Python 3 is required for the public source audit." >&2
+exit 1

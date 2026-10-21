@@ -1,0 +1,66 @@
+#pragma once
+#include "vm.hpp"
+#include "continuous_sound.hpp"
+#include "source_audio_random.hpp"
+#include <optional>
+
+namespace lcs {
+struct AudioSample {uint32_t frequency=0;std::vector<uint8_t> pcm;uint16_t channels=1;};
+struct AudioRecord {uint32_t offset,size,frequency;uint32_t loop_start=0;int32_t loop_end=-1;};
+struct SpatialListener {std::array<float,3> position{},right{{1,0,0}};};
+struct AudioMix {uint8_t volume=127,pan=63;};
+AudioMix mission_audio_mix(const std::array<float,3>& source,const SpatialListener& listener);
+class AudioArchive {
+    std::filesystem::path raw_;
+    std::filesystem::path news_;
+    std::string suffix_;
+    std::vector<AudioRecord> records_;
+public:
+    explicit AudioArchive(const std::filesystem::path& directory,const std::string& suffix="");
+    static std::vector<AudioRecord> parse_index(const std::vector<uint8_t>& bytes,uint64_t raw_size);
+    static std::vector<std::string> mission_names();
+    AudioSample sample(const std::string& name) const;
+    AudioSample sample(uint32_t index) const;
+    const AudioRecord& record(uint32_t index) const;
+    AudioSample announcement(int32_t index) const;
+    AudioSample frontend_effect(int32_t script_sound) const;
+    AudioSample phone_ring_sample() const; // retail event76 maps to raw sample236
+    size_t sample_count()const {return records_.size();}
+};
+// Mission speech is sampled PCM in LCS. SA's same-named opcode takes a numeric
+// SA sound ID, so it cannot be used for these original labels.
+class AudioAdapter {
+    const AudioArchive& archive_;
+    struct Slot {std::optional<AudioSample> sample;bool started=false;std::optional<std::array<float,3>> position;bool phone_call=false;};
+    std::array<Slot,2> slots_;
+    std::optional<int32_t> pending_announcement_;
+    bool announcement_started_=false;
+    uint32_t sound_random_=0x4c4353;
+    SourceAudioRandom audio_random_;
+    // AudioLogic::Initialise and ProcessMissionAudio own these source values.
+    // PreloadMissionAudio clears the per-slot phone marker; none of the
+    // currently implemented script audio operations sets it to true.
+    uint8_t global_sfx_volume_=127;
+public:
+    std::function<bool(size_t,const AudioSample&)> play;
+    std::function<bool(size_t)> finished;
+    std::function<void(size_t)> stop;
+    std::function<std::optional<std::array<float,3>>()> listener;
+    std::function<bool(const AudioSample&)> play_effect;
+    std::function<bool(const AudioSample&,AudioMix)> play_positioned_effect;
+    std::function<std::optional<SpatialListener>()> spatial_listener;
+    std::function<bool(size_t,AudioMix)> set_mix;
+    explicit AudioAdapter(const AudioArchive& archive):archive_(archive){}
+    static bool handles(uint16_t);
+    // SOUND_CAR_JERK one-shot at a vehicle position (1486): SFX_SHAG_SUSPENSION, source
+    // frequency displacement and volume, 35 m range and ComputeVolume attenuation.
+    // False means the sound could not be produced (missing backend/listener, bad
+    // position or a refused device); out of range is a genuine silent success.
+    bool play_car_jerk(const std::array<float,3>& position);
+    bool tick_announcements(bool eligible);
+    bool tick_spatial();
+    ContinuousMixContext service_source_mix(float native_scale);
+    uint32_t continuous_music_random_word()const {return audio_random_.table(0);}
+    StepResult dispatch(Vm&,Thread&,uint16_t);
+};
+}

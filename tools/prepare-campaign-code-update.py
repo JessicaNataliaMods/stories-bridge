@@ -1,0 +1,311 @@
+"""Stage a campaign code update while sharing immutable local game assets.
+
+The public tool contains code only. Staged packages contain the user's private
+game data and must not be redistributed. Metadata/ASI are regular copies;
+unchanged data/model/audio assets use local hardlinks to avoid duplicating GBs.
+"""
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import shutil
+from bootstrap_player_exports import export_player_globals, report as bootstrap_report
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def immutable(relative):
+    return relative.parts[0] in ('data', 'models', 'anim', 'text') or relative.parts[:2] == ('metadata', 'lcs-source')
+
+
+def prepare(base, output, version, notes, refresh, original_data):
+    base, output = base.resolve(), output.resolve()
+    if base == output or base in output.parents or output in base.parents:
+        raise ValueError('Stage must be separate from its input package')
+    campaign = json.loads((base/'metadata/campaign.json').read_text())
+    if campaign['mode'] != 'Campaign' or campaign['completeCampaignVerified'] or campaign['version'] >= version:
+        raise ValueError('Invalid campaign base/version')
+    if output.exists() and not refresh:
+        raise ValueError('Output exists; use --refresh only after reviewing it')
+    linked = 0
+    if not output.exists():
+        output.mkdir(parents=True)
+    if not output.is_dir() or output.is_symlink() or output.is_junction():
+        raise ValueError('Staging root must be a normal directory')
+    for source in sorted(base.rglob('*')):
+            if source.is_symlink() or source.is_junction():
+                raise ValueError('Links in the source package need a separate audit')
+            relative = source.relative_to(base)
+            if source.is_dir():
+                (output/relative).mkdir(exist_ok=True)
+                continue
+            if relative.parts[0] == 'metadata' and source.name.endswith('-notes.md'):
+                continue
+            target = output/relative
+            if immutable(relative) and not (version >= 32 and relative.as_posix() == 'data/script/main.scm'):
+                if target.exists():
+                    if target.is_symlink() or target.stat().st_size != source.stat().st_size or digest(target) != digest(source):
+                        raise ValueError('Existing immutable stage resource differs: '+str(relative))
+                else:
+                    os.link(source, target)
+                    linked += 1
+            else:
+                if target.exists() and target.stat().st_nlink != 1:
+                    raise ValueError('Mutable stage metadata shares an inode: '+str(relative))
+                shutil.copy2(source, target)
+    source_asi = ROOT/'build/Release/LcsSaBridge.asi'
+    target_asi = output/'LcsSaBridge.asi'
+    if target_asi.exists() and target_asi.stat().st_nlink != 1:
+        raise ValueError('Mutable ASI must not share an inode with a rollback')
+    shutil.copy2(source_asi, target_asi)
+    campaign['version'] = version
+    campaign['nativeStartupValidated'] = False
+    campaign.pop('startupValidationSha256', None)
+    for row in campaign['originalResources']:
+        if row['relative'] == 'LcsSaBridge.asi':
+            row['sha256'] = digest(target_asi)
+            row['source'] = str(source_asi)
+    if version >= 27:
+        source_weapons=original_data.resolve()/'DATA/WEAPON.DAT'
+        relative='metadata/lcs-source/DATA/WEAPON.DAT.bin'
+        target=output/relative
+        if target.exists():
+            if digest(target)!=digest(source_weapons):
+                raise ValueError('Original weapon definitions changed')
+        else:
+            shutil.copy2(source_weapons,target)
+        if not any(row['relative']==relative for row in campaign['originalResources']):
+            campaign['originalResources'].append(dict(relative=relative,source=str(source_weapons),sha256=digest(source_weapons)))
+        campaign['runtimeSafeguards'].update(originalWeaponInventorySlots=True,typedDeadCharacterVisibility=True,nativeThreatRadiusPolicy=True)
+    # Original ferry track (FERRY1.DAT): optional source data read by the ferry service; absent data only leaves the
+    # ferry commands refused, so it never invalidates an older stage.
+    source_ferry=original_data.resolve()/'DATA/PATHS/FERRY1.DAT'
+    if source_ferry.is_file():
+        relative='metadata/lcs-source/DATA/PATHS/FERRY1.DAT.bin'
+        target=output/relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if digest(target)!=digest(source_ferry):
+                raise ValueError('Original ferry track changed')
+        else:
+            shutil.copy2(source_ferry,target)
+        if not any(row['relative']==relative for row in campaign['originalResources']):
+            campaign['originalResources'].append(dict(relative=relative,source=str(source_ferry),sha256=digest(source_ferry)))
+    # Retail docked ferry collision (ms_colModelFerryDocked, COL1): optional derived asset pinned to the prepared bundle;
+    # absent data only leaves the ferry collision switch refused.
+    source_docked=ROOT/'out/ferry-assets-review-20261019/models/ferry-docked.col'
+    if source_docked.is_file():
+        if digest(source_docked)!='b8f16d0e223cc75da102c604a058e4640d10826321e3f109580c9a827992ecca':
+            raise ValueError('Prepared docked ferry collision changed')
+        relative='models/lcs/ferry-docked.col'
+        target=output/relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if digest(target)!=digest(source_docked):
+                raise ValueError('Docked ferry collision in the stage changed')
+        else:
+            shutil.copy2(source_docked,target)
+        if not any(row['relative']==relative for row in campaign['originalResources']):
+            campaign['originalResources'].append(dict(relative=relative,source=str(source_docked),sha256=digest(source_docked)))
+    if version >= 29:
+        campaign['runtimeSafeguards'].update(nativePacketEntryReceipts=True,nativeEnteredFailureRequiresRepair=True,sourcePlayerAreaShootingPredicate=True)
+    if version >= 30:
+        campaign['runtimeSafeguards'].update(nativeWeaponExpenditure=True,paidShopRegression=True,insufficientShopFundsRegression=True)
+    if version >= 31:
+        campaign['runtimeSafeguards'].update(nativeAnalogueAxes=True,nativeDebugCameraSource=True,nextVehicleComponentSelectors=True,liveTargettableObjectGuard=True)
+    if version >= 32:
+        bootstrap=output/'data/script/main.scm'
+        if bootstrap.stat().st_nlink != 1:
+            raise ValueError('Mutable bootstrap must not share an inode with a rollback')
+        before=(base/'data/script/main.scm').read_bytes()
+        after=export_player_globals(before)
+        bootstrap.write_bytes(after)
+        campaign['nativeBootstrapPlayerExports']=bootstrap_report(before,after)
+        for row in campaign['preservedApprovedResources']:
+            if row['relative']=='data/script/main.scm':row['sha256']=digest(bootstrap)
+        campaign['runtimeSafeguards'].update(nativeModPlayerGlobals=True,livePlayerHandleRefreshBeforeCleo=True,
+            sourceGangWeaponDamageMask=True,sourceDirectedWanderTask=True,sourceWaitInCarTask=True)
+    campaign['runtimeSafeguards'].update(engineAdapterOwnership=True, consumedFailureFallback=False,
+        spatialAudioPerVoiceHandles=True, originalNativeThreatScanFlags=True)
+    if version >= 33:
+        campaign['runtimeSafeguards'].update(sourceEntityFamilyPackets=True,sourcePhysicsUnits=True,
+            boundedGenerationalEntityHandles=True,sourceOrientationAxisOrder=True,
+            nativeSignedServiceStatistics=True,sourcePlayerRewardHudFlash=True,entityBackendFaultInjectionRegression=True)
+    if version >= 34:
+        campaign['runtimeSafeguards'].update(boundedGenerationalRadarHandles=True,sourceVehicleClassPredicates=True,
+            sourceScriptFireParameterExpansion=True,sourceUnsignedModelKillCounters=True,infrastructureFamilyPreflightRegression=True)
+    if version >= 35:
+        campaign['runtimeSafeguards'].update(boundedGenerationalPickupHandles=True,sourcePickupIntegerRevenue=True,
+            sourceBoatWaterState=True,verifiedHelicopterRotorField=True)
+    if version >= 36:
+        campaign['runtimeSafeguards'].update(typedOriginalRampages=True,nativeRampageHeadshotAbi=True,
+            nativeRampageConflictGuard=True,interruptedRampageWeaponIdentity=True,rampageEnteredFailureRequiresRepair=True)
+    if version >= 37:
+        campaign['runtimeSafeguards'].update(ownedOriginalWeatherClockSnapshots=True,sourceWeatherRestoreFallthrough=True,
+            sourceClockPreservesNativeCalendar=True,sourceClockPreservesNativeBackup=True,sourceVehicleStatusTranslation=True)
+    if version >= 38:
+        campaign['runtimeSafeguards'].update(typedOriginalGarageServices=True,namedGaragePredicateBinding=True,
+            destructiveResprayPredicate=True,sourceBombTypeAndInstaller=True,garageServicePreflightRegression=True)
+    if version >= 39:
+        campaign['runtimeSafeguards'].update(typedOriginalTrafficServices=True,nativeCleanupCollisionRelease=True,sourceBootStateTransition=True,sourceTankDetonationFlag=True,boundedDrunkSteeringBuffer=True,trafficServicePreflightRegression=True)
+    if version >= 40:
+        campaign['runtimeSafeguards'].update(sourceFirstPersonWeaponModes=True,boundedNativeDrowningQuery=True,focusedPlayerClipStorage=True,guardedBootVisualRemoval=True)
+    if version >= 41:
+        campaign['runtimeSafeguards'].update(consumedOriginalPhotographLatch=True,observedNativeCreditsState=True,isolatedCameraControlRelease=True)
+    if version >= 42:
+        campaign['runtimeSafeguards'].update(ownedOriginalActivityRecords=True,retailPS2RecordInitializers=True,boundedOriginalRecordArrays=True,retailCostumeUnlockMask=True)
+    if version >= 43:
+        campaign['runtimeSafeguards'].update(retailLocomotionNameTranslation=True,boundedNativeAnimGroupLookup=True,isolatedPedLocomotionWrite=True,nativePlayerHavocCounter=True)
+    if version >= 44:
+        campaign['runtimeSafeguards'].update(retailOriginalFloatMaxima=True,hostFpuIndependentActivityRecords=True,retailSignedScoreConversion=True)
+    if version >= 45:
+        campaign['runtimeSafeguards'].update(originalVehicleAttachmentContracts=True,ownedAttachmentReferences=True,
+            sourceHelicopterSpeedByte=True,liveVehicleRamController=True,guardedCharacterObjectAttachment=True)
+    if version >= 46:
+        campaign['runtimeSafeguards'].update(guardedCollisionConsumption=True,originalNonexplosiveCarWreck=True,
+            fixedOriginalWreckDamageStates=True,vehicleDamageEnteredFailureRequiresRepair=True)
+    if version >= 47:
+        campaign['runtimeSafeguards'].update(typedThreeNumberBigMessages=True,narrowedOriginalBigMessageStyle=True,
+            nativeBigMessageEnteredFailureRequiresRepair=True)
+    if version >= 48:
+        campaign['runtimeSafeguards'].update(originalDeliveryTouristFloatCounters=True,eeSingleGuardFloatAddition=True,
+            hostFpuIndependentCounterSums=True)
+    if version >= 49:
+        campaign['runtimeSafeguards'].update(typedFreeResprayPolicy=True,independentResprayBombshopPolicies=True)
+    if version >= 50:
+        campaign['runtimeSafeguards'].update(retailOriginalWanderPath=True,boundedWanderWorldQueries=True,guardedWanderPedGeneration=True)
+    if version >= 51:
+        campaign['runtimeSafeguards'].update(originalIslandStatisticsSetters=True,retailIslandBooleanNormalization=True,
+            experimentalObjectiveCaptureEnabled=False)
+    if version >= 52:
+        campaign['runtimeSafeguards'].update(typedLeavingVehicleToDie=True,readOnlyPrimaryGoalInspection=True,
+            noVirtualGoalQueryCalls=True)
+    if version >= 53:
+        campaign['runtimeSafeguards'].update(typedRemoteVehicleExplosion=True,guardedFocusedRemoteVehicle=True,
+            nativeRemoteExplosionEnteredFailureReceipt=True)
+    if version >= 57:
+        source_finale=ROOT / 'local/originals/lcs-ps2/AUDIO/MUSIC/FINALE.VB'
+        expected='0490cd090214c4ef44bd8f419a5923484c24fb0b005761b9c535734cd526413c'
+        if source_finale.stat().st_size!=3440640 or digest(source_finale)!=expected:
+            raise ValueError('Original FINALE.VB profile differs')
+        relative='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin'
+        target=output/relative;target.parent.mkdir(parents=True,exist_ok=True)
+        if target.exists():
+            if digest(target)!=expected:raise ValueError('Staged original FINALE.VB differs')
+        else:shutil.copy2(source_finale,target)
+        if not any(row['relative']==relative for row in campaign['originalResources']):
+            campaign['originalResources'].append(dict(relative=relative,source=str(source_finale),sha256=expected))
+        campaign['endingTune']=dict(track=63,source=relative,sha256=expected,sourceBytes=3440640,
+            decodedFrequency=32000,decodedChannels=2,decodedPcmBytes=12042240,
+            frontendMode=0,stopMode=1,gameExecuted=False)
+        campaign['runtimeSafeguards'].update(originalFinaleStream=True,ownedFinaleAudioPhase=True,
+            originalFinaleModeTransitions=True,finaleEnteredFailureQuarantine=True,liveNativeMusicMasterAndFader=True)
+    if version >= 64:
+        source_city=ROOT / 'local/originals/lcs-ps2/AUDIO/MUSIC/CITY.VB'
+        expected_city='eae0705d9e10fa59c8f6c552c7e4731f7a0c7718ab2b9b469848fb0e4025e93b'
+        if source_city.stat().st_size!=21954560 or digest(source_city)!=expected_city:
+            raise ValueError('Original CITY.VB profile differs')
+        relative_city='metadata/lcs-source/AUDIO/MUSIC/CITY.VB.bin'
+        target_city=output/relative_city;target_city.parent.mkdir(parents=True,exist_ok=True)
+        if target_city.exists():
+            if digest(target_city)!=expected_city:raise ValueError('Staged original CITY.VB differs')
+        else:shutil.copy2(source_city,target_city)
+        if not any(row['relative']==relative_city for row in campaign['originalResources']):
+            campaign['originalResources'].append(dict(relative=relative_city,source=str(source_city),sha256=expected_city))
+        campaign['cityMusic']=dict(source=relative_city,sha256=expected_city,sourceBytes=21954560,
+            retailAreaTracks={'5':17,'17':18},selectors=list(range(40,46)),gameExecuted=False)
+    if version >= 66:
+        for name in ('DEFAULT.IDE', 'HANDLING.CFG'):
+            source_catalog=original_data.resolve()/'DATA'/name
+            relative_catalog='metadata/lcs-source/DATA/'+name+'.bin'
+            target_catalog=output/relative_catalog
+            expected_catalog=digest(source_catalog)
+            if target_catalog.exists():
+                if digest(target_catalog)!=expected_catalog:raise ValueError('Staged source vehicle catalogue differs: '+name)
+            else:shutil.copy2(source_catalog,target_catalog)
+            if not any(row['relative']==relative_catalog for row in campaign['originalResources']):
+                campaign['originalResources'].append(dict(relative=relative_catalog,source=str(source_catalog),sha256=expected_catalog))
+        campaign['runtimeSafeguards']['originalVehicleCatalogueStaged']=True
+    if version >= 58:
+        campaign['runtimeSafeguards'].update(originalRemoteCancellation=True,
+            focusedPedGenerationCancellation=True,observedNativeSaveMenuState=True,
+            generationOwnedPassengerSeatPolicy=True,originalPickupFloatRadius=True)
+        campaign['localBatch58']=dict(sourceCommands=[990,1485,1487,1512],
+            withheldPendingProof=[334,1586],webReturn='R11 corrected subset',gameExecuted=False)
+    if version >= 59:
+        campaign['runtimeSafeguards'].update(checkedPcmReleaseBeforeReuse=True,
+            stablePcmHeaderLifetime=True,retainedPcmDriverRefusal=True,originalAudioLoopMetadata=True)
+        campaign['audioStorage59']=dict(newSourceCommands=[],continuous402403Registered=False,
+            finalDriverRefusal='retained Voice/header/PCM for process lifetime',gameExecuted=False)
+    if version >= 60:
+        campaign['runtimeSafeguards'].update(persistentScriptCoronas=True,privateStableCoronaIdentities=True,
+            guardedCoronaGroundXY=True,coronaEnteredFaultQuarantine=True,sharedCoronaPoolOwnership=True)
+        campaign['scriptCoronas60']=dict(sourceCommands=[1481,1482],nativeRegister='6FC580',
+            groundXY='569660',drawDistance=450,gameExecuted=False,renderVisibilityClaimed=False)
+    if version >= 61:
+        campaign['runtimeSafeguards'].update(originalCollectiveTable=True,
+            generationCheckedCollectiveMembers=True,collectivePartialFailureQuarantine=True)
+        campaign['collectives61']=dict(sourceCommands=[636,638,616],sharedCapacity=32,
+            worldQueryLimit=64,vehicleOccupants=True,gameExecuted=False)
+    if version >= 62:
+        campaign['runtimeSafeguards'].update(originalHudCounterPresentation=True,
+            ownedNativeHudDraw=True,foreignHudAndFontPreserved=True,
+            retailCounterTotalClamp=True,continuous402403Registered=False)
+        campaign['hudPresentation62']=dict(sourceCommands=[1576,1577,1634,1636,1644],
+            missionHudCall='58FBEE',nativeHudDraw='58B180',originalOnlyRgbRendering=True,
+            newGameAssets=False,gameExecuted=False,visualGameplayVerified=False)
+    if version >= 63:
+        markers=ROOT/'out/script-marker-resources'
+        marker_manifest=json.loads((markers/'manifest.json').read_text())
+        if not marker_manifest.get('valid') or marker_manifest.get('gameExecuted') or \
+           [r['type'] for r in marker_manifest['meshes']]!=[1,2,5] or \
+           marker_manifest['texture'].get('originalPixelsPreserved') is not True:
+            raise ValueError('Verified original marker resources missing')
+        marker_files=[('rw-assets/'+r['file'],r['sha256']) for r in marker_manifest['meshes']]
+        marker_files.append((marker_manifest['texture']['file'].replace('\\','/'),marker_manifest['texture']['sha256']))
+        for relative,expected in marker_files:
+            source=markers/relative;target=output/'markers'/relative
+            if digest(source)!=expected:raise ValueError('Original marker resource changed: '+relative)
+            target.parent.mkdir(parents=True,exist_ok=True)
+            if target.exists() and target.stat().st_nlink!=1:raise ValueError('Mutable marker target shares rollback inode')
+            shutil.copy2(source,target)
+        shutil.copy2(markers/'manifest.json',output/'metadata/script-marker-resources.json')
+        campaign['runtimeSafeguards'].update(originalScriptMarkerIdentity=True,
+            privateOriginalMarkerPool=True,ownedNativeMarkerDraw=True,
+            sourceMarkerCopyFadeLifetime=True,nativeMarkerCollisionAndGround=True)
+        campaign['scriptMarkers63']=dict(sourceCommands=[1579,1611],capacity=32,
+            sourceTypes=[2,5],nativeTypeAliases=False,frameCall='725067',shutdownCall='723391',
+            resourceManifest='metadata/script-marker-resources.json',gameExecuted=False,
+            visualGameplayVerified=False)
+    (output/'metadata/campaign.json').write_text(json.dumps(campaign, indent=2))
+    preview = json.loads((output/'metadata/map-preview.json').read_text())
+    preview['version'] = str(version)
+    (output/'metadata/map-preview.json').write_text(json.dumps(preview, indent=2))
+    shutil.copy2(notes, output/'metadata'/f'campaign-v{version}-notes.md')
+    preserved = 0
+    for source in base.rglob('*'):
+        relative = source.relative_to(base)
+        if source.is_file() and immutable(relative) and not (version >= 32 and relative.as_posix() == 'data/script/main.scm'):
+            if digest(source) != digest(output/relative):
+                raise ValueError('Original immutable resource changed: '+str(relative))
+            preserved += 1
+    return dict(stage=str(output), version=version, codeOnlyUpdate=version<57, immutableResourcesPreserved=preserved,
+                hardlinkedNewAssets=linked, asiSha256=digest(target_asi), gameExecuted=False)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base', type=pathlib.Path, required=True)
+    parser.add_argument('--output', type=pathlib.Path, required=True)
+    parser.add_argument('--version', type=int, required=True)
+    parser.add_argument('--notes', type=pathlib.Path, required=True)
+    parser.add_argument('--refresh', action='store_true')
+    parser.add_argument('--original-data',type=pathlib.Path,default=ROOT/'out/lcs-converted')
+    args = parser.parse_args()
+    print(json.dumps(prepare(args.base, args.output, args.version, args.notes, args.refresh,args.original_data), indent=2))

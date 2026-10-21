@@ -1,0 +1,279 @@
+#include "lcs/audio.hpp"
+#include "lcs/cutscene_audio.hpp"
+#include "ScriptCommands.h"
+#include <algorithm>
+#include <fstream>
+#include <stdexcept>
+#include <cmath>
+#include <cstring>
+#include "audio_sample_ids.inc"
+
+namespace lcs {
+#include "original_audio_events.inc"
+static_assert(SOUND_FRONTEND_ENTER_OR_ADJUST==0xC4 && SOUND_NO_SOUND==0xCD,
+              "Original Script2 frontend event identities changed");
+AudioMix mission_audio_mix(const std::array<float,3>& source,const SpatialListener& listener) {
+    // Original AudioLogic: MISSION_AUDIO_MAX_DIST=80, volume=127. Preserve
+    // AudioManager's quadratic attenuation and integer pan table.
+    static constexpr uint8_t pan_table[]={0,3,8,12,16,19,22,24,26,28,30,31,33,34,36,37,
+        39,40,41,42,44,45,46,47,48,49,49,50,51,52,53,53,54,55,55,56,56,57,57,58,58,58,
+        59,59,59,60,60,61,61,61,61,62,62,62,62,62,63,63,63,63,63,63,63,63};
+    float squared=0,right=0;
+    for(size_t i=0;i<3;++i){
+        if(!std::isfinite(source[i]) || !std::isfinite(listener.position[i]) || !std::isfinite(listener.right[i]))
+            throw std::runtime_error("Nonfinite original mission audio transform");
+        const auto delta=source[i]-listener.position[i];squared+=delta*delta;right+=delta*listener.right[i];
+    }
+    if(squared>=80.f*80.f)return {0,63};
+    const auto distance=std::sqrt(squared);
+    const auto volume=distance<16.f?127:std::min(127,int(127.f*std::pow((80.f-distance)/64.f,2.f)));
+    const auto index=std::min(63,int(std::fabs(right)/(80.f/64.f)));
+    const auto pan=right>0?std::max(20,63-int(pan_table[index])):std::min(107,63+int(pan_table[index]));
+    return {uint8_t(volume),uint8_t(pan)};
+}
+static const struct NamedSample {const char* name;uint32_t index;} names[]={
+#include "audio_names.inc"
+};
+static std::string upper(std::string name) {for(auto& c:name)if(c>='a' && c<='z')c-=32;return name;}
+std::vector<std::string> AudioArchive::mission_names() {
+    std::vector<std::string> result;for(const auto& entry:names)result.emplace_back(entry.name);return result;
+}
+std::vector<AudioRecord> AudioArchive::parse_index(const std::vector<uint8_t>& bytes,uint64_t raw_size) {
+    if(bytes.empty() || bytes.size()%20)throw std::runtime_error("Invalid LCS audio index size");
+    std::vector<AudioRecord> result;
+    for(size_t i=0;i<bytes.size();i+=20) {
+        AudioRecord record{read32(bytes,i),read32(bytes,i+4),read32(bytes,i+8)};
+        record.loop_start=read32(bytes,i+12);
+        const auto loop_end=read32(bytes,i+16);
+        std::memcpy(&record.loop_end,&loop_end,sizeof(loop_end));
+        if(record.offset>raw_size || record.size>raw_size-record.offset || record.size%2 ||
+           (record.size && (!record.frequency || record.frequency>192000)))
+            throw std::runtime_error("Invalid LCS PCM record "+std::to_string(i/20));
+        result.push_back(record);
+    }
+    return result;
+}
+AudioArchive::AudioArchive(const std::filesystem::path& directory,const std::string& suffix):raw_(directory/("sfx.RAW"+suffix)),news_(directory/"news"),suffix_(suffix) {
+    if(!suffix.empty() && suffix!=".bin")throw std::runtime_error("Invalid original source file suffix");
+    std::ifstream index(directory/("sfx.sdt"+suffix),std::ios::binary|std::ios::ate);
+    if(!index)throw std::runtime_error("LCS audio index is missing");
+    const auto length=index.tellg();
+    if(length!=std::streamoff(20u*TOTAL_AUDIO_SAMPLES))throw std::runtime_error("Audio index does not match the original LCS sample enum");
+    std::vector<uint8_t> bytes(static_cast<size_t>(length));index.seekg(0);
+    if(!index.read(reinterpret_cast<char*>(bytes.data()),length))throw std::runtime_error("Truncated audio index");
+    records_=parse_index(bytes,std::filesystem::file_size(raw_));
+}
+AudioSample AudioArchive::sample(const std::string& name) const {
+    const auto key=upper(name);
+    const auto entry=std::find_if(std::begin(names),std::end(names),[&](const NamedSample& value){return upper(value.name)==key;});
+    if(entry==std::end(names) || entry->index>=records_.size())throw std::runtime_error("Original mission audio label is missing: "+key);
+    return sample(entry->index);
+}
+AudioSample AudioArchive::sample(uint32_t index) const {
+    const auto& record=this->record(index);
+    if(!record.size || record.size>16*1024*1024)throw std::runtime_error("Empty or oversized mission audio sample");
+    AudioSample result;result.frequency=record.frequency;result.pcm.resize(record.size);
+    std::ifstream raw(raw_,std::ios::binary);raw.seekg(record.offset);
+    if(!raw.read(reinterpret_cast<char*>(result.pcm.data()),record.size))throw std::runtime_error("Truncated mission audio PCM");
+    return result;
+}
+const AudioRecord& AudioArchive::record(uint32_t index) const {
+    if(index>=records_.size())throw std::runtime_error("Invalid original audio sample index");
+    return records_[index];
+}
+AudioSample AudioArchive::announcement(int32_t index) const {
+    if(index<0 || index>=14)throw std::runtime_error("Invalid original radio announcement");
+    const auto sample=read_pcm_wave(news_/(std::string("NEWS_")+char('A'+index)+".wav"+suffix_));
+    if(sample.frequency!=32000 || sample.channels!=2)throw std::runtime_error("Original news stream format differs");
+    return sample;
+}
+bool AudioAdapter::tick_announcements(bool eligible) {
+    if(!play || !finished || !stop)return false;
+    if(announcement_started_) {
+        if(!eligible){stop(2);announcement_started_=false;pending_announcement_.reset();return true;}
+        if(finished(2)){stop(2);announcement_started_=false;pending_announcement_.reset();}
+    }
+    if(eligible && pending_announcement_ && !announcement_started_) {
+        if(!play(2,archive_.announcement(*pending_announcement_)))return false;
+        announcement_started_=true;
+    }
+    return true;
+}
+AudioSample AudioArchive::phone_ring_sample() const {
+    return sample(236); // independently verified retail dispatcher1B2768
+}
+AudioSample AudioArchive::frontend_effect(int32_t id) const {
+    if(id==16)return sample(SFX_ARM_BOMB);
+    if(id==70)return sample(SFX_FE_SELECT);
+    uint32_t left=0,right=0,centre=0;
+    if(id==13 || id==14){left=SFX_WEAPON_LEFT;right=SFX_WEAPON_RIGHT;centre=SFX_WEAPON_CENTRE;}
+    else if(id==1 || (id>=7 && id<=9)){left=SFX_PART_MISSION_COMPLETE_LEFT;right=SFX_PART_MISSION_COMPLETE_RIGHT;centre=SFX_PART_MISSION_COMPLETE_CENTRE;}
+    else if(id==10){left=SFX_GO_LEFT;right=SFX_GO_RIGHT;centre=SFX_GO_CENTRE;}
+    else throw std::runtime_error("Unsupported original frontend sound");
+    auto a=sample(left),b=sample(right),c=sample(centre);
+    // Script2 uses nonspatial frontend sounds. AudioLogic's old sequential
+    // centre indexing differs from LCS's named PS2 enum; use the authored
+    // LEFT/RIGHT/CENTRE names, never the adjacent 'WEST' speech sample.
+    if(id==14)a.frequency=b.frequency=5382;
+    AudioSample result;result.frequency=std::max({a.frequency,b.frequency,c.frequency});result.channels=2;
+    const auto frames=[&](const AudioSample& x){return (uint64_t(x.pcm.size()/2)*result.frequency+x.frequency-1)/x.frequency;};
+    const auto count=std::max({frames(a),frames(b),frames(c)});
+    if(!count || count>4*1024*1024)throw std::runtime_error("Original frontend PCM mix exceeds effect capacity");
+    result.pcm.resize(size_t(count)*4);
+    const auto value=[&](const AudioSample& x,uint64_t i){
+        const auto position=double(i)*x.frequency/result.frequency;const auto at=size_t(position);
+        if(at>=x.pcm.size()/2)return 0.0;
+        int16_t first=0,next=0;std::memcpy(&first,x.pcm.data()+at*2,2);
+        if(at+1<x.pcm.size()/2)std::memcpy(&next,x.pcm.data()+(at+1)*2,2);
+        return double(first)+(next-first)*(position-at);
+    };
+    for(uint64_t i=0;i<count;++i){const auto middle=value(c,i)*0.7071067811865476;
+        for(size_t channel=0;channel<2;++channel){const auto mixed=value(channel?b:a,i)+middle;
+            const auto pcm=int16_t(std::clamp(mixed,-32768.0,32767.0));std::memcpy(result.pcm.data()+size_t(i)*4+channel*2,&pcm,2);}}
+    return result;
+}
+bool AudioAdapter::tick_spatial() {
+    std::optional<SpatialListener> transform;
+    for(size_t i=0;i<slots_.size();++i){
+        const auto& slot=slots_[i];if(!slot.started || !slot.position)continue;
+        if(!set_mix || !spatial_listener)return false;
+        if(!transform){transform=spatial_listener();if(!transform)return false;}
+        if(!set_mix(i,mission_audio_mix(*slot.position,*transform)))return false;
+    }
+    return true;
+}
+ContinuousMixContext AudioAdapter::service_source_mix(float native_scale) {
+    // Source ProcessMissionAudio runs once in the audio service, not once per
+    // VM thread or sound object. Keep phone ducking and its recovery shared.
+    bool phone=false;for(const auto& slot:slots_)phone|=slot.phone_call;
+    if(phone)global_sfx_volume_=64;
+    else if(global_sfx_volume_<127)global_sfx_volume_=uint8_t(std::min(127,int(global_sfx_volume_)+5));
+    return {false,global_sfx_volume_,native_scale}; // source constructor: DoubleVolume=false
+}
+bool AudioAdapter::play_car_jerk(const std::array<float,3>& position) {
+    if(!play_positioned_effect || !spatial_listener)return false;
+    for(const auto value:position)if(!std::isfinite(value))return false;
+    const auto listener_state=spatial_listener();
+    if(!listener_state)return false;
+    float squared=0;
+    for(size_t axis=0;axis<3;++axis){
+        if(!std::isfinite(listener_state->position[axis]) || !std::isfinite(listener_state->right[axis]))return false;
+        const float delta=position[axis]-listener_state->position[axis];squared+=delta*delta;
+    }
+    // AudioLogic SOUND_CAR_JERK: bank-0 SFX_SHAG_SUSPENSION, priority 5, max distance 35,
+    // frequency += RandomDisplacement(frequency>>3), volume = table[1]%15 + 55.
+    constexpr float range=35.0f;
+    audio_random_.regenerate(); // Event-owned variation; the SA/project transport does not recreate the LCS audio-frame scheduler.
+    auto effect=archive_.sample(uint32_t(SFX_SHAG_SUSPENSION));
+    effect.frequency=uint32_t(int32_t(effect.frequency)+audio_random_.displacement(effect.frequency>>3));
+    const unsigned emitting=audio_random_.table(1)%15+55;
+    if(!(squared<range*range))return true; // original rejects out-of-range one-shots without a voice
+    // ComputeVolume: full volume inside range/5, then a squared linear fall-off (uint8, capped at 127).
+    const float distance=std::sqrt(squared),minimum=range/5.0f;
+    unsigned volume=emitting;
+    if(!(minimum>distance))volume=std::min<unsigned>(127,uint8_t(float(emitting)*std::pow((range-distance)/(range-minimum),2.0f)));
+    if(volume==0)return true;
+    for(size_t i=0;i+1<effect.pcm.size();i+=2){int16_t value;std::memcpy(&value,effect.pcm.data()+i,2);value=int16_t(int(value)*int(volume)/127);std::memcpy(effect.pcm.data()+i,&value,2);}
+    const auto positioned_mix=mission_audio_mix(position,*listener_state);
+    return play_positioned_effect(effect,{127,positioned_mix.pan});
+}
+bool AudioAdapter::handles(uint16_t opcode) {
+    switch(opcode) {
+    case COMMAND_ADD_ONE_OFF_SOUND:case COMMAND_PLAY_ANNOUNCEMENT:
+    case COMMAND_LOAD_MISSION_AUDIO:case COMMAND_HAS_MISSION_AUDIO_LOADED:
+    case COMMAND_PLAY_MISSION_AUDIO:case COMMAND_HAS_MISSION_AUDIO_FINISHED:
+    case COMMAND_CLEAR_MISSION_AUDIO:case COMMAND_SET_MISSION_AUDIO_POSITION:return true;
+    default:return false;
+    }
+}
+StepResult AudioAdapter::dispatch(Vm& vm,Thread& t,uint16_t opcode) {
+    if(opcode==COMMAND_SET_MISSION_AUDIO_POSITION) {
+        const auto index=vm.parameter(t);std::array<float,3> position{};
+        for(auto& value:position){const auto raw=vm.parameter(t);std::memcpy(&value,&raw,4);}
+        if(index<1 || index>2)throw std::runtime_error("Invalid original positioned speech slot");
+        for(auto value:position)if(!std::isfinite(value))throw std::runtime_error("Invalid original mission audio position");
+        if(!set_mix || !spatial_listener){t.diagnostic="Original spatial speech mixer backend unavailable";return StepResult::unsupported;}
+        slots_[size_t(index-1)].position=position;return StepResult::continued;
+    }
+    if(opcode==COMMAND_ADD_ONE_OFF_SOUND) {
+        std::array<float,3> position{};
+        for(auto& value:position){const auto bits=vm.parameter(t);std::memcpy(&value,&bits,4);}
+        const auto id=vm.parameter(t);
+        // Original Script2 explicitly sends 0xCD (SOUND_NO_SOUND) for 71.
+        // This is an original silent event, not a missing sound workaround.
+        if(id==71)return StepResult::continued;
+        if(!play_effect){t.diagnostic="Original one-off sound playback backend unavailable";return StepResult::unsupported;}
+        for(auto value:position)if(!std::isfinite(value))throw std::runtime_error("Invalid original sound position");
+        if(id==1 || (id>=7 && id<=10) || id==13 || id==14 || id==16 || id==70) {
+            if(!play_effect(archive_.frontend_effect(id))){t.diagnostic="Original frontend PCM playback failed";return StepResult::unsupported;}
+            return StepResult::continued;
+        }
+        if(!listener){t.diagnostic="Original one-off spatial listener unavailable";return StepResult::unsupported;}
+        sound_random_=sound_random_*1664525u+1013904223u;
+        uint32_t index=0;float range=0;int volume=0,frequency=0;unsigned jitter=0;
+        // LCS AudioLogic::ProcessOneShotScriptObject. Script sound IDs are
+        // not SA IDs. Read original samples instead of forwarding 018C.
+        switch(id) {
+        case 3:index=SFX_COL_GATE;range=40;volume=60;frequency=10600;jitter=5;break;
+        case 5:index=SFX_COL_CAR_PANEL_2;range=80;volume=60;frequency=22000;jitter=5;break;
+        case 18:index=SFX_BOMB_BEEP;range=40;volume=70;frequency=20159;break;
+        case 35:index=SFX_SEAPLANE_LOW;range=1000;volume=100;break;
+        case 12:case 52:case 53:case 54:index=SFX_BULLET_WALL_1+sound_random_%3;range=50;volume=90+(sound_random_>>8)%20;jitter=5;break;
+        case 57:case 58:index=SFX_GLASS_SMASH;range=60;volume=id==57?70:60;break;
+        case 59:index=SFX_GLASS_CRACK;range=60;volume=70;break;
+        case 60:index=SFX_GLASS_SHARD_1+sound_random_%4;range=55;volume=25;frequency=19000;break;
+        case 61:case 62:index=id==61?SFX_WOODEN_BOX_SMASH:SFX_CARDBOARD_BOX_SMASH;range=60;volume=80+(sound_random_>>8)%20;frequency=18600;break;
+        case 63:index=SFX_COL_CAR_1+sound_random_%5;range=60;volume=70+(sound_random_>>8)%30;jitter=4;break;
+        case 64:index=SFX_TYRE_BUMP;range=60;volume=60+(sound_random_>>8)%30;jitter=4;break;
+        case 65:index=SFX_HIT_BALL;range=60;volume=60+(sound_random_>>8)%30;jitter=4;break;
+        case 67:index=SFX_BULLET_SHELL_HIT_GROUND_2;range=20;volume=30+(sound_random_>>8)%20;frequency=11000;break;
+        default:t.diagnostic="Original one-off sound requires implementation: "+std::to_string(id);return StepResult::unsupported;
+        }
+        const auto camera=listener();
+        if(!camera){t.diagnostic="Original spatial sound listener unavailable";return StepResult::unsupported;}
+        float distance=0;for(size_t i=0;i<3;++i){if(!std::isfinite((*camera)[i]))throw std::runtime_error("Invalid native sound listener");distance+=std::pow(position[i]-(*camera)[i],2.f);}distance=std::sqrt(distance);
+        // Original engine rejects out-of-range effects; this is not a fake
+        // playback success. Keep the exact quadratic attenuation and clamp.
+        if(distance>=range)return StepResult::continued;
+        if(distance>=range/5)volume=int(volume*std::pow((range-distance)/(range-range/5),2.f));
+        volume=std::min(127,volume);if(volume<=0)return StepResult::continued;
+        auto effect=archive_.sample(index);
+        if(frequency)effect.frequency=uint32_t(frequency);
+        if(jitter){const auto offset=effect.frequency>>jitter;effect.frequency=uint32_t(int(effect.frequency)+int((sound_random_>>16)%(2*offset+1))-int(offset));}
+        for(size_t i=0;i<effect.pcm.size();i+=2){int16_t value;std::memcpy(&value,effect.pcm.data()+i,2);value=int16_t(int(value)*volume/127);std::memcpy(effect.pcm.data()+i,&value,2);}
+        if(!play_effect(effect)){t.diagnostic="Original spatial one-off PCM playback failed";return StepResult::unsupported;}
+        return StepResult::continued;
+    }
+    if(opcode==COMMAND_PLAY_ANNOUNCEMENT) {
+        const auto index=vm.parameter(t);
+        // Original MusicManager queues NEWS_A + index only when no news
+        // broadcast is already in progress. Keep speech slots independent.
+        if(index<0 || index>=14 || !play || !stop || !finished){t.diagnostic="Original news playback backend unavailable or invalid news ID";return StepResult::unsupported;}
+        if(!announcement_started_){archive_.announcement(index);pending_announcement_=index;}
+        return StepResult::continued;
+    }
+    if(opcode!=COMMAND_LOAD_MISSION_AUDIO && opcode!=COMMAND_HAS_MISSION_AUDIO_LOADED &&
+       opcode!=COMMAND_PLAY_MISSION_AUDIO && opcode!=COMMAND_HAS_MISSION_AUDIO_FINISHED && opcode!=COMMAND_CLEAR_MISSION_AUDIO)
+        return StepResult::unsupported;
+    if(!play || !stop || !finished){t.diagnostic="Original mission speech playback backend is missing";return StepResult::unsupported;}
+    const auto index=vm.parameter(t);
+    if(index<1 || index>2)throw std::runtime_error("Invalid LCS mission audio slot (expected 1 or 2)");
+    const auto n=size_t(index-1);auto& slot=slots_[n];
+    switch(opcode) {
+    case COMMAND_LOAD_MISSION_AUDIO: {
+        auto sample=archive_.sample(vm.text_label(t));
+        stop(n);slot.sample=std::move(sample);slot.started=false;slot.position.reset();slot.phone_call=false;break;
+    }
+    case COMMAND_HAS_MISSION_AUDIO_LOADED:vm.compare(t,slot.sample.has_value());break;
+    case COMMAND_PLAY_MISSION_AUDIO:
+        if(slot.sample && !slot.started) {
+            if(!play(n,*slot.sample)){t.diagnostic="Original mission speech playback failed";return StepResult::unsupported;}
+            slot.started=true;
+        }
+        break;
+    case COMMAND_HAS_MISSION_AUDIO_FINISHED:vm.compare(t,slot.started && finished(n));break;
+    case COMMAND_CLEAR_MISSION_AUDIO:stop(n);slot=Slot{};break;
+    }
+    return StepResult::continued;
+}
+}

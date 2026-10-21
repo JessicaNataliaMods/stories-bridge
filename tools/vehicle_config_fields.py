@@ -1,0 +1,460 @@
+"""Field-by-field LCS vehicle configuration adapters for San Andreas.
+
+The mappings here follow the parsers and data consumers in:
+
+* ``../res-relcs/src/core/FileLoader.cpp`` (14-field LCS ``cars`` rows)
+* ``../res-relcs/src/vehicles/HandlingMgr.cpp`` and ``HandlingMgr.h``
+* ``vendor/sa-reference/source_game_sa_FileLoader.cpp`` (15-field SA rows)
+* ``vendor/sa-reference/source_game_sa_cHandlingDataMgr.cpp`` and the SA
+  ``eVehicleHandlingModelFlags`` / ``eVehicleHandlingFlags`` enums.
+
+No source value is taken from a donor SA vehicle. Values that SA requires but
+LCS does not express are explicit adapters with a reason in the returned
+provenance. Unmapped active LCS handling bits are returned to the caller so it
+can reject that vehicle rather than silently assigning a different meaning.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Dict, List, Optional, Sequence, Tuple
+
+
+# LCS HandlingMgr.h: HANDLING_* bits -> SA's separate modelFlags word.
+# Numeric values on the right are from vendor/sa-reference/
+# source_game_sa_Enums_eVehicleHandlingModelFlags.h.
+MODEL_FLAG_ADAPTERS = {
+    0x00000004: (0x00000010, "reverse bonnet"),
+    0x00000008: (0x00000020, "hanging boot"),
+    0x00000010: (0x00000100, "no doors"),
+    0x00000020: (0x00000001, "van body"),
+    0x00000040: (0x00000002, "bus body"),
+    0x00000080: (0x00000004, "low body"),
+    0x00000100: (0x00002000, "double exhaust"),
+    0x00000200: (0x00000040, "tailgate boot"),
+    0x00000400: (0x00000080, "non-swinging boot"),
+    0x00002000: (0x00000800, "no-roof/convertible behavior"),
+    0x00004000: (0x00000008, "large body"),
+    0x00010000: (0x01000000, "bike physical class"),
+    0x00020000: (0x02000000, "helicopter physical class"),
+    0x00040000: (0x04000000, "plane physical class"),
+    0x00080000: (0x08000000, "boat physical class"),
+    0x00100000: (0x00001000, "no exhaust"),
+    0x00800000: (0x00000400, "sit-in-boat layout"),
+    0x10000000: (0x40000000, "force ground clearance"),
+}
+
+# LCS HandlingMgr.h: HANDLING_* bits -> SA's separate handlingFlags word.
+# SA flag values are from vendor/sa-reference/source_game_sa_Enums_eVehicleHandlingFlags.h.
+HANDLING_FLAG_ADAPTERS = {
+    0x00000001: (0x00000001, "1G boost"),
+    0x00000002: (0x00000002, "2G boost"),
+    0x00000800: (0x00000004, "NPC anti-roll"),
+    0x00001000: (0x00000008, "NPC neutral handling"),
+    0x00008000: (0x00400000, "halogen lights"),
+    0x00200000: (0x00800000, "process rear wheel first"),
+    0x01000000: (0x00004000, "wide rear wheel"),
+    0x02000000: (0x00000200, "narrow front wheel"),
+    0x04000000: (0x00100000, "off-road ability"),
+}
+
+# LCS HandlingMgr.h defines HANDBRAKE_TYRE, but its only handling effect in
+# Automobile.cpp is commented out. It therefore has no active LCS behavior to
+# port and no direct SA flag counterpart.
+INERT_LCS_FLAGS = {
+    0x00400000: "HANDBRAKE_TYRE: the only LCS behavior is commented out in Automobile.cpp",
+}
+
+LCS_HANDLING_FIELD_NAMES = (
+    "handling_name", "mass", "turn_mass", "drag_multiplier", "center_of_mass_x",
+    "center_of_mass_y", "center_of_mass_z", "percent_submerged", "traction_multiplier",
+    "traction_loss", "traction_bias", "gear_count", "maximum_velocity",
+    "engine_acceleration", "engine_inertia", "drive_type", "engine_type",
+    "brake_deceleration", "brake_bias", "abs", "steering_lock", "suspension_force",
+    "suspension_damping", "high_speed_compression_damping", "suspension_upper_limit",
+    "suspension_lower_limit", "suspension_bias", "suspension_anti_dive",
+    "seat_offset", "collision_damage_multiplier", "monetary_value", "combined_flags",
+    "front_lights", "rear_lights",
+)
+
+SA_HANDLING_FIELD_NAMES = (
+    "handling_name", "mass", "turn_mass", "drag_multiplier", "center_of_mass_x",
+    "center_of_mass_y", "center_of_mass_z", "percent_submerged", "traction_multiplier",
+    "traction_loss", "traction_bias", "gear_count", "maximum_velocity",
+    "engine_acceleration", "engine_inertia", "drive_type", "engine_type",
+    "brake_deceleration", "brake_bias", "abs", "steering_lock", "suspension_force",
+    "suspension_damping", "high_speed_compression_damping", "suspension_upper_limit",
+    "suspension_lower_limit", "suspension_bias", "suspension_anti_dive",
+    "seat_offset", "collision_damage_multiplier", "monetary_value", "model_flags",
+    "handling_flags", "front_lights", "rear_lights", "animation_group",
+)
+
+LCS_IDE_FIELD_NAMES = (
+    "model_id", "model_name", "texture_dictionary", "vehicle_type", "handling_name",
+    "game_name", "animation_file", "vehicle_class", "frequency", "level",
+    "component_rules", "wheel_model_id", "wheel_scale", "normal_splay",
+)
+
+SA_IDE_FIELD_NAMES = (
+    "model_id", "model_name", "texture_dictionary", "vehicle_type", "handling_name",
+    "game_name", "animation_file", "vehicle_class", "frequency", "model_flags",
+    "component_rules", "wheel_model_id", "wheel_size_front", "wheel_size_rear",
+    "wheel_upgrade_class",
+)
+
+SA_VEHICLE_CLASSES = {
+    "normal", "poorfamily", "richfamily", "executive", "worker", "big", "taxi",
+    "moped", "motorbike", "leisureboat", "workerboat", "bicycle", "ignore",
+}
+
+# LCS HandlingMgr.h body/path flags -> the SA vehicle association groups written
+# as the final field of handling.cfg. These IDs are the SA AssocGroupId values
+# consumed by tHandlingData::m_nAnimGroup, not donor-model animation settings.
+# Their names are the SA categories used in Vehicle.cpp; IDs are confirmed by
+# native SA handling rows (low sports cars=1, LINERUN=2, BUS=16; standard=0).
+SA_ANIMATION_GROUP_ADAPTERS = {
+    0x00000080: (1, "ANIM_GROUP_LOWCARAMIMS", "low car"),
+    0x00000020: (2, "ANIM_GROUP_TRKCARANIMS", "truck"),
+    0x00000040: (16, "ANIM_GROUP_BUSCARANIMS", "bus"),
+}
+SA_STANDARD_ANIMATION_GROUP = (0, "ANIM_GROUP_STDCARAMIMS", "standard car")
+
+
+def _field_record(index: int, name: str, value: str, source_index: Optional[int],
+                  source_name: str, rule: str) -> Dict[str, object]:
+    return {
+        "target_index": index,
+        "target_field": name,
+        "value": value,
+        "source_index": source_index,
+        "source_field": source_name,
+        "rule": rule,
+    }
+
+
+def _adapt_flags(flags: int) -> Tuple[int, int, int, List[Dict[str, object]], List[Dict[str, object]]]:
+    model_flags = 0
+    handling_flags = 0
+    mapped_input = 0
+    trace: List[Dict[str, object]] = []
+    ignored: List[Dict[str, object]] = []
+
+    for source_bit, (target_bit, meaning) in MODEL_FLAG_ADAPTERS.items():
+        if flags & source_bit:
+            model_flags |= target_bit
+            mapped_input |= source_bit
+            trace.append({
+                "source_bit": "0x%08X" % source_bit,
+                "target_word": "model_flags",
+                "target_bit": "0x%08X" % target_bit,
+                "meaning": meaning,
+                "rule": "semantic bit mapping from LCS HandlingMgr.h to SA model flags",
+            })
+    for source_bit, (target_bit, meaning) in HANDLING_FLAG_ADAPTERS.items():
+        if flags & source_bit:
+            handling_flags |= target_bit
+            mapped_input |= source_bit
+            trace.append({
+                "source_bit": "0x%08X" % source_bit,
+                "target_word": "handling_flags",
+                "target_bit": "0x%08X" % target_bit,
+                "meaning": meaning,
+                "rule": "semantic bit mapping from LCS HandlingMgr.h to SA handling flags",
+            })
+    for source_bit, reason in INERT_LCS_FLAGS.items():
+        if flags & source_bit:
+            mapped_input |= source_bit
+            ignored.append({"source_bit": "0x%08X" % source_bit, "reason": reason})
+
+    unmapped = flags & ~mapped_input
+    return model_flags, handling_flags, unmapped, trace, ignored
+
+
+def derive_sa_animation_group(ide_fields: Sequence[str],
+                             lcs_handling_flags: int) -> Tuple[str, str, Dict[str, object]]:
+    """Derive SA's animation group from LCS's actual door-path handling flags.
+
+    LCS has no animation-group token: ``PedAI.cpp`` selects standard, low,
+    van, or coach/bus entry and door associations from ``HANDLING_IS_LOW``,
+    ``HANDLING_IS_VAN`` and ``HANDLING_IS_BUS``. SA stores an association-group
+    ID in handling field 35. The adapter maps those LCS behaviors to SA's low,
+    truck (the closest SA group to LCS van), and bus groups, respectively.
+    Ordinary LCS cars use SA's standard car group. It never borrows the group
+    from the SA model slot being replaced.
+    """
+    if len(ide_fields) < len(LCS_IDE_FIELD_NAMES):
+        raise ValueError("LCS vehicles.ide row must have 14 fields")
+    vehicle_type = ide_fields[3].strip().lower()
+    if vehicle_type == "ferry":
+        # The source ferry has script-positioned boarding markers, not a car
+        # entry/door animation path. Its moving ramps are consumed separately
+        # by the ferry service. SA still requires this handling token; use the
+        # neutral standard group, never a donor vehicle's configuration.
+        return "0", "SA-required standard animation group for the source ferry; scripted boarding and ramp transforms are separate consumers", {
+            "source_bit": None,
+            "source_meaning": "source ferry with scripted boarding markers",
+            "target_group": "standard",
+            "target_group_id": 0,
+        }
+    if vehicle_type != "car":
+        raise ValueError("SA car animation-group adapter only supports LCS type=car")
+
+    matched = [
+        (source_bit, adapter)
+        for source_bit, adapter in SA_ANIMATION_GROUP_ADAPTERS.items()
+        if lcs_handling_flags & source_bit
+    ]
+    if len(matched) > 1:
+        names = ", ".join(adapter[2] for _, adapter in matched)
+        raise ValueError(
+            "Conflicting LCS animation-path flags (%s); one SA animation group "
+            "cannot preserve multiple LCS paths" % names
+        )
+
+    if matched:
+        source_bit, (group_id, group_name, semantic) = matched[0]
+        return str(group_id), (
+            "derive the SA-only animation_group from the LCS combined_flags "
+            "bit 0x%08X (%s path); SA group %s is ID %d. SA's "
+            "CVehicle::ProcessOpenDoor consumes m_nAnimGroup as AssocGroupId; "
+            "the ID matches native SA handling data" %
+            (source_bit, semantic, group_name, group_id)
+        ), {
+            "source_bit": "0x%08X" % source_bit,
+            "source_meaning": semantic,
+            "target_group": group_name,
+            "target_group_id": group_id,
+        }
+
+    group_id, group_name, semantic = SA_STANDARD_ANIMATION_GROUP
+    return str(group_id), (
+        "derive the SA-only animation_group from absence of LCS low/van/bus "
+        "path flags; use %s ID %d for the ordinary LCS car path. SA's "
+        "CVehicle::ProcessOpenDoor consumes m_nAnimGroup as AssocGroupId; "
+        "the ID matches native SA handling data" %
+        (group_name, group_id)
+    ), {
+        "source_bit": None,
+        "source_meaning": "ordinary car path (no LCS low/van/bus bit set)",
+        "target_group": group_name,
+        "target_group_id": group_id,
+    }
+
+
+def convert_handling(lcs_fields: Sequence[str], native_name: str,
+                     ide_fields: Sequence[str]) -> Dict[str, object]:
+    """Convert one 34-token LCS handling row into SA's 36-token row.
+
+    Returns ``fields``, one provenance entry per output field, mapped flag-bit
+    details, ignored inert bits, and ``unmapped_flags``. The caller must reject
+    a non-zero ``unmapped_flags`` value before preparing the vehicle.
+    """
+    fields = [str(value).strip() for value in lcs_fields]
+    if len(fields) != 34:
+        raise ValueError("LCS handling row must have 34 fields")
+    if not native_name or any(ch.isspace() for ch in native_name):
+        raise ValueError("SA handling name must be a non-empty token")
+    if len(ide_fields) < len(LCS_IDE_FIELD_NAMES):
+        raise ValueError("LCS vehicles.ide row must have 14 fields")
+    if fields[0].casefold() != ide_fields[4].strip().casefold():
+        raise ValueError("LCS IDE handling name does not match the handling row")
+
+    for index, value in enumerate(fields[1:31], 1):
+        if index in (15, 16):
+            if value.upper() not in {"F", "R", "4", "P", "D", "E"}:
+                raise ValueError("Invalid LCS transmission type at field %d" % index)
+        else:
+            try:
+                number = float(value)
+            except ValueError as error:
+                raise ValueError("Non-numeric LCS handling field %d" % index) from error
+            if not math.isfinite(number):
+                raise ValueError("Nonfinite LCS handling field %d" % index)
+
+    try:
+        lcs_flags = int(fields[31], 16)
+    except ValueError as error:
+        raise ValueError("Invalid hexadecimal LCS handling flags") from error
+    if lcs_flags < 0 or lcs_flags > 0xFFFFFFFF:
+        raise ValueError("LCS handling flags are outside uint32 range")
+
+    model_flags, handling_flags, unmapped, flag_trace, ignored_flags = _adapt_flags(lcs_flags)
+    animation_group, animation_reason, animation_adapter = derive_sa_animation_group(
+        ide_fields, lcs_flags
+    )
+
+    output = fields[:31] + ["%X" % model_flags, "%X" % handling_flags]
+    output += fields[32:34] + [animation_group]
+    output[0] = native_name
+    # LCS HandlingMgr.cpp leaves switch case 23 unassigned; SA consumes it as
+    # high-speed compression damping. Zero preserves LCS behavior instead of
+    # adding a new damping effect from an unrelated donor row.
+    output[23] = "0.0"
+    if len(output) != 36:
+        raise AssertionError("Internal SA handling layout must have 36 fields")
+
+    provenance: List[Dict[str, object]] = []
+    provenance.append(_field_record(
+        0, SA_HANDLING_FIELD_NAMES[0], native_name, 0,
+        LCS_HANDLING_FIELD_NAMES[0],
+        "use the explicitly assigned target handling key for this native model binding",
+    ))
+    for index in range(1, 31):
+        if index == 23:
+            provenance.append({
+                "target_index": index,
+                "target_field": SA_HANDLING_FIELD_NAMES[index],
+                "value": "0.0",
+                "source_index": index,
+                "source_field": LCS_HANDLING_FIELD_NAMES[index],
+                "source_value": fields[index],
+                "rule": "LCS HandlingMgr.cpp comments case 23 out as unused; SA consumes this field, so zero preserves LCS behavior without adding damping",
+            })
+        else:
+            provenance.append(_field_record(
+                index, SA_HANDLING_FIELD_NAMES[index], fields[index], index,
+                LCS_HANDLING_FIELD_NAMES[index],
+                "same parsed data field in both handling loaders; retain the original LCS token",
+            ))
+
+    model_hex = "%X" % model_flags
+    handling_hex = "%X" % handling_flags
+    provenance.extend([
+        {
+            "target_index": 31,
+            "target_field": "model_flags",
+            "value": model_hex,
+            "source_index": 31,
+            "source_field": "combined_flags",
+            "source_value": fields[31],
+            "rule": "translate each supported LCS feature bit into the SA modelFlags word",
+        },
+        {
+            "target_index": 32,
+            "target_field": "handling_flags",
+            "value": handling_hex,
+            "source_index": 31,
+            "source_field": "combined_flags",
+            "source_value": fields[31],
+            "rule": "translate each supported LCS feature bit into the SA handlingFlags word",
+        },
+        _field_record(33, "front_lights", fields[32], 32,
+                      LCS_HANDLING_FIELD_NAMES[32],
+                      "same enumerated light-size field in both loaders"),
+        _field_record(34, "rear_lights", fields[33], 33,
+                      LCS_HANDLING_FIELD_NAMES[33],
+                      "same enumerated light-size field in both loaders"),
+        {
+            "target_index": 35,
+            "target_field": "animation_group",
+            "value": animation_group,
+            "source_index": 31,
+            "source_field": LCS_HANDLING_FIELD_NAMES[31],
+            "source_value": fields[31],
+            "animation_group_adapter": animation_adapter,
+            "rule": animation_reason,
+        },
+    ])
+
+    return {
+        "fields": output,
+        "provenance": provenance,
+        "flag_adapters": flag_trace,
+        "animation_group_adapter": animation_adapter,
+        "ignored_flags": ignored_flags,
+        "unmapped_flags": unmapped,
+    }
+
+
+def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
+                texture_dictionary: str, handling_name: str,
+                wheel_model_asset: str) -> Dict[str, object]:
+    """Adapt one 14-token LCS IDE row to SA's 15-token ``cars`` row.
+
+    ``wheel_model_asset`` identifies the converted original LCS wheel geometry
+    embedded into the vehicle DFF by ``lcs-convert-rw --sa-car``. The asset name
+    appears in provenance; SA's separate wheel model index is therefore ``-1``
+    so SA's loader clones the embedded main wheel and does not add a second
+    model. Both SA wheel sizes use the source LCS wheel scale, which is also the
+    wheel diameter used by LCS ground-clearance calculations.
+    """
+    source = [str(value).strip() for value in lcs_fields]
+    if len(source) < len(LCS_IDE_FIELD_NAMES):
+        raise ValueError("LCS vehicles.ide row must have 14 fields")
+    if source[3].lower() != "car":
+        raise ValueError("This IDE adapter only supports original LCS type=car")
+    if source[7].lower() not in SA_VEHICLE_CLASSES:
+        raise ValueError("LCS vehicle class is not accepted by the SA FileLoader: " + source[7])
+    if not model_name or not texture_dictionary or not handling_name:
+        raise ValueError("SA model, TXD, and handling binding names must be provided")
+    for label, value in (("model", model_name), ("TXD", texture_dictionary), ("handling", handling_name)):
+        if any(ch.isspace() for ch in value):
+            raise ValueError("SA %s name must be one token" % label)
+    if not wheel_model_asset:
+        raise ValueError("Converted original LCS wheel asset must be identified")
+    try:
+        wheel_scale = float(source[12])
+    except ValueError as error:
+        raise ValueError("Invalid LCS wheel scale") from error
+    if not math.isfinite(wheel_scale) or wheel_scale <= 0.0 or wheel_scale > 4.0:
+        raise ValueError("LCS wheel scale is outside the converter's supported range")
+    try:
+        frequency = int(source[8], 10)
+        component_rules = int(source[10], 16)
+    except ValueError as error:
+        raise ValueError("Invalid LCS frequency or component-rules field") from error
+    if not 0 <= frequency <= 0xFFFF:
+        raise ValueError("LCS vehicle frequency is outside SA's uint16 field")
+    if not 0 <= component_rules <= 0xFFFFFFFF:
+        raise ValueError("LCS component rules are outside uint32 range")
+
+    output = [
+        str(int(model_id)), model_name, texture_dictionary, source[3], handling_name,
+        source[5], source[6], source[7], source[8], "0", source[10], "-1",
+        source[12], source[12], "-1",
+    ]
+    provenance: List[Dict[str, object]] = [
+        _field_record(0, "model_id", output[0], None, "binding", "assigned unique native SA model slot"),
+        _field_record(1, "model_name", model_name, None, "converted_model", "name of converted original LCS DFF"),
+        _field_record(2, "texture_dictionary", texture_dictionary, None, "converted_texture_dictionary", "name of merged original LCS TXD"),
+        _field_record(3, "vehicle_type", source[3], 3, LCS_IDE_FIELD_NAMES[3], "retain LCS type; this adapter accepts cars only"),
+        _field_record(4, "handling_name", handling_name, 4, LCS_IDE_FIELD_NAMES[4], "use the explicit unique handling binding for the native SA model"),
+        _field_record(5, "game_name", source[5], 5, LCS_IDE_FIELD_NAMES[5], "retain the original LCS display label"),
+        _field_record(6, "animation_file", source[6], 6, LCS_IDE_FIELD_NAMES[6], "retain the original LCS animation-file token"),
+        _field_record(7, "vehicle_class", source[7], 7, LCS_IDE_FIELD_NAMES[7], "retain the LCS population class accepted by SA FileLoader"),
+        _field_record(8, "frequency", source[8], 8, LCS_IDE_FIELD_NAMES[8], "retain original LCS spawn frequency"),
+        {
+            "target_index": 9, "target_field": "model_flags", "value": "0",
+            "source_index": None, "source_field": None,
+            "rule": "SA-only uint8 model flags have no LCS IDE counterpart; use the empty flag set instead of inheriting the replaced SA model's flags",
+        },
+        _field_record(10, "component_rules", source[10], 10, LCS_IDE_FIELD_NAMES[10], "retain original LCS component-rule bitfield"),
+        {
+            "target_index": 11, "target_field": "wheel_model_id", "value": "-1",
+            "source_index": 11, "source_field": LCS_IDE_FIELD_NAMES[11],
+            "source_value": source[11], "derived_asset": wheel_model_asset,
+            "rule": "source wheel model is converted and embedded by --sa-car; -1 prevents SA from attaching a second standalone wheel model",
+        },
+        _field_record(12, "wheel_size_front", source[12], 12, LCS_IDE_FIELD_NAMES[12], "map LCS's single wheel diameter/scale to SA front wheel diameter"),
+        _field_record(13, "wheel_size_rear", source[12], 12, LCS_IDE_FIELD_NAMES[12], "map LCS's single wheel diameter/scale to SA rear wheel diameter"),
+        {
+            "target_index": 14, "target_field": "wheel_upgrade_class", "value": "-1",
+            "source_index": None, "source_field": None,
+            "rule": "LCS has no SA wheel-upgrade class; -1 disables SA-only wheel-mod lookup for this converted fleet model",
+        },
+    ]
+
+    # LCS fields with no SA cars-row destination are still recorded. Their
+    # native consumers are absent from the selected conversion path; they are
+    # never confused with SA's differently named flags or wheel-size fields.
+    unmapped = [
+        {
+            "source_index": 9, "source_field": "level", "value": source[9],
+            "reason": "LCS Loader stores this value in CVehicleModelInfo::m_level; SA's cars row has only model_flags here. It is not used by the LCS vehicle streaming path, so it cannot be represented as a SA vehicle property.",
+        },
+        {
+            "source_index": 13, "source_field": "normal_splay", "value": source[13],
+            "reason": "LCS stores normalSplay on CVehicleModelInfo, but the selected LCS vehicle-model source has no consumer for it and SA's cars row has no matching field.",
+        },
+    ]
+    return {"fields": output, "provenance": provenance, "unmapped_source_fields": unmapped}
