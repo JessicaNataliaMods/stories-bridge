@@ -8,6 +8,8 @@ enum class SaCrusherResolve {ready,streamed_out,unavailable};
 // Exact mounted models and IPL placements; no arbitrary nearby garage objects.
 bool sa_crusher_configure(uint16_t body,uint16_t lid);
 std::optional<bool> sa_crusher_ready();
+// Which check made the last sa_crusher_ready()/resolve unavailable (static text).
+const char* sa_crusher_unavailable_reason();
 SaCrusherResolve sa_crusher_resolve(uintptr_t pool_root,uint16_t body,uint16_t lid,SaCrusherEntities&);
 NativeResult sa_crusher_door(int32_t garage,const std::array<float,8>& bounds,float angle);
 std::optional<bool> sa_crusher_contains(const std::array<float,8>& bounds,const RouteVehicleSnapshot&);

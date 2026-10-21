@@ -10,6 +10,7 @@ namespace lcs {
 namespace {
 uint16_t body_model=0,lid_model=0;
 bool touched=false;
+const char* unavailable_reason="";
 struct HeldVehicle {
     RouteVehicleSnapshot identity;
     uintptr_t cell=0;
@@ -155,8 +156,10 @@ bool sa_crusher_configure(uint16_t body,uint16_t lid) {
     body_model=body;lid_model=lid;return true;
 }
 
+const char* sa_crusher_unavailable_reason(){return unavailable_reason;}
 std::optional<bool> sa_crusher_ready() {
-    if(!valid_models(body_model,lid_model) || !profile())return {};
+    if(!valid_models(body_model,lid_model)){unavailable_reason="crushercrushB/crushertop model bindings not configured";return {};}
+    if(!profile()){unavailable_reason="native bridge/matrix profile mismatch";return {};}
     SaCrusherEntities entities;
     const auto state=sa_crusher_resolve(0xB74498,body_model,lid_model,entities);
     if(state==SaCrusherResolve::unavailable)return {};
@@ -164,30 +167,31 @@ std::optional<bool> sa_crusher_ready() {
 }
 
 SaCrusherResolve sa_crusher_resolve(uintptr_t pool_root,uint16_t body,uint16_t lid,SaCrusherEntities& out) {
-    out={};if(!pool_root || !valid_models(body,lid))return SaCrusherResolve::unavailable;
+    out={};if(!pool_root || !valid_models(body,lid)){unavailable_reason="invalid pool/model request";return SaCrusherResolve::unavailable;}
     __try {
         const auto pool=*reinterpret_cast<const uintptr_t*>(pool_root);
         if(!pool)return SaCrusherResolve::streamed_out;
         const auto data=*reinterpret_cast<const uintptr_t*>(pool);
         const auto flags=*reinterpret_cast<const uintptr_t*>(pool+4);
         const auto count=*reinterpret_cast<const int32_t*>(pool+8);
-        if(!data || !flags || count<0 || count>200000)return SaCrusherResolve::unavailable;
+        if(!data || !flags || count<0 || count>200000){unavailable_reason="building pool unreadable";return SaCrusherResolve::unavailable;}
         for(int32_t slot=0;slot<count;++slot) {
             if(*reinterpret_cast<const uint8_t*>(flags+slot)&0x80)continue;
             const uintptr_t entity=data+uintptr_t(slot)*0x38;
             const auto model=*reinterpret_cast<const uint16_t*>(entity+0x22);
             if(model!=body && model!=lid)continue;
-            if((*reinterpret_cast<const uint8_t*>(entity+0x36)&7)!=1)return SaCrusherResolve::unavailable;
+            if((*reinterpret_cast<const uint8_t*>(entity+0x36)&7)!=1){unavailable_reason="crusher model entity is not a CBuilding";return SaCrusherResolve::unavailable;}
             const auto matrix=*reinterpret_cast<const uintptr_t*>(entity+0x14);
             const auto position=matrix?matrix+0x30:entity+4;
             const auto* at=model==body?body_at:lid_at;
-            for(int i=0;i<3;++i)if(!close(*reinterpret_cast<const float*>(position+i*4),at[i]))return SaCrusherResolve::unavailable;
+            for(int i=0;i<3;++i)if(!close(*reinterpret_cast<const float*>(position+i*4),at[i])){
+                unavailable_reason=model==body?"crushercrushB instance is not at its IPL placement":"crushertop instance is not at its IPL placement";return SaCrusherResolve::unavailable;}
             auto& target=model==body?out.body:out.lid;
-            if(target)return SaCrusherResolve::unavailable;
+            if(target){unavailable_reason=model==body?"duplicate crushercrushB building":"duplicate crushertop building";return SaCrusherResolve::unavailable;}
             target=entity;
         }
         return out.body && out.lid?SaCrusherResolve::ready:SaCrusherResolve::streamed_out;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {out={};return SaCrusherResolve::unavailable;}
+    } __except(EXCEPTION_EXECUTE_HANDLER) {out={};unavailable_reason="building pool read faulted";return SaCrusherResolve::unavailable;}
 }
 
 NativeResult sa_crusher_door(int32_t garage,const std::array<float,8>& bounds,float angle) {

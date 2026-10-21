@@ -621,7 +621,15 @@ struct Campaign {
                     lcs::MissionMessage message;message.key="CRUSHED";message.duration=5000;message.flags=1;message.numbers[0]=reward;
                     return adapter.display_message(message);
                 };
-                garages.world.crusher_ready=[]()->std::optional<bool>{return crusher_cleanup_pending?std::nullopt:lcs::sa_crusher_ready();};
+                garages.world.crusher_ready=[]()->std::optional<bool>{
+                    if(crusher_cleanup_pending)return std::nullopt;
+                    const auto ready=lcs::sa_crusher_ready();
+                    // Name the failing check once per change instead of the generic per-frame refusal.
+                    static std::string reported;
+                    const std::string reason=ready?"":lcs::sa_crusher_unavailable_reason();
+                    if(reason!=reported){reported=reason;if(!reason.empty())log("Crusher readiness unavailable: "+reason);}
+                    return ready;
+                };
                 garages.world.crusher_door=[](int32_t id,const std::array<float,8>& bounds,float angle){
                     return crusher_cleanup_pending?lcs::NativeResult{}:lcs::sa_crusher_door(id,bounds,angle);
                 };
