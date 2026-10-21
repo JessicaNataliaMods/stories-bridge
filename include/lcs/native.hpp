@@ -280,6 +280,8 @@ public:
     std::function<bool(bool)> freeze_ped_zoom;
     std::function<bool(bool)> disable_pause_menu;
     std::function<bool(const std::array<float,7>&,bool,bool)> switch_angled_roads;
+    // Box x1,x2,y1,y2,z1,z2; cars, off. Unset keeps the generic native opcode.
+    std::function<bool(const std::array<float,6>&,bool,bool)> switch_roads;
     std::function<std::optional<ObjectiveActor>(int32_t)> live_ped_identity;
     std::function<std::optional<bool>(int32_t)> char_in_control;
     std::function<std::optional<bool>(int32_t)> char_entering_as_passenger;
@@ -442,10 +444,13 @@ public:
     std::optional<int32_t> model(int32_t id) const;
     std::optional<int32_t> original_vehicle_model(int32_t handle);
     StepResult dispatch(Vm&,Thread&,uint16_t);
-    // Static MAIN facts for a native switched-area box (x1,x2,y1,y2,z1,z2):
-    // MAIN contains a constant SWITCH_ROADS_OFF for exactly this box and no
-    // SWITCH_ROADS_ON for it. Used only to repair saves written before the
-    // car/pedestrian switch boxes were kept apart.
-    bool source_cars_only_switched_off(const std::array<float,6>& box) const;
+    // Native switched-area entry: box x1,x2,y1,y2,z1,z2.
+    struct StoredRoadSwitch {std::array<float,6> box;bool off,cars;};
+    // Car switch-off boxes that MAIN must already have applied for this stored
+    // list: each stored entry matching exactly one MAIN command proves the
+    // straight-line block of road commands around it ran; its car switch-offs
+    // count, clipped away from any car switch-on in the SCM that overlaps them. Used only to repair
+    // saves written before car/pedestrian switch boxes were kept apart.
+    std::vector<std::array<float,6>> proven_source_car_switch_offs(const std::vector<StoredRoadSwitch>& stored) const;
 };
 }

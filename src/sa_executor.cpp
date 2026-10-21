@@ -405,6 +405,62 @@ bool sa_switch_angled_roads(const std::array<float,7>& region,bool cars,bool off
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
+namespace {
+struct RoadSwitchRecord {float box[6];uint8_t off,cars,pad[2];};
+static_assert(sizeof(RoadSwitchRecord)==0x1C);
+constexpr uintptr_t road_switch_count=0x96F050+0x3568,road_switch_records=0x96F050+0x356C;
+int read_road_switches(RoadSwitchRecord* out) {
+    __try {
+        const auto count=*reinterpret_cast<const int32_t*>(road_switch_count);
+        if(count<0 || count>64)return -1;
+        std::memcpy(out,reinterpret_cast<const void*>(road_switch_records),sizeof(RoadSwitchRecord)*size_t(count));
+        return count;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+}
+bool native_switch_roads(const float* b,bool cars,bool off) {
+    __try {
+        reinterpret_cast<void(__thiscall*)(uintptr_t,float,float,float,float,float,float,bool,bool,bool)>(0x452C80)(
+            0x96F050,b[0],b[1],b[2],b[3],b[4],b[5],off,cars,false);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+bool append_road_switch(const RoadSwitchRecord& record) {
+    __try {
+        auto& count=*reinterpret_cast<int32_t*>(road_switch_count);
+        if(count<0 || count>=64)return false;
+        std::memcpy(reinterpret_cast<void*>(road_switch_records+sizeof(RoadSwitchRecord)*size_t(count)),&record,sizeof(record));
+        ++count;return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+}
+std::optional<std::vector<SaRoadSwitch>> sa_road_switches() {
+    if(!sa_executor_profile_matches())return {};
+    RoadSwitchRecord records[64];const auto count=read_road_switches(records);
+    if(count<0)return {};
+    std::vector<SaRoadSwitch> result;
+    for(int i=0;i<count;++i){SaRoadSwitch entry{{},records[i].off!=0,records[i].cars!=0};std::copy(records[i].box,records[i].box+6,entry.box.begin());result.push_back(entry);}
+    return result;
+}
+bool sa_switch_roads(const std::array<float,6>& box,bool cars,bool off,bool restore_contained) {
+    // SwitchRoadsOffInArea (0x452C80) removes every stored area inside the new
+    // box before storing it (0x452D18), whatever its type, so a pedestrian
+    // switch would drop a car switch inside it (and vice versa) and the node
+    // state it describes would be lost at SAVE/LOAD. Node flags of the two
+    // types are independent; re-store the other type's removed areas.
+    if(!sa_executor_profile_matches())return false;
+    RoadSwitchRecord before[64],after[64];
+    const auto count=read_road_switches(before);
+    if(count<0 || !native_switch_roads(box.data(),cars,off))return false;
+    const auto present=read_road_switches(after);
+    if(present<0)return false;
+    for(int i=0;i<count;++i) {
+        const bool same_type=(before[i].cars!=0)==cars;
+        if(same_type && (!restore_contained || std::equal(box.begin(),box.end(),before[i].box)))continue;
+        const bool kept=std::any_of(after,after+present,[&](const RoadSwitchRecord& r){return std::memcmp(&r,&before[i],sizeof(r))==0;});
+        if(!kept)append_road_switch(before[i]);
+    }
+    return true;
+}
 std::optional<bool> sa_char_in_control(int32_t handle) {
     if(!sa_executor_profile_matches())return {};
     __try {

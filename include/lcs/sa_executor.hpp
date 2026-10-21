@@ -162,6 +162,14 @@ bool sa_clear_garage_message();
 std::optional<int32_t> sa_collectables(bool total,std::optional<int32_t> setting);
 std::optional<uint8_t> sa_model_class(int32_t model);
 bool sa_switch_angled_roads(const std::array<float,7>&,bool cars,bool off);
+// CPathFind's persistent switched-area list (ThePaths+0x3568, saved by
+// 0x5D34C0): box x1,x2,y1,y2,z1,z2, switch-off and cars flags.
+struct SaRoadSwitch {std::array<float,6> box;bool off,cars;};
+std::optional<std::vector<SaRoadSwitch>> sa_road_switches();
+// SwitchRoadsOffInArea plus keeping stored areas of the other type. A save
+// repair also keeps same-type areas it contains (restore_contained). Areas
+// that do not fit SA's 64 entries stay applied to nodes but are not stored.
+bool sa_switch_roads(const std::array<float,6>& box,bool cars,bool off,bool restore_contained=false);
 std::optional<bool> sa_char_in_control(int32_t ped);
 std::optional<bool> sa_char_entering_as_passenger(int32_t ped);
 bool sa_set_char_crouch(int32_t ped,bool crouch,int32_t duration);

@@ -158,7 +158,10 @@ Vm::Ref Vm::reference(Thread& t) {
 }
 int32_t Vm::get(Thread& t, Ref r) const {
     if (r.global) {
-        if (r.index < 8 || r.index + 4ull > variable_space) throw std::runtime_error("Global outside variable space");
+        // Retail reads globals straight from ScriptSpace. MAIN reads one
+        // undeclared global (ambpick's G6643) past the variable area, which
+        // yields MAIN's own code bytes there; reads stay within MAIN.
+        if (r.index < 8 || r.index + 4ull > main_size) throw std::runtime_error("Global outside MAIN script space");
         return int32_t(read32(memory, r.index));
     }
     if (r.index >= t.locals.size() || (r.index >= 96 && r.index < 104))
@@ -167,6 +170,7 @@ int32_t Vm::get(Thread& t, Ref r) const {
 }
 void Vm::set(Thread& t, Ref r, int32_t value) {
     (void)get(t, r);
+    if (r.global && r.index + 4ull > variable_space) throw std::runtime_error("Global write outside variable space");
     if (r.global) {
         const auto bits = uint32_t(value);
         for (uint32_t i=0; i<4; ++i) memory[r.index+i] = uint8_t(bits >> (8*i));
@@ -191,12 +195,14 @@ uintptr_t Vm::peek_variable_identity(Thread& t) {
     const auto saved=t.ip;
     struct Restore {Thread& t;uint32_t ip;~Restore(){t.ip=ip;}} restore{t,saved};
     const auto r=reference(t);(void)get(t,r);
+    if(r.global && r.index+4ull>variable_space)throw std::runtime_error("Variable identity outside variable space");
     return r.global ? reinterpret_cast<uintptr_t>(memory.data()+r.index)
                     : reinterpret_cast<uintptr_t>(&t.locals[r.index]);
 }
 uint32_t Vm::global_reference(Thread& t) {
     const auto r=reference(t);(void)get(t,r);
     if(!r.global)throw std::runtime_error("Script declaration requires a global variable");
+    if(r.index+4ull>variable_space)throw std::runtime_error("Script declaration outside variable space");
     return r.index;
 }
 void Vm::store(Thread& t, int32_t value) { set(t, reference(t), value); }

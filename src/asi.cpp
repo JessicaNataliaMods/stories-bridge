@@ -304,53 +304,30 @@ int collect_road_switches(RoadSwitchArea* out,int capacity) {
         return count;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
 }
-// Saves written before v88 lost car switches: an identical pedestrian box
-// evicted the car entry (0x452D18). Restore a car switch only for a stored
-// pedestrian box with no car entry when MAIN switches cars off for exactly that
-// box and never on; MAIN issues those pairs together, so a stored pedestrian
-// entry means its car switch had already run. The car box is stored with the
-// v88 disjoint edges (car min x -1 mm, pedestrian max x +1 mm). SA stores args
-// as x1,x2,y1,y2,z1,z2; a new area evicts every contained one, so entries the
-// insert evicted are replayed in their original order.
-using SwitchRoadsInArea=void(__thiscall*)(void*,float,float,float,float,float,float,bool,bool,bool);
-bool replay_road_switches(const RoadSwitchArea* stored,const bool* repair,int first,int count) {
-    const auto switch_roads=reinterpret_cast<SwitchRoadsInArea>(0x452C80);
-    auto* const paths=reinterpret_cast<void*>(0x96F050);
-    __try {
-        for(int i=first;i<count;++i) {
-            const auto* b=stored[i].box;
-            if(repair[i]) {
-                switch_roads(paths,b[0]-0.001f,b[1],b[2],b[3],b[4],b[5],true,true,false);
-                switch_roads(paths,b[0],b[1]+0.001f,b[2],b[3],b[4],b[5],stored[i].off!=0,false,false);
-            } else switch_roads(paths,b[0],b[1],b[2],b[3],b[4],b[5],stored[i].off!=0,stored[i].cars!=0,false);
-        }
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
-}
+// Saves written before v88 lost car switches: SA's shared switched-area list
+// dropped car areas inside later pedestrian areas (0x452D18) and holds only 64
+// areas, while MAIN's start-up block alone switches more. MAIN's straight-line
+// road blocks prove which car switch-offs must hold (any stored area matching
+// exactly one source command proves its block ran); re-apply the missing ones
+// in source order without dropping the stored areas they contain.
 int repair_evicted_car_switches(const lcs::NativeAdapter& adapter) {
-    RoadSwitchArea before[64];const auto count=collect_road_switches(before,64);
-    if(count<=0)return count;
-    bool repair[64]{};int repaired=0;
-    for(int i=0;i<count;++i) {
-        const auto& ped=before[i];
-        if(ped.cars)continue;
-        const bool car_present=std::any_of(before,before+count,[&](const RoadSwitchArea& a){
-            if(!a.cars)return false;
-            for(int k=0;k<6;++k)if(std::fabs(a.box[k]-ped.box[k])>0.002f)return false;
+    const auto stored=lcs::sa_road_switches();
+    if(!stored)return -1;
+    std::vector<lcs::NativeAdapter::StoredRoadSwitch> evidence;
+    for(const auto& entry:*stored)evidence.push_back({entry.box,entry.off,entry.cars});
+    int repaired=0;
+    for(const auto& box:adapter.proven_source_car_switch_offs(evidence)) {
+        const auto current=lcs::sa_road_switches();
+        if(!current)return -1;
+        const bool present=std::any_of(current->begin(),current->end(),[&](const lcs::SaRoadSwitch& a){
+            if(!a.cars || !a.off)return false;
+            for(int axis=0;axis<3;++axis)if(a.box[2*axis]>box[2*axis]+0.002f || a.box[2*axis+1]<box[2*axis+1]-0.002f)return false;
             return true;});
-        if(car_present)continue;
-        repair[i]=adapter.source_cars_only_switched_off({ped.box[0],ped.box[1],ped.box[2],ped.box[3],ped.box[4],ped.box[5]});
-        repaired+=repair[i];
+        if(present)continue;
+        if(!lcs::sa_switch_roads(box,true,true,true))return -1;
+        char text[200];std::snprintf(text,sizeof(text),"Road switch repair: restored car switch-off x=%.1f..%.1f y=%.1f..%.1f z=%.1f..%.1f",box[0],box[1],box[2],box[3],box[4],box[5]);log(text);
+        ++repaired;
     }
-    if(!repaired)return 0;
-    // Replay from the first repaired entry in stored order: earlier entries
-    // were not contained in it (it would have been inserted after them), and
-    // re-inserting an identical later entry only replaces itself.
-    const auto first=int(std::find(repair,repair+count,true)-repair);
-    if(!replay_road_switches(before,repair,first,count))return -1;
-    for(int i=0;i<count;++i)if(repair[i]){char text[200];const auto* b=before[i].box;
-        std::snprintf(text,sizeof(text),"Road switch repair: restored evicted car switch-off x=%.1f..%.1f y=%.1f..%.1f z=%.1f..%.1f",b[0],b[1],b[2],b[3],b[4],b[5]);log(text);}
-    log("Road switch repair: replayed stored areas from #"+std::to_string(first)+" of "+std::to_string(count));
     return repaired;
 }
 bool road_switches_reported=false;
@@ -860,6 +837,7 @@ struct Campaign {
         }
         adapter.collectables=lcs::sa_collectables;
         adapter.switch_angled_roads=lcs::sa_switch_angled_roads;
+        adapter.switch_roads=[](const std::array<float,6>& box,bool cars,bool off){return lcs::sa_switch_roads(box,cars,off);};
         adapter.live_ped_identity=lcs::sa_live_objective_actor;
         const auto route_actor=[this](int32_t handle)->std::optional<lcs::ObjectiveActor> {
             const auto it=route_actor_refs.find(handle);

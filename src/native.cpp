@@ -1151,10 +1151,11 @@ std::optional<std::pair<bool,bool>> NativeAdapter::active_seat_rules(int32_t ped
     if(rear!=rear_seats_.end() && !rear_ok)rear_seats_.erase(ped);
     return std::pair{front_ok,rear_ok};
 }
-bool NativeAdapter::source_cars_only_switched_off(const std::array<float,6>& box) const {
-    // Linear byte scan of MAIN; a match needs the opcode followed by six
-    // constant operands equal to the stored box, so data bytes cannot pass.
-    const auto& code=image_.bytes;const size_t end=std::min<size_t>(image_.main_size,code.size());
+std::vector<std::array<float,6>> NativeAdapter::proven_source_car_switch_offs(const std::vector<StoredRoadSwitch>& stored) const {
+    // Linear byte scan of MAIN and missions for road-restriction commands with
+    // constant operands. Commands that follow each other byte for byte form a
+    // block with no branch or wait, so one executed command proves the block ran.
+    const auto& code=image_.bytes;const size_t end=code.size();
     auto constant=[&](size_t& at,float& value)->bool{
         if(at>=end)return false;const auto kind=code[at++];uint32_t bits=0;
         auto need=[&](size_t n){return at+n<=end;};
@@ -1168,22 +1169,60 @@ bool NativeAdapter::source_cars_only_switched_off(const std::array<float,6>& box
         }
         std::memcpy(&value,&bits,4);return std::isfinite(value);
     };
-    auto matches=[&](size_t at)->bool{
-        std::array<float,6> v{};
-        for(auto& value:v)if(!constant(at,value))return false;
-        const std::array<float,6> source{std::min(v[0],v[3]),std::max(v[0],v[3]),std::min(v[1],v[4]),std::max(v[1],v[4]),std::min(v[2],v[5]),std::max(v[2],v[5])};
-        for(size_t i=0;i<6;++i)if(std::fabs(source[i]-box[i])>(i<2?0.002f:0.0001f))return false;
-        return true;
-    };
-    bool off=false;
+    struct Command {size_t start,end;uint16_t op;std::array<float,6> box;size_t block;};
+    std::vector<Command> commands;
     for(size_t at=0;at+2<=end;++at) {
-        const auto word=read16(code,at);
-        if(word!=COMMAND_SWITCH_ROADS_OFF && word!=COMMAND_SWITCH_ROADS_ON)continue;
-        if(!matches(at+2))continue;
-        if(word==COMMAND_SWITCH_ROADS_ON)return false;
-        off=true;
+        const auto op=read16(code,at);size_t operands;
+        if(op==COMMAND_SWITCH_ROADS_ON || op==COMMAND_SWITCH_ROADS_OFF || op==COMMAND_SWITCH_PED_ROADS_ON || op==COMMAND_SWITCH_PED_ROADS_OFF ||
+           op==COMMAND_MARK_ROADS_BETWEEN_LEVELS || op==COMMAND_MARK_PED_ROADS_BETWEEN_LEVELS)operands=6;
+        else if(op==COMMAND_SWITCH_ROADS_ON_ANGLED || op==COMMAND_SWITCH_ROADS_OFF_ANGLED ||
+                op==COMMAND_SWITCH_PED_ROADS_ON_ANGLED || op==COMMAND_SWITCH_PED_ROADS_OFF_ANGLED)operands=7;
+        else continue;
+        size_t next=at+2;std::array<float,7> v{};bool valid=true;
+        for(size_t i=0;i<operands && valid;++i)valid=constant(next,v[i]);
+        if(!valid)continue;
+        commands.push_back({at,next,op,{std::min(v[0],v[3]),std::max(v[0],v[3]),std::min(v[1],v[4]),std::max(v[1],v[4]),std::min(v[2],v[5]),std::max(v[2],v[5])},0});
     }
-    return off;
+    for(size_t i=0;i<commands.size();++i)commands[i].block=i && commands[i-1].end==commands[i].start ? commands[i-1].block : i;
+    auto same=[](const std::array<float,6>& a,const std::array<float,6>& b){
+        for(size_t i=0;i<6;++i)if(std::fabs(a[i]-b[i])>(i<2?0.002f:0.0001f))return false;
+        return true;};
+    std::vector<size_t> proven;
+    for(const auto& entry:stored) {
+        const auto op=entry.cars ? (entry.off?COMMAND_SWITCH_ROADS_OFF:COMMAND_SWITCH_ROADS_ON)
+                                 : (entry.off?COMMAND_SWITCH_PED_ROADS_OFF:COMMAND_SWITCH_PED_ROADS_ON);
+        const Command* found=nullptr;size_t matches=0;
+        for(const auto& c:commands)if(c.op==op && same(c.box,entry.box)){found=&c;++matches;}
+        if(matches==1)proven.push_back(found->block);
+    }
+    // Nodes a car switch-on anywhere in the SCM may have re-enabled are left
+    // alone: the switch-off box is clipped away from each overlapping switch-on
+    // that spans it on two axes, and dropped when no single-side clip exists.
+    // Nodes lie on a 1/8 m grid, so a 1 mm exclusive margin keeps no node.
+    auto clip=[](std::array<float,6>& box,const std::array<float,6>& on)->bool{
+        int outside=-1;
+        for(int axis=0;axis<3;++axis) {
+            const float lo=box[2*axis],hi=box[2*axis+1];
+            if(on[2*axis+1]<lo || on[2*axis]>hi)return true;
+            if(on[2*axis]<=lo && on[2*axis+1]>=hi)continue;
+            if(outside>=0)return false;
+            outside=axis;
+        }
+        if(outside<0)return false;
+        float& lo=box[2*outside];float& hi=box[2*outside+1];
+        if(on[2*outside]<=lo)lo=on[2*outside+1]+0.001f;
+        else if(on[2*outside+1]>=hi)hi=on[2*outside]-0.001f;
+        else return false;
+        return lo<hi;
+    };
+    std::vector<std::array<float,6>> result;
+    for(const auto& c:commands) {
+        if(c.op!=COMMAND_SWITCH_ROADS_OFF || c.start>=image_.main_size || std::find(proven.begin(),proven.end(),c.block)==proven.end())continue;
+        auto box=c.box;bool kept=true;
+        for(const auto& on:commands)if(on.op==COMMAND_SWITCH_ROADS_ON && !(kept=clip(box,on.box)))break;
+        if(kept && std::none_of(result.begin(),result.end(),[&](const auto& b){return same(b,box);}))result.push_back(box);
+    }
+    return result;
 }
 StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
     if(opcode==COMMAND_START_CREDITS || (opcode==COMMAND_STOP_CREDITS && stop_credits)) {
@@ -2348,6 +2387,21 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         }
         return StepResult::continued;
     }
+    if(switch_roads && (opcode==COMMAND_SWITCH_ROADS_ON || opcode==COMMAND_SWITCH_ROADS_OFF ||
+       opcode==COMMAND_SWITCH_PED_ROADS_ON || opcode==COMMAND_SWITCH_PED_ROADS_OFF)) {
+        // Source car and pedestrian road switches are independent node states;
+        // the backend keeps SA's shared switched-area list from evicting the
+        // other type (see sa_switch_roads).
+        std::array<float,6> v{};
+        for(auto& value:v){const auto bits=vm.parameter(thread);std::memcpy(&value,&bits,4);if(!std::isfinite(value))throw std::runtime_error("Nonfinite road boundary");}
+        const std::array<float,6> box{std::min(v[0],v[3]),std::max(v[0],v[3]),std::min(v[1],v[4]),std::max(v[1],v[4]),std::min(v[2],v[5]),std::max(v[2],v[5])};
+        const bool cars=opcode==COMMAND_SWITCH_ROADS_ON || opcode==COMMAND_SWITCH_ROADS_OFF;
+        const bool off=opcode==COMMAND_SWITCH_ROADS_OFF || opcode==COMMAND_SWITCH_PED_ROADS_OFF;
+        if(!world_ready || !switch_roads(box,cars,off)) {
+            thread.diagnostic="Original road restriction requires the native path backend";return StepResult::unsupported;
+        }
+        return StepResult::continued;
+    }
     if(opcode==COMMAND_SWITCH_PED_ROADS_OFF_ANGLED || opcode==COMMAND_SWITCH_PED_ROADS_ON_ANGLED ||
        opcode==COMMAND_SWITCH_ROADS_OFF_ANGLED || opcode==COMMAND_SWITCH_ROADS_ON_ANGLED) {
         std::array<float,7> region{};
@@ -2943,23 +2997,6 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
     if(opcode==COMMAND_CHANGE_BLIP_DISPLAY && call.inputs.size()==2 && coord_blips_.count(call.inputs[0]))
         call.inputs[1]=coord_blip_display(call.inputs[1]);
     if(opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD && call.inputs.size()==5)call.inputs[4]=coord_blip_display(call.inputs[4]);
-    // Source car and pedestrian road switches are independent node states.
-    // SA keeps one persistent switched-area list (ThePaths+0x3568, saved by
-    // 0x5D34C0) and a new area evicts every stored area it contains, whatever
-    // its type (0x452D18). MAIN switches the docks cars off and then the
-    // pedestrians with the identical box, so the car entry was dropped and
-    // traffic returned after LOAD. Only widen: car boxes 1 mm at min x,
-    // pedestrian boxes 1 mm at max x, so neither type contains the other while
-    // same-type eviction is unchanged. Nodes lie on a 1/8 m grid and none is
-    // within 1 mm outside a source boundary, so the affected nodes are the same.
-    if((opcode==COMMAND_SWITCH_ROADS_ON || opcode==COMMAND_SWITCH_ROADS_OFF ||
-        opcode==COMMAND_SWITCH_PED_ROADS_ON || opcode==COMMAND_SWITCH_PED_ROADS_OFF) && call.inputs.size()==6) {
-        float a,b;std::memcpy(&a,&call.inputs[0],4);std::memcpy(&b,&call.inputs[3],4);
-        const bool cars=opcode==COMMAND_SWITCH_ROADS_ON || opcode==COMMAND_SWITCH_ROADS_OFF;
-        auto& edge=cars ? (a<=b?a:b) : (a<=b?b:a);
-        edge+=cars?-0.001f:0.001f;
-        std::memcpy(&call.inputs[0],&a,4);std::memcpy(&call.inputs[3],&b,4);
-    }
     if(opcode==COMMAND_SET_EXTRA_COLOURS && flat_native_world) {
         if(call.inputs[0]<1 || call.inputs[0]>32){thread.diagnostic="Unknown original extra color bank";return StepResult::unsupported;}
         call.inputs[0]=1; // Current native lighting profile, as in the working opening scene.
