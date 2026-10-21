@@ -345,7 +345,8 @@ def prepare(base, output, version, notes, refresh, original_data):
     if version >= 84:
         # Navigation re-exported by tools/ps2_paths.py with SA's storage rule
         # (each car path link in the area of its own position).
-        navigation = ROOT/'out/ps2-navigation-v84'
+        # v86 also orients every link at its lower-address endpoint (SA autopilot rule).
+        navigation = ROOT/('out/ps2-navigation-v86' if version >= 86 else 'out/ps2-navigation-v84')
         audit = tool_module('traffic_profile').audit
         graph = audit.validate(navigation/'paths.img')
         conversion = json.loads((navigation/'conversion.json').read_text())

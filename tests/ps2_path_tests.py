@@ -69,6 +69,20 @@ class PathsTests(unittest.TestCase):
         self.assertEqual(regions[35]['nodes'][0][11], 0x0f1001)
         self.assertEqual(regions[36]['navs'][0][7:], (0x49, 2))
 
+    def test_link_attached_to_higher_address_is_mirrored(self):
+        # Source attaches the link to node 1 (area 36) and points east at it;
+        # SA needs the lower address (node 0, area 35): west, swapped lanes,
+        # mirrored light direction.
+        struct.pack_into('<3h2b4B', self.source, 208, 0, 800, 1, 100, 0, 0xd1, 0xaa, 0, 0xaa)
+        graph = read_graph(Chunk(self.source))
+        payloads, _, _ = encode_graph(graph)
+        regions = validator.parse_archive(pack_img(payloads))
+        validator.check_graph(regions)
+        nav = regions[36]['navs'][0]
+        self.assertEqual(nav[2:6], (35, 0, -100, 0))
+        self.assertEqual(nav[7], 0x02 | (0x01 << 3) | 0x00)
+        self.assertEqual(nav[8], 2)
+
     def test_dead_disabled_water_roadblock_and_speed_mapping(self):
         self.source[128 + 16] = 0xb1  # dead end, off, roadblock, one link
         self.source[148 + 16] = 0xb1

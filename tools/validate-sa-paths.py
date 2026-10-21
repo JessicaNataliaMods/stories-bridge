@@ -97,6 +97,14 @@ def check_graph(regions):
                     nav = regions[na]['navs'][ni]
                     if tuple(nav[2:4]) not in ((area, i), (a, b)):
                         raise ValueError('Native navigation is not attached to either link endpoint')
+                    # SA's autopilot takes +1 travelling from the higher to the
+                    # lower node address: links attach to and point at the lower one.
+                    lower = min((area, i), (a, b))
+                    if tuple(nav[2:4]) != lower:
+                        raise ValueError('Native navigation is not attached to its lower-address endpoint')
+                    end = regions[lower[0]]['nodes'][lower[1]]
+                    if (end[2] - nav[0]) * nav[4] + (end[3] - nav[1]) * nav[5] <= 0:
+                        raise ValueError('Native navigation direction does not point at its lower-address endpoint')
                 elif packed != 65535:
                     raise ValueError('Pedestrian connection must have invalid navigation sentinel')
                 edges[(area, i, a, b)] = j
@@ -149,6 +157,7 @@ def compare_ps2(regions, rom, directory):
     if sum(len(r['nodes']) for r in regions.values()) != total or sum(len(r['navs']) for r in regions.values()) != nav_count:
         raise ValueError('Original graph coverage changed')
     checked_links = 0
+    nav_ends = {}
     for ident, (area, local) in node_map.items():
         if area not in regions or local >= len(regions[area]['nodes']):
             raise ValueError('Binding points outside native graph')
@@ -175,6 +184,7 @@ def compare_ps2(regions, rom, directory):
                 if j >= carlink_count:
                     raise ValueError('Original vehicle link outside navigation array')
                 nav = chunk.read('<H', navlinks_ptr + j * 2)[0]
+                nav_ends.setdefault(nav, set()).update((node_map[ident], node_map[target & 16383]))
                 na, ni = nav_map[nav]
                 if r['navLinks'][slot] != (na << 10) | ni:
                     raise ValueError('Original vehicle/navigation binding changed')
@@ -182,7 +192,13 @@ def compare_ps2(regions, rom, directory):
     for ident, (area, local) in nav_map.items():
         source = chunk.span(nav_ptr + ident * 12, 12)
         x, y, owner, dx, dy = struct.unpack_from('<3h2b', source)
-        expected = (x, y, *node_map[owner], dx, dy, source[10] * 2, source[8] & 127, source[9] & 7)
+        lanes, lights = source[8] & 127, source[9] & 7
+        lower = min(nav_ends[ident])
+        if node_map[owner] == lower:
+            expected = (x, y, *lower, dx, dy, source[10] * 2, lanes, lights)
+        else:  # mirrored to SA's lower-address orientation
+            mirrored = ((lanes >> 3) & 7) | ((lanes & 7) << 3) | ((lanes & 64) ^ (64 if lights & 3 else 0))
+            expected = (x, y, *lower, -dx, -dy, source[10] * 2, mirrored, lights)
         if regions[area]['navs'][local] != expected:
             raise ValueError('Original navigation position/owner/direction/lanes/lights changed')
     if checked_links != link_count:

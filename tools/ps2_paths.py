@@ -83,6 +83,27 @@ def node_flags(node, vehicle):
     return first | (second << 8) | ((c & 15) << 16)
 
 
+def native_orientation(nav, ends, addresses):
+    """Orient a link the way SA's autopilot reads it.
+
+    SA does not consult the attachment for travel direction: it is +1 when a
+    car moves from the higher (area, node) address to the lower one
+    (CCarCtrl, vehicle +0x390/+0x394 -> +0x3B5/+0x3B6). Every retail SA link
+    therefore points at, and is attached to, its lower-address endpoint. LCS
+    orders nodes globally, so a link whose source attachment is the higher SA
+    address is mirrored: lower attachment, negated direction, swapped
+    left/right lane counts and mirrored traffic-light direction bit.
+    """
+    if len(ends) != 2 or nav[2] not in ends:
+        raise ValueError('PS2 vehicle link must join exactly two nodes including its attachment')
+    lower = min(ends, key=lambda ident: addresses[ident])
+    lanes, lights = nav[5] & 127, nav[6] & 7
+    if lower == nav[2]:
+        return lower, nav[3], nav[4], lanes, lights
+    left, right, light_direction = lanes & 7, (lanes >> 3) & 7, lanes & 64
+    return lower, -nav[3], -nav[4], right | (left << 3) | (light_direction ^ 64 if lights & 3 else light_direction), lights
+
+
 def encode_graph(graph):
     nodes, navs = graph['nodes'], graph['navs']
     regions = [[] for _ in range(64)]
@@ -99,6 +120,11 @@ def encode_graph(graph):
     if any(len(ids) > 1024 for ids in nav_regions):
         raise ValueError('Native SA navigation address exceeds 10-bit local index')
     nav_addresses = {ident: (a << 10) | i for a, ids in enumerate(nav_regions) for i, ident in enumerate(ids)}
+    endpoints = {}
+    for ident in range(graph['vehicles']):
+        n = nodes[ident]
+        for j in range(n[6], n[6] + (n[9] & 15)):
+            endpoints.setdefault(graph['vehicleLinks'][j], set()).update((ident, graph['connections'][j] & 0x3fff))
     payloads = {}
     for a, ids in enumerate(regions):
         vehicle_count = sum(i < graph['vehicles'] for i in ids)
@@ -124,8 +150,9 @@ def encode_graph(graph):
             base += n[9] & 15
         for ident in nav_regions[a]:
             n = navs[ident]
-            data.extend(struct.pack('<2h2H2bbBH', *n[:2], *addresses[n[2]], *n[3:5],
-                                    n[7] * 2, n[5] & 127, n[6] & 7))
+            owner, dx, dy, lanes, lights = native_orientation(n, endpoints[ident], addresses)
+            data.extend(struct.pack('<2h2H2bbBH', *n[:2], *addresses[owner], dx, dy,
+                                    n[7] * 2, lanes, lights))
         if link_count:
             # SA reads 16 * 12 reserved dynamic addresses, then nav addresses,
             # then padded lengths/intersections. Do NOT interleave these arrays.
