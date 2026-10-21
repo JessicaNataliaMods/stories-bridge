@@ -442,5 +442,10 @@ public:
     std::optional<int32_t> model(int32_t id) const;
     std::optional<int32_t> original_vehicle_model(int32_t handle);
     StepResult dispatch(Vm&,Thread&,uint16_t);
+    // Static MAIN facts for a native switched-area box (x1,x2,y1,y2,z1,z2):
+    // MAIN contains a constant SWITCH_ROADS_OFF for exactly this box and no
+    // SWITCH_ROADS_ON for it. Used only to repair saves written before the
+    // car/pedestrian switch boxes were kept apart.
+    bool source_cars_only_switched_off(const std::array<float,6>& box) const;
 };
 }

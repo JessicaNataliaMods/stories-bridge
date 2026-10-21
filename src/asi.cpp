@@ -288,9 +288,85 @@ size_t collect_lane_samples(LaneSample* out,size_t capacity) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return used;
 }
+// Road switch evidence (read-only): CPathFind's persistent switched-area list
+// (ThePaths 0x96F050: count +0x3568, 0x1C-byte records from +0x356C:
+// x1,x2,y1,y2,z1,z2, switch-off byte, cars byte), saved by 0x5D34C0.
+struct RoadSwitchArea {float box[6];uint8_t off,cars;};
+int collect_road_switches(RoadSwitchArea* out,int capacity) {
+    __try {
+        const auto count=*reinterpret_cast<const int32_t*>(0x96F050+0x3568);
+        if(count<0 || count>64)return -1;
+        for(int i=0;i<count && i<capacity;++i) {
+            const auto record=0x96F050+0x356C+0x1C*uintptr_t(i);
+            for(int k=0;k<6;++k)out[i].box[k]=*reinterpret_cast<const float*>(record+4*k);
+            out[i].off=*reinterpret_cast<const uint8_t*>(record+0x18);out[i].cars=*reinterpret_cast<const uint8_t*>(record+0x19);
+        }
+        return count;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+}
+// Saves written before v88 lost car switches: an identical pedestrian box
+// evicted the car entry (0x452D18). Restore a car switch only for a stored
+// pedestrian box with no car entry when MAIN switches cars off for exactly that
+// box and never on; MAIN issues those pairs together, so a stored pedestrian
+// entry means its car switch had already run. The car box is stored with the
+// v88 disjoint edges (car min x -1 mm, pedestrian max x +1 mm). SA stores args
+// as x1,x2,y1,y2,z1,z2; a new area evicts every contained one, so entries the
+// insert evicted are replayed in their original order.
+using SwitchRoadsInArea=void(__thiscall*)(void*,float,float,float,float,float,float,bool,bool,bool);
+bool replay_road_switches(const RoadSwitchArea* stored,const bool* repair,int first,int count) {
+    const auto switch_roads=reinterpret_cast<SwitchRoadsInArea>(0x452C80);
+    auto* const paths=reinterpret_cast<void*>(0x96F050);
+    __try {
+        for(int i=first;i<count;++i) {
+            const auto* b=stored[i].box;
+            if(repair[i]) {
+                switch_roads(paths,b[0]-0.001f,b[1],b[2],b[3],b[4],b[5],true,true,false);
+                switch_roads(paths,b[0],b[1]+0.001f,b[2],b[3],b[4],b[5],stored[i].off!=0,false,false);
+            } else switch_roads(paths,b[0],b[1],b[2],b[3],b[4],b[5],stored[i].off!=0,stored[i].cars!=0,false);
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+int repair_evicted_car_switches(const lcs::NativeAdapter& adapter) {
+    RoadSwitchArea before[64];const auto count=collect_road_switches(before,64);
+    if(count<=0)return count;
+    bool repair[64]{};int repaired=0;
+    for(int i=0;i<count;++i) {
+        const auto& ped=before[i];
+        if(ped.cars)continue;
+        const bool car_present=std::any_of(before,before+count,[&](const RoadSwitchArea& a){
+            if(!a.cars)return false;
+            for(int k=0;k<6;++k)if(std::fabs(a.box[k]-ped.box[k])>0.002f)return false;
+            return true;});
+        if(car_present)continue;
+        repair[i]=adapter.source_cars_only_switched_off({ped.box[0],ped.box[1],ped.box[2],ped.box[3],ped.box[4],ped.box[5]});
+        repaired+=repair[i];
+    }
+    if(!repaired)return 0;
+    // Replay from the first repaired entry in stored order: earlier entries
+    // were not contained in it (it would have been inserted after them), and
+    // re-inserting an identical later entry only replaces itself.
+    const auto first=int(std::find(repair,repair+count,true)-repair);
+    if(!replay_road_switches(before,repair,first,count))return -1;
+    for(int i=0;i<count;++i)if(repair[i]){char text[200];const auto* b=before[i].box;
+        std::snprintf(text,sizeof(text),"Road switch repair: restored evicted car switch-off x=%.1f..%.1f y=%.1f..%.1f z=%.1f..%.1f",b[0],b[1],b[2],b[3],b[4],b[5]);log(text);}
+    log("Road switch repair: replayed stored areas from #"+std::to_string(first)+" of "+std::to_string(count));
+    return repaired;
+}
+bool road_switches_reported=false;
+void report_road_switches() {
+    if(road_switches_reported)return;
+    road_switches_reported=true;
+    RoadSwitchArea areas[64];const auto count=collect_road_switches(areas,64);
+    log("Road switch evidence: native switched areas="+std::to_string(count));
+    for(int i=0;i<count;++i){char text[200];const auto& a=areas[i];
+        std::snprintf(text,sizeof(text),"Road switch evidence: #%d x=%.1f..%.1f y=%.1f..%.1f z=%.1f..%.1f off=%u cars=%u",
+            i,a.box[0],a.box[1],a.box[2],a.box[3],a.box[4],a.box[5],unsigned(a.off),unsigned(a.cars));log(text);}
+}
 uint32_t last_lane_sample=0;unsigned lane_sample_lines=0;
 void report_lane_samples(uint32_t now) {
     if(lane_sample_lines>=600 || now-last_lane_sample<3000)return;
+    report_road_switches();
     last_lane_sample=now;
     LaneSample found[6];const auto count=collect_lane_samples(found,6);
     for(size_t i=0;i<count;++i) {
@@ -1075,7 +1151,9 @@ struct Campaign {
         // still drive commit of any source transition that was pending at SAVE.
         lcs::CampaignServicesSave::apply_pending(pending_saved_world,*world_sectors);
         pending_saved_world={};
-        restoring_world=false;log("Campaign LOAD restored LCS globals/threads/services and Toni without replaying MAIN");return true;
+        restoring_world=false;log("Campaign LOAD restored LCS globals/threads/services and Toni without replaying MAIN");
+        if(repair_evicted_car_switches(adapter)<0)log("Road switch repair: native switched-area list could not be read or replayed");
+        return true;
     }
     void release_taxi_hails() {
         if(taxi_hails && !taxi_hails->clear_all())retired_taxi_hails.push_back(std::move(taxi_hails));
@@ -1415,7 +1493,7 @@ void retire_campaign_world() {
     campaign.reset();
     world_preview.reset();player_skins.reset();gameplay_skins.reset();
     reported_fast_vehicles.clear();
-    last_lane_sample=0;
+    last_lane_sample=0;road_switches_reported=false;
     bindings.clear();equivalent_bindings.clear();marker_process={};
     inspected_world=false;world_failure=false;last_game_time=0;
     last_bootstrap_stage=UINT32_MAX;
