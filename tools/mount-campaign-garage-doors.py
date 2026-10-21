@@ -1,4 +1,12 @@
-"""Mount original LCS garage doors through SA ObjectData and its native controller."""
+"""Mount original LCS garage doors and explosive things through SA ObjectData.
+
+Doors use SA's native garage controller. Source CWeapon::BlowUpExplosiveThings
+detonates IsExplosiveThingModel (barrel4/petrolpump/washgaspump) objects by
+model; SA expresses explosive objects through its ObjectData explosion
+selector, so those rows keep the ten original physical fields and select the
+native object explosion (as SA's own barrels). SA detonates on its damage
+threshold; the source one-hit trigger is not reproduced.
+"""
 import argparse
 import hashlib
 import importlib.util
@@ -14,6 +22,10 @@ spec.loader.exec_module(maps)
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+# ModelIndices.h IsExplosiveThingModel.
+EXPLOSIVE_THING_MODEL_NAMES = ('barrel4', 'petrolpump', 'washgaspump')
+
+
 def inputs(package, original):
     definitions = {}
     for raw in (original/'DATA/OBJECT.DAT').read_text().splitlines():
@@ -21,13 +33,16 @@ def inputs(package, original):
         if not raw or raw.startswith(('#', '*')):
             continue
         fields = re.split(r'[\s,]+', raw)
-        if fields[0].lower() in maps.PHYSICAL_DOOR_MODEL_NAMES:
+        if fields[0].lower() in maps.PHYSICAL_DOOR_MODEL_NAMES or fields[0].lower() in EXPLOSIVE_THING_MODEL_NAMES:
             if len(fields) < 11:
-                raise ValueError('Incomplete original door ObjectData: '+fields[0])
+                raise ValueError('Incomplete original door/explosive ObjectData: '+fields[0])
             definitions[fields[0].lower()] = fields[1:11]
     bindings = {}
+    explosives = {}
     for raw in (package/'data/lcs/model-bindings.tsv').read_text().splitlines():
         source, native, name, alias = raw.split('\t')
+        if name.lower() in EXPLOSIVE_THING_MODEL_NAMES and name.lower() in definitions:
+            explosives[alias] = name.lower()
         # Legacy names remain in IsModelIndexADoor although their ObjectData
         # row is commented out or absent (e.g. impex_door). They are not a
         # source dynamic door and must keep their original static placement.
@@ -54,7 +69,7 @@ def inputs(package, original):
     used = {line.split('\t')[3] for line in placements}
     if not used:
         raise ValueError('No original garage door placements')
-    rows = ['; LCS garage doors only; merged by Modloader std.data with native OBJECT.DAT']
+    rows = ['; LCS garage doors and explosive things; merged by Modloader std.data with native OBJECT.DAT']
     for alias in sorted(used):
         item = bindings[alias]
         if item[2].lower() not in definitions:
@@ -62,6 +77,9 @@ def inputs(package, original):
         # The ten original physical fields have the same SA meaning. SA adds
         # explosion/FX selectors and optional FX parameters; none are authored here.
         rows.append(', '.join((alias, *definitions[item[2].lower()], '0', '0', '0.0', '0.0', '0.0', 'none')))
+    for alias in sorted(explosives):
+        # Native explosion selector + destroyed FX of SA's own explosive barrels.
+        rows.append(', '.join((alias, *definitions[explosives[alias]], '1', '2', '0.0', '0.0', '0.0', 'explosion_medium')))
     rows.append('*')
     return bindings, used, '\n'.join(placements)+'\n', '\n'.join(rows)+'\n'
 
