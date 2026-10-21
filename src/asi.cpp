@@ -813,7 +813,11 @@ struct Campaign {
         adapter.fx.diagnostic=[](const std::string& message){log(message);};
         if(!first) {
             gameplay_animations=std::make_unique<lcs::NativeGameplayAnimations>(std::filesystem::path(setting(L"WorldDirectory"))/L"animations");
-            adapter.request_wait_animation=[this](int32_t state,bool load){return gameplay_animations->request(state,load);};
+            adapter.request_wait_animation=[this](int32_t state,bool load){
+                const bool accepted=gameplay_animations->request(state,load);
+                if(!accepted)log("Original gesture block request refused: state="+std::to_string(state)+" load="+std::to_string(load)+" "+lcs::gameplay_animation_load_diagnostic());
+                return accepted;
+            };
             adapter.named_animation=[this](const std::string& name,uint16_t action){return gameplay_animations->named(name,action);};
             adapter.play_wait_animation=[this](int32_t actor,int32_t state,int32_t duration,bool repeat){return gameplay_animations->play(actor,state,duration,repeat);};
             adapter.clear_wait_animation=[this](int32_t actor){return gameplay_animations->clear(actor);};

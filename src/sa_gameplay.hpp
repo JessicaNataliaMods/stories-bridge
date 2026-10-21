@@ -7,6 +7,7 @@
 #include <optional>
 #include <random>
 namespace lcs {
+std::string gameplay_animation_load_diagnostic();
 class NativeGameplayAnimations {
     struct Gesture {std::string block,animation;uint16_t flags;std::string logical_block;};
     struct Block {std::filesystem::path path;AnimationArchive archive;uintptr_t native=0;int32_t index=-1;bool registered=false;bool reference_held=false;};

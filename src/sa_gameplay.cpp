@@ -5,40 +5,165 @@
 #include <sstream>
 #include <cstring>
 #include <algorithm>
+#include <map>
+#include <cstddef>
 namespace lcs {
 namespace {
-uintptr_t load_native(const char* path,const char* alias,int animations,int32_t* index,bool registered=false) {
+struct NativeAnimBlockLayout {
+    uint8_t name[16];
+    uint8_t loaded;
+    uint8_t pad11;
+    uint16_t references;
+    int32_t start_animation;
+    int32_t animation_count;
+    uint32_t animation_style;
+};
+static_assert(offsetof(NativeAnimBlockLayout,start_animation)==0x14);
+static_assert(offsetof(NativeAnimBlockLayout,animation_count)==0x18);
+static_assert(offsetof(NativeAnimBlockLayout,animation_style)==0x1c);
+struct NativeBlockProbe {
+    bool readable=false;
+    bool exists=false;
+    bool resident=false;
+    uintptr_t block=0;
+    int32_t index=-1;
+    int32_t range_start=-1;
+    int32_t range_count=0;
+};
+struct AnimationReceipt {
+    std::string path;
+    int animations=0;
+    uintptr_t block=0;
+    int32_t index=-1;
+    int32_t range_start=-1;
+    int32_t range_count=0;
+};
+std::string last_animation_load_diagnostic;
+enum BackendLoadFailure {backend_ok,backend_profile,backend_capacity,backend_ownership,backend_stream_open,backend_stream_read,backend_identity,backend_exception};
+void set_load_diagnostic(const char* alias,const char* reason,const NativeBlockProbe* probe) {
+    last_animation_load_diagnostic=std::string("animation ")+(alias?alias:"<null>")+": "+reason;
+    if(probe && probe->readable)last_animation_load_diagnostic+=std::string("; existing=")+(probe->exists?"yes":"no")+
+        ", loaded="+(probe->resident?"yes":"no")+", count="+std::to_string(probe->range_count)+
+        ", range="+std::to_string(probe->range_start)+"+"+std::to_string(probe->range_count);
+}
+std::map<std::string,AnimationReceipt>& animation_receipts() {
+    // CAnimManager retains registrations across Campaign instances and native
+    // LOAD. This process-lifetime receipt is the only authority to adopt one.
+    static std::map<std::string,AnimationReceipt> receipts;
+    return receipts;
+}
+bool acquire_ref(int32_t index);
+void release_ref(int32_t index);
+bool inspect_native(const char* alias,NativeBlockProbe* out) {
+    if(!out)return false;
+    *out={};
+#ifdef LCS_GAMEPLAY_ANIMATION_PROBE
+    return LCS_GAMEPLAY_ANIMATION_PROBE(alias,&out->readable,&out->exists,&out->resident,
+        &out->block,&out->index,&out->range_start,&out->range_count);
+#else
+    __try {
+        const auto block=reinterpret_cast<uintptr_t(__cdecl*)(const char*)>(0x4D3940)(alias);
+        out->readable=true;
+        if(!block)return true;
+        const auto index=reinterpret_cast<int32_t(__cdecl*)(const char*)>(0x4D3990)(alias);
+        const auto* native=reinterpret_cast<const NativeAnimBlockLayout*>(block);
+        const auto resident=native->loaded;
+        const auto count=native->animation_count;
+        const auto start=native->start_animation;
+        if(index<0 || index>=180 || resident>1 || count<0 || count>2500 || start<0 || start>2500 || start+count>2500)return false;
+        out->exists=true;out->resident=resident!=0;out->block=block;out->index=index;
+        out->range_start=start;out->range_count=count;return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+#endif
+}
+bool same_receipt(const AnimationReceipt& receipt,const char* path,int animations,const NativeBlockProbe& probe) {
+    return receipt.path==path && receipt.animations==animations && probe.exists &&
+        receipt.block==probe.block && receipt.index==probe.index &&
+        receipt.range_start==probe.range_start && receipt.range_count==probe.range_count &&
+        probe.range_count==animations;
+}
+uintptr_t load_native_backend(const char* path,const char* alias,int animations,int32_t* index,bool registered,int32_t* failure) {
+    if(failure)*failure=backend_ok;
 #ifdef LCS_GAMEPLAY_ANIMATION_LOAD
-    return LCS_GAMEPLAY_ANIMATION_LOAD(path,alias,animations,index,registered);
+    const auto result=LCS_GAMEPLAY_ANIMATION_LOAD(path,alias,animations,index,registered);
+    if(!result && failure)*failure=backend_stream_read;return result;
 #else
     uintptr_t stream=0;
     __try {
         const auto count=*reinterpret_cast<const int32_t*>(0xB4EA30),total=*reinterpret_cast<const int32_t*>(0xB4EA2C);
-        if(count<0 || count>180 || total<0 || animations<=0)return 0;
+        if(count<0 || count>180 || total<0 || animations<=0){if(failure)*failure=backend_profile;return 0;}
         // Aliases belong exclusively to this package. Never replace a block
         // supplied by another plugin or load a block twice into the registry.
         const auto existing=reinterpret_cast<uintptr_t(__cdecl*)(const char*)>(0x4D3940)(alias);
-        if(existing && (!registered || *reinterpret_cast<const uint8_t*>(existing+0x10)))return 0;
-        if(!existing && count>=180)return 0;
+        if(existing && (!registered || *reinterpret_cast<const uint8_t*>(existing+0x10))){if(failure)*failure=backend_ownership;return 0;}
+        if(!existing && count>=180){if(failure)*failure=backend_capacity;return 0;}
         // A previously owned unloaded block keeps its hierarchy range. New
         // blocks must fit before LoadAnimFile can write the fixed SA stores.
-        if((!existing || !*reinterpret_cast<const int32_t*>(existing+0x18)) && total+animations>2500)return 0;
+        if((!existing || !*reinterpret_cast<const int32_t*>(existing+0x18)) && total+animations>2500){if(failure)*failure=backend_capacity;return 0;}
         stream=reinterpret_cast<uintptr_t(__cdecl*)(int,int,const char*)>(0x7ECEF0)(2,1,path);
-        if(!stream)return 0;
+        if(!stream){if(failure)*failure=backend_stream_open;return 0;}
         const char uncompressed[1][32]={};
         reinterpret_cast<void(__cdecl*)(uintptr_t,bool,const void*)>(0x4D47F0)(stream,true,uncompressed);
         const auto closed=reinterpret_cast<int(__cdecl*)(uintptr_t,void*)>(0x7ECE20)(stream,nullptr);stream=0;
-        if(!closed)return 0;
+        if(!closed){if(failure)*failure=backend_stream_read;return 0;}
         const auto block=reinterpret_cast<uintptr_t(__cdecl*)(const char*)>(0x4D3940)(alias);
         *index=reinterpret_cast<int32_t(__cdecl*)(const char*)>(0x4D3990)(alias);
-        if(!block || *index<0 || *index>=180 || !*reinterpret_cast<const uint8_t*>(block+0x10))return 0;
+        if(!block || *index<0 || *index>=180 || !*reinterpret_cast<const uint8_t*>(block+0x10)){if(failure)*failure=backend_identity;return 0;}
         reinterpret_cast<void(__cdecl*)(int32_t)>(0x4D3FB0)(*index);
         return block;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         if(stream)reinterpret_cast<int(__cdecl*)(uintptr_t,void*)>(0x7ECE20)(stream,nullptr);
+        if(failure)*failure=backend_exception;
         return 0;
     }
 #endif
+}
+uintptr_t load_native(const char* path,const char* alias,int animations,int32_t* index) {
+    if(!path || !alias || !index || animations<=0){set_load_diagnostic(alias,"invalid load arguments",nullptr);return 0;}
+    auto& receipts=animation_receipts();
+    const auto known=receipts.find(alias);
+    NativeBlockProbe before;
+    if(!inspect_native(alias,&before) || !before.readable){set_load_diagnostic(alias,"native registry read failed",nullptr);return 0;}
+    bool owned=false;
+    if(before.exists) {
+        if(known==receipts.end()){set_load_diagnostic(alias,"ownership refused for existing foreign registration",&before);return 0;}
+        if(!same_receipt(known->second,path,animations,before)){set_load_diagnostic(alias,"ownership receipt identity/range mismatch",&before);return 0;}
+        owned=true;
+        if(before.resident) {
+            if(!acquire_ref(before.index)){set_load_diagnostic(alias,"resident range reference acquire failed",&before);return 0;}
+            last_animation_load_diagnostic.clear();
+            *index=before.index;return before.block;
+        }
+    }
+    int32_t loaded_index=-1;
+    int32_t failure=backend_ok;
+    const auto loaded=load_native_backend(path,alias,animations,&loaded_index,owned,&failure);
+    if(!loaded) {
+        const char* reason="native load failed";
+        switch(failure) {
+            case backend_profile:reason="native profile/capacity read failed";break;
+            case backend_capacity:reason="animation registration/range capacity exceeded";break;
+            case backend_ownership:reason="native loader refused unowned registration";break;
+            case backend_stream_open:reason="animation stream open failed";break;
+            case backend_stream_read:reason="animation stream read/decode failed";break;
+            case backend_identity:reason="native registration identity invalid after load";break;
+            case backend_exception:reason="native memory read/write fault";break;
+            default:break;
+        }
+        set_load_diagnostic(alias,reason,&before);return 0;
+    }
+    NativeBlockProbe after;
+    if(!inspect_native(alias,&after) || !after.readable || !after.exists || !after.resident || after.block!=loaded ||
+       after.index!=loaded_index || after.range_count!=animations || after.range_start<0) {
+        if(loaded_index>=0)release_ref(loaded_index);
+        set_load_diagnostic(alias,"post-load registration/count/range validation failed",&after);return 0;
+    }
+    if(owned && (after.block!=before.block || after.index!=before.index ||
+       after.range_start!=before.range_start || after.range_count!=before.range_count)) {
+        release_ref(loaded_index);set_load_diagnostic(alias,"reload changed owned block/index/range",&after);return 0;
+    }
+    if(!owned)receipts.insert_or_assign(alias,AnimationReceipt{path,animations,after.block,after.index,after.range_start,after.range_count});
+    last_animation_load_diagnostic.clear();*index=after.index;return after.block;
 }
 bool fade_owned(int32_t handle,uintptr_t hierarchy) {
 #ifdef LCS_GAMEPLAY_ANIMATION_FADE
@@ -135,6 +260,7 @@ bool acquire_ref(int32_t index) {
 #endif
 }
 }
+std::string gameplay_animation_load_diagnostic() {return last_animation_load_diagnostic;}
 NativeGameplayAnimations::NativeGameplayAnimations(const std::filesystem::path& directory) {
     const bool bundled=std::filesystem::exists(directory/"LG00.ifp.bin");
     const auto suffix=bundled?".ifp.bin":".ifp";
@@ -189,12 +315,22 @@ NativeGameplayAnimations::~NativeGameplayAnimations() {
     for(const auto& block:blocks_)if(block.second.reference_held)release_ref(block.second.index);
 }
 bool NativeGameplayAnimations::request(int32_t state,bool load) {
-    if(!sa_executor_profile_matches())return false;
-    const auto gesture=gestures_.find(state);if(gesture==gestures_.end())return false;
+    if(!sa_executor_profile_matches()){set_load_diagnostic("<gesture>","unsupported executable profile",nullptr);return false;}
+    const auto gesture=gestures_.find(state);if(gesture==gestures_.end()){set_load_diagnostic("<gesture>","unknown gesture state",nullptr);return false;}
     if(!load){requested_.erase(gesture->second.logical_block);return true;}
     auto& block=blocks_.at(gesture->second.block);
-    if(!block.native){block.native=load_native(block.path.string().c_str(),gesture->second.block.c_str(),int(block.archive.animations.size()),&block.index);block.reference_held=bool(block.native);}
-    if(!block.native)return false;requested_.insert(gesture->second.logical_block);return true;
+    if(block.native) {
+        const auto resident=resident_block(block.native);if(!resident){set_load_diagnostic(gesture->second.block.c_str(),"native residency query failed",nullptr);return false;}
+        if(!*resident){block.native=0;block.reference_held=false;}
+    }
+    if(!block.native) {
+        block.native=load_native(block.path.string().c_str(),gesture->second.block.c_str(),int(block.archive.animations.size()),&block.index);
+        block.reference_held=bool(block.native);
+    } else if(!block.reference_held) {
+        if(!acquire_ref(block.index)){set_load_diagnostic(gesture->second.block.c_str(),"resident range reference acquire failed",nullptr);return false;}block.reference_held=true;
+    }
+    if(!block.native)return false;
+    block.registered=true;requested_.insert(gesture->second.logical_block);last_animation_load_diagnostic.clear();return true;
 }
 std::optional<bool> NativeGameplayAnimations::named(const std::string& name,uint16_t action) {
     if(!sa_executor_profile_matches() || action>2)return {};
@@ -203,9 +339,9 @@ std::optional<bool> NativeGameplayAnimations::named(const std::string& name,uint
     if(action==0) {
         if(block.native) {
             const auto resident=resident_block(block.native);if(!resident)return {};
-            if(!*resident)block.native=0;
+            if(!*resident){block.native=0;block.reference_held=false;}
         }
-        if(!block.native){block.native=load_native(block.path.string().c_str(),found->second.c_str(),int(block.archive.animations.size()),&block.index,block.registered);block.reference_held=bool(block.native);}
+        if(!block.native){block.native=load_native(block.path.string().c_str(),found->second.c_str(),int(block.archive.animations.size()),&block.index);block.reference_held=bool(block.native);}
         else if(!block.reference_held){if(!acquire_ref(block.index))return {};block.reference_held=true;}
         if(!block.native)return {};
         block.registered=true;return true;
