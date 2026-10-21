@@ -45,6 +45,7 @@ struct FxCallbacks {
 // Production owner of LCS ParticleObject emitters (CParticleObject pool, UpdateClose cadence)
 // and of the single AddParticle producer. Rendering/dynamics stay in SA's FxManager.
 class FxParticles {
+    friend struct CampaignServicesSave;
 public:
     // LCS particle object types (eParticleObjectType) with an SA recipe.
     static constexpr int32_t object_dark_smoke=4,object_small_fire=10,object_dry_ice=12,

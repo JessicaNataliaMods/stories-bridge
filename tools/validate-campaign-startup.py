@@ -3,12 +3,13 @@ import argparse,hashlib,json,pathlib,subprocess,sys
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def digest(path):
     with path.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
-def validate(package,source):
+def validate(package,source,validation_build=None):
+    validation_build=pathlib.Path(validation_build) if validation_build else ROOT/"build"
     metadata=package/'metadata/campaign.json';campaign=json.loads(metadata.read_text())
     campaign['nativeStartupValidated']=False;metadata.write_text(json.dumps(campaign,indent=2))
-    commands=[(ROOT/'build/Release/lcs-one-off-sound-tests.exe',[source/'DATA/MAIN.SCM',source/'audio']),
-              (ROOT/'build/Release/lcs-campaign-package-tests.exe',[package,source]),
-              (ROOT/'build/Release/lcs-campaign-equivalents-tests.exe',[package/'metadata/lcs-source/DATA/MAIN.SCM.bin',source,
+    commands=[(validation_build/'Release/lcs-one-off-sound-tests.exe',[source/'DATA/MAIN.SCM',source/'audio']),
+              (validation_build/'Release/lcs-campaign-package-tests.exe',[package,source]),
+              (validation_build/'Release/lcs-campaign-equivalents-tests.exe',[package/'metadata/lcs-source/DATA/MAIN.SCM.bin',source,
                package/'data/lcs/campaign-model-bindings.tsv',package/'data/lcs/native-equivalents.tsv',
                package/'data/lcs/cutscenes/index.tsv',package/'data/lcs/peds/canonical-model-bindings.tsv'])]
     if campaign.get('version',0)>=28:commands[2][1].append(4)
@@ -16,44 +17,44 @@ def validate(package,source):
         commands.extend([(commands[2][0],commands[2][1]+['paid-shop']),
                          (commands[2][0],commands[2][1]+['empty-shop'])])
     if campaign.get('version',0)>=31:
-        commands.append((ROOT/'build/Release/lcs-campaign-shared-commands-tests.exe',
+        commands.append((validation_build/'Release/lcs-campaign-shared-commands-tests.exe',
                          [source/'audio',package/'metadata/lcs-source/DATA/WEAPON.DAT.bin']))
     if campaign.get('version',0)>=32:
         map_report=json.loads((package/'metadata/map-preview.json').read_text())
         # The executable is read as PE data; only relocated parameter routines
         # run in the isolated test process, never the GTA process or its world.
-        commands.append((ROOT/'build/Release/lcs-native-abi-tests.exe',
+        commands.append((validation_build/'Release/lcs-native-abi-tests.exe',
                          [pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']))
     if campaign.get('version',0)>=33:
-        commands.extend([(ROOT/'build/Release/lcs-campaign-entity-family-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-campaign-statistics-family-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-native-entity-backend-tests.exe',
+        commands.extend([(validation_build/'Release/lcs-campaign-entity-family-tests.exe',[]),
+                         (validation_build/'Release/lcs-campaign-statistics-family-tests.exe',[]),
+                         (validation_build/'Release/lcs-native-entity-backend-tests.exe',
                           [pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/source_family_contracts.py'])])
     if campaign.get('version',0)>=34:
-        commands.append((ROOT/'build/Release/lcs-campaign-infrastructure-family-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-campaign-infrastructure-family-tests.exe',[]))
     if campaign.get('version',0)>=36:
-        commands.append((ROOT/'build/Release/lcs-campaign-frenzy-family-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-campaign-frenzy-family-tests.exe',[]))
     if campaign.get('version',0)>=37:
-        commands.append((ROOT/'build/Release/lcs-campaign-environment-family-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-campaign-environment-family-tests.exe',[]))
     if campaign.get('version',0)>=38:
-        commands.append((ROOT/'build/Release/lcs-campaign-garage-family-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-campaign-garage-family-tests.exe',[]))
     if campaign.get('version',0)>=39:
-        commands.append((ROOT/'build/Release/lcs-campaign-traffic-family-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-campaign-traffic-family-tests.exe',[]))
     if campaign.get('version',0)>=42:
-        commands.append((ROOT/'build/Release/lcs-activity-statistics-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-activity-statistics-tests.exe',[]))
     if campaign.get('version',0)>=44:
         commands.append((pathlib.Path(sys.executable),['-B',ROOT/'tests/original_activity_contracts.py']))
     if campaign.get('version',0)>=45:
         commands.append((pathlib.Path(sys.executable),['-B',ROOT/'tests/original_vehicle_contracts.py']))
     if campaign.get('version',0)>=47:
-        commands.append((ROOT/'build/Release/lcs-mission-message-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-mission-message-tests.exe',[]))
     if campaign.get('version',0)>=50:
-        commands.append((ROOT/'build/Release/lcs-wander-path-tests.exe',[]))
+        commands.append((validation_build/'Release/lcs-wander-path-tests.exe',[]))
     if campaign.get('version',0)>=57:
-        commands.extend([(ROOT/'build/Release/lcs-ending-tune-transport-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-owned-audio-output-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-ending-tune-source-tests.exe',[package/'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin']),
+        commands.extend([(validation_build/'Release/lcs-ending-tune-transport-tests.exe',[]),
+                         (validation_build/'Release/lcs-owned-audio-output-tests.exe',[]),
+                         (validation_build/'Release/lcs-ending-tune-source-tests.exe',[package/'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_ending_tune_contracts.py',
                           pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
     if campaign.get('version',0)>=58:
@@ -62,25 +63,25 @@ def validate(package,source):
             commands.append((pathlib.Path(sys.executable),['-B',ROOT/'tests'/f'{name}.py',
                              pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']))
     if campaign.get('version',0)>=59:
-        commands.append((ROOT/'build/Release/lcs-resource-tests.exe',[source]))
+        commands.append((validation_build/'Release/lcs-resource-tests.exe',[source]))
     if campaign.get('version',0)>=60:
-        commands.extend([(ROOT/'build/Release/lcs-script-coronas-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-script-corona-backend-tests.exe',[]),
+        commands.extend([(validation_build/'Release/lcs-script-coronas-tests.exe',[]),
+                         (validation_build/'Release/lcs-script-corona-backend-tests.exe',[]),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_script_corona_contracts.py',
                           pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
     if campaign.get('version',0)>=62:
-        commands.extend([(ROOT/'build/Release/lcs-hud-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-hud-render-tests.exe',[]),
+        commands.extend([(validation_build/'Release/lcs-hud-tests.exe',[]),
+                         (validation_build/'Release/lcs-hud-render-tests.exe',[]),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_hud_presentation_contracts.py',
                           pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
     if campaign.get('version',0)>=61:
-        commands.extend([(ROOT/'build/Release/lcs-collectives-tests.exe',[]),
+        commands.extend([(validation_build/'Release/lcs-collectives-tests.exe',[]),
             (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_collective_contracts.py',
              pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
     if campaign.get('version',0)>=63:
-        commands.extend([(ROOT/'build/Release/lcs-script-markers-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-script-marker-pool-tests.exe',[]),
-                         (ROOT/'build/Release/lcs-script-marker-render-tests.exe',[ROOT/'build/marker-render-fixture']),
+        commands.extend([(validation_build/'Release/lcs-script-markers-tests.exe',[]),
+                         (validation_build/'Release/lcs-script-marker-pool-tests.exe',[]),
+                         (validation_build/'Release/lcs-script-marker-render-tests.exe',[validation_build/'marker-render-fixture']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_marker_contracts.py',
                           pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tools/validate-script-marker-resources.py',package])])
@@ -137,4 +138,5 @@ def validate(package,source):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--package',type=pathlib.Path,required=True);parser.add_argument('--source',type=pathlib.Path,default=ROOT/'out/lcs-converted')
-    args=parser.parse_args();print(json.dumps(validate(args.package.resolve(),args.source.resolve()),indent=2))
+    parser.add_argument("--validation-build",type=pathlib.Path,help="Existing offline validator build; defaults to the current build")
+    args=parser.parse_args();print(json.dumps(validate(args.package.resolve(),args.source.resolve(),args.validation_build),indent=2))

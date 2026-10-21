@@ -203,6 +203,7 @@ public:
     int crane_state(size_t)const{return -1;}
 
 private:
+    friend class NativeAdapter;
     struct Garage {
         int32_t id=0;
         std::array<float,8> bounds{};

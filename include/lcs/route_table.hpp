@@ -9,6 +9,7 @@ namespace lcs {
 // This table is a prerequisite for the live FOLLOW_ROUTE consumer. It does
 // not grant support to any SCM command on its own.
 class OriginalRouteTable {
+    friend struct CampaignServicesSave;
 public:
     struct Node {int16_t route=-1;std::array<float,3> position{};};
     static constexpr size_t capacity=200;

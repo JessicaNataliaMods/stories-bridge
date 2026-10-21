@@ -246,6 +246,7 @@ inline std::optional<ContinuousFrequencyStep> continuous_frequency_step(
 // Portable storage for the actual PS2 AudioScriptObj pool. Runtime binding is
 // deliberately separate: allocation alone is not acceptance by an audio driver.
 class ContinuousSoundObjects {
+    friend struct CampaignServicesSave;
 public:
     static constexpr size_t capacity=192; // retail 22E768
     struct Token {int32_t reference;uint64_t epoch;};

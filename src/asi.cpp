@@ -53,6 +53,9 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "sa_crusher.hpp"
 #include "sa_garage_door.hpp"
 #include <limits>
+#include "lcs/campaign_checkpoint.hpp"
+#include "lcs/sa_campaign_save.hpp"
+#include "campaign_services_save.hpp"
 #include "sa_crane.hpp"
 #include "sa_ferry.hpp"
 #include "sa_threat_occlusion.hpp"
@@ -111,6 +114,9 @@ std::vector<Binding> bindings;
 std::vector<lcs::EquivalentEntity> equivalent_bindings;
 bool inspected_world=false,world_failure=false;
 bool campaign_load_requires_restore=false;
+std::optional<lcs::CampaignCheckpoint> pending_campaign_load, pending_campaign_save;
+std::string campaign_load_diagnostic;
+std::filesystem::path pending_native_save;
 std::unique_ptr<lcs::SaWorldPreview> world_preview;
 // Original ADD_POINT keeps its previous location process-wide across scripts.
 lcs::ScriptMarkers::ProcessState marker_process;
@@ -275,6 +281,9 @@ struct Campaign {
     std::unique_ptr<lcs::SaTaxiHail> taxi_hails;
     std::set<std::pair<uint32_t,uint16_t>> visited;
     bool halted=false;
+    bool original_save_menu_requested=false;
+    bool restoring_world=false;
+    lcs::CampaignServicesSave::PendingWorld pending_saved_world;
     uint32_t last_door_status_time=0;
     std::string last_door_status;
     uint32_t last_scoped_notice=0;
@@ -290,7 +299,7 @@ struct Campaign {
         if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(0xBA67CC),&language,1,&actual) || actual!=1 || language>=credit_text.size())return nullptr;
         return &credit_text[language];
     }
-    Campaign(const std::filesystem::path& directory,bool first=false):image(lcs::ScmImage::load(source_file(directory,L"DATA/MAIN.SCM"))),adapter(image),runtime(image),audio_archive(directory/L"audio",source_suffix()),audio(audio_archive),continuous_runtime(audio_archive) {
+    Campaign(const std::filesystem::path& directory,bool first=false,bool restoring=false):image(lcs::ScmImage::load(source_file(directory,L"DATA/MAIN.SCM"))),adapter(image),runtime(image),audio_archive(directory/L"audio",source_suffix()),audio(audio_archive),continuous_runtime(audio_archive) {
         if(setting(L"VehicleColours")==L"1")
             adapter.bind_vehicle_colours(lcs::sa_load_vehicle_colours(resource_directory()/L"data/lcs/vehicle-colours.dat"));
         continuous_sounds.available=[this](){return !halted && continuous_runtime.available();};
@@ -869,7 +878,18 @@ struct Campaign {
             if(first_mission) {
                 if(const auto result=lcs::try_engine_adapter(*first_mission,vm,t,op))return *result;
             }
-            return adapter.dispatch(vm,t,op);
+            const auto result=adapter.dispatch(vm,t,op);
+            // Admission belongs to the original script that opened the native
+            // menu. A save helper may itself reside in the mission allocation.
+            if(op==989 && result==lcs::StepResult::continued){
+                uint32_t requested=0;
+                if(read_game_word(0xBA67A7,&requested) && (requested&255))original_save_menu_requested=true;
+            }
+            if(op==990 && result==lcs::StepResult::continued){
+                uint32_t menu=0,requested=0;
+                if(read_game_word(0xBA67A4,&menu) && read_game_word(0xBA67A7,&requested) && !(menu&255) && !(requested&255))original_save_menu_requested=false;
+            }
+            return result;
         };
         lcs::NativeCall flag;flag.opcode=0x0180;flag.mission_flag_reference=true;
         if(!lcs::execute_sa(flag).executed)throw std::runtime_error("Cannot declare reserved native mission flag");
@@ -881,7 +901,7 @@ struct Campaign {
                 return redirected;
             };
         }
-        if(first_mission)first_mission->start();else runtime.start_main();
+        if(!restoring){if(first_mission)first_mission->start();else runtime.start_main();}
         // Publish the borrowed service only after every throwing setup/start
         // operation succeeded. A failed constructor never leaves a callback
         // into its unwound route_service in the process-global observer.
@@ -894,6 +914,49 @@ struct Campaign {
             retired_world_sectors.push_back(std::move(world_sectors));
         }else world_sectors.reset();
         adapter.world_swap_state={};adapter.request_world_swaps={};adapter.world_streaming_complete={};adapter.commit_world_sector={};
+    }
+    lcs::CampaignCheckpoint capture_save(uint32_t now) {
+        if(halted)throw std::runtime_error("Cannot save a halted campaign");
+        if(first_mission)throw std::runtime_error("Cannot save the isolated FirstMission test mode");
+        if(adapter.has_active_cutscene())throw std::runtime_error("Cannot save during an active cutscene");
+        if(runtime.on_mission() && !original_save_menu_requested)
+            throw std::runtime_error("A story mission did not authorize the save menu");
+        // mission_buffer_in_use() is a code-lifetime lease, not an on-mission
+        // flag. VM snapshots already preserve its bytecode, locals and frames.
+        if(route_intents.has_active_route())throw std::runtime_error("Cannot save while a script-controlled route is active");
+        if(restoring_world || !hud.pull(runtime.vm()))throw std::runtime_error("Campaign save is waiting for restored world/HUD");
+        const auto player=lcs::execute_sa({0x01F5,{0},{},0,1});
+        const auto outfit=player.executed && player_skins?player_skins->wearing(player.values[0]):std::nullopt;
+        if(!outfit)throw std::runtime_error("Cannot save without a committed Toni outfit");
+        lcs::CampaignCheckpoint state;state.time=now;state.outfit=*outfit;
+        state.runtime=runtime.save_state();state.adapter=adapter.save_state(now);
+        state.services=lcs::CampaignServicesSave::save(hud,collectives,route_scripts,coronas,continuous_sounds,adapter.fx,*world_sectors,now);
+        // Music area is source identity, not SA interior zero.
+        lcs::CampaignSaveWriter extra;extra.u32(uint32_t(source_music_area));extra.pod(marker_process.previous_point);extra.bytes(state.services);state.services=std::move(extra.data);
+        return state;
+    }
+    void restore_save(const lcs::CampaignCheckpoint& state,uint32_t now) {
+        runtime.restore_state(state.runtime,now);
+        std::string diagnostic;
+        if(!adapter.restore_state(state.adapter,now,diagnostic))throw std::runtime_error("LCS services: "+diagnostic);
+        lcs::CampaignSaveReader extra{state.services};const auto music_area=int32_t(extra.u32());const auto previous=extra.pod<std::array<float,3>>();const auto services=extra.bytes();extra.end();
+        for(float x:previous)if(!std::isfinite(x))throw std::runtime_error("Invalid saved marker position");
+        pending_saved_world=lcs::CampaignServicesSave::restore(services,hud,collectives,route_scripts,coronas,continuous_sounds,adapter.fx,*world_sectors,runtime.vm(),now);
+        source_music_area=music_area;marker_process.previous_point=previous;restoring_world=true;
+    }
+    bool finish_restore() {
+        if(!restoring_world)return true;
+        const auto requested=world_sectors->request();
+        if(!requested.executed)throw std::runtime_error("Cannot request saved world layers: "+requested.diagnostic);
+        const auto ready=world_sectors->complete();if(!ready)throw std::runtime_error("Cannot verify saved world layers: "+world_sectors->diagnostic());
+        if(!*ready)return false;
+        const auto committed=world_sectors->commit();if(!committed.executed)throw std::runtime_error("Cannot commit saved world layers: "+committed.diagnostic);
+        if(!committed.condition)return false;
+        // Restore the physically committed world first. The original VM must
+        // still drive commit of any source transition that was pending at SAVE.
+        lcs::CampaignServicesSave::apply_pending(pending_saved_world,*world_sectors);
+        pending_saved_world={};
+        restoring_world=false;log("Campaign LOAD restored LCS globals/threads/services and Toni without replaying MAIN");return true;
     }
     void release_taxi_hails() {
         if(taxi_hails && !taxi_hails->clear_all())retired_taxi_hails.push_back(std::move(taxi_hails));
@@ -1242,15 +1305,9 @@ void observe_world() {
         if(inspected_world || campaign || player_skins)retire_campaign_world();
         return;
     }
-    // Native saves currently contain neither the LCS VM nor its service state.
-    // Starting MAIN here would silently replace the saved progression with a
-    // fresh campaign. Keep that unsupported restore explicit until persistence
-    // can reconstruct the original owners/handles, independently of New Game.
-    if(campaign_load_requires_restore) {
-        if(!world_failure)log("Campaign LOAD refused: this native save has no restorable LCS VM/service state; MAIN was not replayed");
-        world_failure=true;
-        lcs::sa_show_campaign_error("Save sem estado da campanha LCS");
-        return;
+    if(campaign_load_requires_restore && !pending_campaign_load) {
+        if(!world_failure)log("Campaign LOAD refused: "+campaign_load_diagnostic);
+        world_failure=true;lcs::sa_show_campaign_error("Save sem estado LCS valido");return;
     }
     // A campaign failure must not stop servicing the independently mounted skins
     // and their double-sided draw callbacks as new pedestrians stream in.
@@ -1303,7 +1360,8 @@ void observe_world() {
                 player_skins=std::make_unique<lcs::SaPlayerSkins>(std::filesystem::path(directory));
                 const auto configured=setting(L"PlayerOutfit");
                 std::string initial="plr3";
-                if(!configured.empty()) {
+                if(campaign_load_requires_restore && pending_campaign_load)initial=pending_campaign_load->outfit;
+                else if(!configured.empty()) {
                     initial.clear();
                     for(const auto c:configured) {
                         if(c>127)throw std::runtime_error("PlayerOutfit must be an original ASCII label");
@@ -1323,7 +1381,11 @@ void observe_world() {
             }
             if(setting(L"Mode")==L"Campaign" || setting(L"Mode")==L"FirstMission") {
                 const auto data=setting(L"DataDirectory");if(data.empty())throw std::runtime_error("DataDirectory is not configured");
-                campaign=std::make_unique<Campaign>(std::filesystem::path(data),setting(L"Mode")==L"FirstMission");
+                campaign=std::make_unique<Campaign>(std::filesystem::path(data),setting(L"Mode")==L"FirstMission",campaign_load_requires_restore);
+                if(campaign_load_requires_restore) {
+                    uint32_t now=0;if(!read_game_word(0xB7CB84,&now))throw std::runtime_error("Cannot read loaded game timer");
+                    campaign->restore_save(*pending_campaign_load,now);pending_campaign_load.reset();campaign_load_requires_restore=false;
+                }
                 log("Original LCS runtime started on the SA game thread; unsupported commands will block explicitly.");
             } else log("Mode=WorldPreview; native map bootstrap is active. Campaign is still under development.");
             read_game_word(0xB7CB84,&last_game_time);
@@ -1351,6 +1413,7 @@ void observe_world() {
     }
     if(gameplay_skins && !gameplay_skins->service())throw std::runtime_error("Gameplay skin pool/culling mismatch");
     if(world_failure || !campaign)return;
+    if(!campaign->finish_restore())return;
     if(campaign->cutscenes)campaign->cutscenes->service();
     uint32_t now=0;if(!read_game_word(0xB7CB84,&now) || now==last_game_time)return;
     const auto elapsed=now-last_game_time;last_game_time=now;
@@ -1615,11 +1678,62 @@ void __cdecl on_world_restart(){
     const bool loading=*reinterpret_cast<const uint8_t*>(0xBA6748+0x60)!=0;
     retire_campaign_world();
     campaign_load_requires_restore=loading;
+    pending_campaign_load.reset();campaign_load_diagnostic.clear();pending_campaign_save.reset();
     lcs::sa_world_sector_world_retiring();
     original_world_restart();
 }
+bool __cdecl campaign_before_save(uint8_t slot,const char* native_path,void*) {
+    pending_campaign_save.reset();pending_native_save.clear();
+    if(setting(L"Mode")!=L"Campaign")return !campaign;
+    try {
+        if(!campaign || world_failure)throw std::runtime_error("Campaign is not ready to save");
+        uint32_t now=0;if(!read_game_word(0xB7CB84,&now))throw std::runtime_error("Cannot read save timer");
+        pending_native_save=std::filesystem::path(native_path);if(!pending_native_save.is_absolute())throw std::runtime_error("Native save path is not absolute");
+        pending_campaign_save=campaign->capture_save(now);
+        log("Campaign SAVE captured slot="+std::to_string(unsigned(slot)+1));return true;
+    }catch(const std::exception& e){log(std::string("Campaign SAVE refused before native write: ")+e.what()+"; nativePath="+pending_native_save.u8string());return false;}
+}
+bool __cdecl campaign_saved(uint8_t slot,const char* native_path,bool native_saved,void*) {
+    if(!native_saved){log(std::string("Campaign SAVE native writer failed: ")+(native_path?native_path:"<missing path>"));pending_campaign_save.reset();return false;}
+    if(!pending_campaign_save)return setting(L"Mode")!=L"Campaign";
+    try {
+        const auto path=std::filesystem::path(native_path);if(path!=pending_native_save)throw std::runtime_error("Native save path changed during capture");
+        const auto data=pending_campaign_save->encode(lcs::native_save_digest(path));
+        const auto companion=lcs::campaign_checkpoint_path(path);auto temporary=companion;temporary+=L".tmp";
+        {std::ofstream file(temporary,std::ios::binary|std::ios::trunc);if(!file || !file.write(reinterpret_cast<const char*>(data.data()),data.size()) || !file.flush())throw std::runtime_error("Cannot write LCS save companion");}
+        if(!MoveFileExW(temporary.c_str(),companion.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot commit LCS save companion");
+        pending_campaign_save.reset();log("Campaign SAVE committed slot="+std::to_string(unsigned(slot)+1));return true;
+    }catch(const std::exception& e){pending_campaign_save.reset();log(std::string("Campaign SAVE companion failed: ")+e.what());return false;}
+}
+bool __cdecl campaign_before_load(uint8_t slot,const char* native_path,void*) {
+    if(setting(L"Mode")!=L"Campaign")return true;
+    campaign_load_requires_restore=true;pending_campaign_load.reset();campaign_load_diagnostic.clear();
+    try {pending_campaign_load=lcs::read_campaign_checkpoint(std::filesystem::path(native_path));log("Campaign LOAD companion verified slot="+std::to_string(unsigned(slot)+1));return true;}
+    catch(const std::exception& e){campaign_load_diagnostic=e.what();log("Campaign LOAD companion unavailable: "+campaign_load_diagnostic);return false;}
+}
+void __cdecl campaign_loaded(uint8_t,const char*,bool sidecar_ready,bool native_loaded,bool,void*) {
+    if(setting(L"Mode")!=L"Campaign")return;
+    campaign_load_requires_restore=true;
+    if(!sidecar_ready){pending_campaign_load.reset();if(campaign_load_diagnostic.empty())campaign_load_diagnostic="Native save path/slot could not be verified";}
+    if(!native_loaded){pending_campaign_load.reset();campaign_load_diagnostic="Native SA save load did not complete";}
+}
+ScriptProcess original_campaign_save=nullptr,original_campaign_load=nullptr;
+bool bind_campaign_target(uintptr_t site,uintptr_t target) {
+    using Profile=lcs::SACampaignSaveProfile;
+    lcs::sa_campaign_save_bind_native_targets(
+        reinterpret_cast<lcs::SACampaignNativeSaveWriter>(site==Profile::save_writer_call?target:reinterpret_cast<uintptr_t>(original_campaign_save)),
+        reinterpret_cast<lcs::SACampaignNativeGenericLoad>(site==Profile::generic_load_call?target:reinterpret_cast<uintptr_t>(original_campaign_load)));
+    return true;
+}
+bool install_campaign_storage() {
+    if(!lcs::SACampaignSaveProfile::matches())return false;
+    lcs::sa_campaign_save_bind_callbacks({&campaign_before_save,&campaign_saved,&campaign_before_load,&campaign_loaded,nullptr});
+    const bool save=install_call(lcs::SACampaignSaveProfile::save_writer_call,reinterpret_cast<ScriptProcess>(&lcs::sa_campaign_save_writer_call),original_campaign_save,&bind_campaign_target);
+    const bool load=install_call(lcs::SACampaignSaveProfile::generic_load_call,reinterpret_cast<ScriptProcess>(&lcs::sa_campaign_generic_load_call),original_campaign_load,&bind_campaign_target);
+    return save && load && lcs::sa_campaign_save_hooks_ready();
+}
 bool install_hook() {
-    if(original_process && original_startup_process && original_phone_phase && original_audio_main && original_audio_menu && original_mission_hud && original_marker_phase && original_marker_shutdown && original_world_shutdown && original_world_restart && lcs::sa_remote_door_policy_calls_healthy() && lcs::sa_sniper_query_calls_healthy())return true;
+    if(original_process && original_startup_process && original_phone_phase && original_audio_main && original_audio_menu && original_mission_hud && original_marker_phase && original_marker_shutdown && original_world_shutdown && original_world_restart && lcs::sa_remote_door_policy_calls_healthy() && lcs::sa_sniper_query_calls_healthy() && lcs::sa_campaign_save_hooks_ready())return true;
     const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if(base!=0x400000)return false;
     const auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
@@ -1640,6 +1754,7 @@ bool install_hook() {
             return false;
         }
     }
+    const bool storage=install_campaign_storage();
     const bool startup=install_call(startup_process_call,&on_startup_scripts,original_startup_process);
     const bool loop=install_call(process_call,&on_game_process,original_process);
     const bool world_shutdown=install_call(0x53C9BC,&on_world_shutdown,original_world_shutdown);
@@ -1673,7 +1788,7 @@ bool install_hook() {
     // These optional bindings do not gate unrelated campaign/HUD commands.
     // Marker availability still checks actual CALL ownership, native resources
     // and queries; optional hook failure cannot admit a fake rendered marker.
-    return startup && loop && phones && audio_main && audio_menu && mission_hud && world_shutdown && world_restart;
+    return storage && startup && loop && phones && audio_main && audio_menu && mission_hud && world_shutdown && world_restart;
 }
 }
 // Supported by Ultimate ASI Loader. Also installed during ordinary ASI LoadLibrary.

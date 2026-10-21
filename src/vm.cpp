@@ -2,23 +2,125 @@
 #include "ScriptCommands.h"
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace lcs {
+namespace {
+constexpr uint64_t kFnvOffset = 14695981039346656037ull;
+constexpr uint64_t kFnvPrime = 1099511628211ull;
+constexpr size_t kMaximumVmState = 96u * 1024u * 1024u;
+constexpr uint8_t kVmStateMagic[8] = {'L','C','S','V','M','0','0','1'};
+constexpr uint32_t kVmStateVersion = 1;
+
+uint64_t hash_byte(uint64_t hash,uint8_t byte) { return (hash^byte)*kFnvPrime; }
+uint64_t hash_u32(uint64_t hash,uint32_t value) {
+    for(unsigned i=0;i<4;++i)hash=hash_byte(hash,uint8_t(value>>(8*i)));
+    return hash;
+}
+uint64_t hash_u64(uint64_t hash,uint64_t value) {
+    for(unsigned i=0;i<8;++i)hash=hash_byte(hash,uint8_t(value>>(8*i)));
+    return hash;
+}
+uint64_t image_fingerprint(const std::vector<uint8_t>& bytes,uint32_t main_size,
+                           uint32_t variable_space,uint32_t mission_allocation) {
+    uint64_t hash=kFnvOffset;
+    hash=hash_u32(hash,main_size);hash=hash_u32(hash,variable_space);
+    hash=hash_u32(hash,mission_allocation);hash=hash_u64(hash,bytes.size());
+    for(const auto byte:bytes)hash=hash_byte(hash,byte);
+    return hash;
+}
+uint64_t state_checksum(const std::vector<uint8_t>& bytes,size_t length) {
+    uint64_t hash=kFnvOffset;
+    for(size_t i=0;i<length;++i)hash=hash_byte(hash,bytes[i]);
+    return hash;
+}
+class StateWriter {
+public:
+    std::vector<uint8_t> bytes;
+    void raw(const uint8_t* data,size_t size) { bytes.insert(bytes.end(),data,data+size); }
+    void u32(uint32_t value) { for(unsigned i=0;i<4;++i)bytes.push_back(uint8_t(value>>(8*i))); }
+    void u64(uint64_t value) { for(unsigned i=0;i<8;++i)bytes.push_back(uint8_t(value>>(8*i))); }
+};
+class StateReader {
+    const std::vector<uint8_t>& bytes_;
+    size_t position_=0,end_;
+    void require(size_t size) const {
+        if(position_>end_ || size>end_-position_)throw std::runtime_error("Truncated LCS VM save state");
+    }
+public:
+    StateReader(const std::vector<uint8_t>& bytes,size_t begin,size_t end):bytes_(bytes),position_(begin),end_(end){}
+    void raw(uint8_t* output,size_t size) { require(size);std::copy_n(bytes_.begin()+position_,size,output);position_+=size; }
+    uint32_t u32() {
+        require(4);const auto value=uint32_t(bytes_[position_])|uint32_t(bytes_[position_+1])<<8|
+            uint32_t(bytes_[position_+2])<<16|uint32_t(bytes_[position_+3])<<24;
+        position_+=4;return value;
+    }
+    uint64_t u64() { const auto low=u32(),high=u32();return uint64_t(low)|(uint64_t(high)<<32); }
+    size_t remaining() const { return end_-position_; }
+};
+uint32_t float_bits(float value) { uint32_t bits;std::memcpy(&bits,&value,sizeof(bits));return bits; }
+float bits_float(uint32_t bits) { float value;std::memcpy(&value,&bits,sizeof(value));return value; }
+}
 static float as_float(int32_t bits) { float f; std::memcpy(&f, &bits, 4); return f; }
 static int32_t as_bits(float f) { int32_t bits; std::memcpy(&bits, &f, 4); return bits; }
 Vm::Vm(const ScmImage& i) : memory(i.bytes.begin(), i.bytes.begin()+i.main_size),
     main_size(i.main_size), variable_space(i.variable_space) {
     memory.resize(size_t(main_size) + i.largest_mission);
+    image_fingerprint_=image_fingerprint(i.bytes,i.main_size,i.variable_space,i.largest_mission);
 }
 Vm::Vm(std::vector<uint8_t> code, uint32_t variables, uint32_t main)
     : memory(std::move(code)), main_size(main), variable_space(variables) {
     if (memory.size()<main_size || variable_space>main_size || memory.size()>UINT32_MAX)
         throw std::runtime_error("Invalid ScriptSpace layout");
     mission_size_=uint32_t(memory.size()-main_size);
+    image_fingerprint_=image_fingerprint(memory,main_size,variable_space,mission_size_);
+}
+std::vector<uint8_t> Vm::save_state() const {
+    if(variable_space>main_size || main_size>memory.size() ||
+       mission_size_>memory.size()-main_size || memory.size()>kMaximumVmState ||
+       !std::isfinite(time_step) || time_step<0)
+        throw std::runtime_error("Invalid LCS VM state cannot be saved");
+    StateWriter writer;writer.raw(kVmStateMagic,sizeof(kVmStateMagic));
+    writer.u32(kVmStateVersion);writer.u64(image_fingerprint_);writer.u32(main_size);
+    writer.u32(variable_space);writer.u32(uint32_t(memory.size()));writer.u32(mission_size_);
+    writer.u32(float_bits(time_step));writer.raw(memory.data(),variable_space);
+    writer.raw(memory.data()+main_size,mission_size_);
+    const auto checksum=state_checksum(writer.bytes,writer.bytes.size());writer.u64(checksum);
+    return std::move(writer.bytes);
+}
+void Vm::restore_state(const std::vector<uint8_t>& state) {
+    if(state.size()<48 || state.size()>kMaximumVmState+48)
+        throw std::runtime_error("Invalid LCS VM save-state size");
+    StateReader checksum_reader(state,state.size()-8,state.size());
+    const auto expected_checksum=checksum_reader.u64();
+    if(state_checksum(state,state.size()-8)!=expected_checksum)
+        throw std::runtime_error("LCS VM save-state checksum mismatch");
+    StateReader reader(state,0,state.size()-8);
+    uint8_t magic[sizeof(kVmStateMagic)]{};reader.raw(magic,sizeof(magic));
+    if(!std::equal(std::begin(kVmStateMagic),std::end(kVmStateMagic),std::begin(magic)) ||
+       reader.u32()!=kVmStateVersion)
+        throw std::runtime_error("Unsupported LCS VM save-state format");
+    const auto fingerprint=reader.u64();
+    const auto saved_main=reader.u32(),saved_variables=reader.u32();
+    const auto saved_capacity=reader.u32(),saved_mission=reader.u32(),saved_time=reader.u32();
+    const auto timestep=bits_float(saved_time);
+    if(fingerprint!=image_fingerprint_ || saved_main!=main_size || saved_variables!=variable_space ||
+       saved_capacity!=memory.size() || variable_space>main_size || main_size>memory.size() ||
+       saved_mission>memory.size()-main_size || !std::isfinite(timestep) || timestep<0 ||
+       uint64_t(variable_space)+saved_mission!=reader.remaining())
+        throw std::runtime_error("LCS VM save state does not match this SCM image or layout");
+    std::vector<uint8_t> globals(variable_space),mission(saved_mission);
+    reader.raw(globals.data(),globals.size());reader.raw(mission.data(),mission.size());
+    // Commit only after the complete envelope and every size/layout check pass.
+    std::copy(globals.begin(),globals.end(),memory.begin());
+    std::fill(memory.begin()+main_size,memory.end(),uint8_t(0));
+    std::copy(mission.begin(),mission.end(),memory.begin()+main_size);
+    mission_size_=saved_mission;time_step=timestep;
 }
 void Vm::require_code(const Thread& t, size_t bytes) const {
     const uint64_t logical_end=t.ip<main_size ? main_size : uint64_t(main_size)+mission_size_;

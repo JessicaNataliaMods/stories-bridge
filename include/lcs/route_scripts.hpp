@@ -6,6 +6,7 @@
 namespace lcs {
 // One original global pool, shared by every SCM thread and the live consumer.
 class RouteScripts {
+    friend struct CampaignServicesSave;
     OriginalRouteTable table_;
     std::function<StepResult(int32_t,int32_t,int32_t,Thread&)> follow_route_;
 public:

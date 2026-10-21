@@ -38,7 +38,7 @@ StepResult HudBridge::dispatch(Vm& vm,Thread& t,uint16_t opcode) {
             if(!update || !update({HudRequest::Action::counter_prefix,native_cell(i),int32_t(prefix),i-1})){
                 t.diagnostic="Owned source counter prefix renderer unavailable";return StepResult::unsupported;
             }
-            break;
+            saved_prefixes_[i-1]=prefix;break;
         }
         return StepResult::continued;
     }
@@ -96,7 +96,7 @@ StepResult HudBridge::dispatch(Vm& vm,Thread& t,uint16_t opcode) {
             if(!update({clock?HudRequest::Action::clear_clock:HudRequest::Action::clear_counter,native_cell(i)})) {
                 t.diagnostic="Cannot clear owned native mission HUD entry";return StepResult::unsupported;
             }
-            entry={};
+            entry={};saved_requests_[i].reset();if(i)saved_prefixes_[i-1].reset();
         }
         return StepResult::continued;
     }
@@ -113,7 +113,7 @@ StepResult HudBridge::dispatch(Vm& vm,Thread& t,uint16_t opcode) {
     if(!write_cell(native_cell(slot),current) || !update(request)) {
         t.diagnostic="Native mission HUD slot is unavailable or owned by another script";return StepResult::unsupported;
     }
-    entries_[slot]={original,true};pending_foreground_=white;if(!clock)pending_background_=white;
+    saved_requests_[slot]=request;entries_[slot]={original,true};pending_foreground_=white;if(!clock)pending_background_=white;
     return StepResult::continued;
 }
 bool HudBridge::pull(Vm& vm) {
@@ -131,7 +131,7 @@ bool HudBridge::push(const Vm& vm) {
 bool HudBridge::clear() {
     bool ok=true;
     for(size_t i=0;i<entries_.size();++i)if(entries_[i].active) {
-        if(update && update({i?HudRequest::Action::clear_counter:HudRequest::Action::clear_clock,native_cell(i)}))entries_[i]={};
+        if(update && update({i?HudRequest::Action::clear_counter:HudRequest::Action::clear_clock,native_cell(i)})){entries_[i]={};saved_requests_[i].reset();if(i)saved_prefixes_[i-1].reset();}
         else ok=false;
     }
     if(frozen_) {

@@ -76,7 +76,34 @@ int main() {
         names[1]=lcs::key("foreign_skin");
         bool refused=false;try{lcs::SaPlayerSkins foreign(world);}catch(const std::runtime_error&){refused=true;}
         check(refused);
-        std::cout<<"PASS: player rebuild, occupied alternate slot, streaming retry, actor replacement and foreign skin\n";
+        // A native LOAD can restore the original model name while the pool's
+        // reference count still reflects the pre-load session. Keep that slot
+        // untouched and stream the saved outfit into the other free slot.
+        names={lcs::key("special08"),lcs::key("special09")};refs={1,0};
+        actor=924;model=0;loaded=true;clump=true;
+        const int renamed_before_load=renamed;
+        lcs::SaPlayerSkins after_load(world);check(after_load.initialize("plr3"));
+        check(model==298 && names[0]==lcs::key("special08") && renamed==renamed_before_load+1);
+        // If both original slots are still referenced, initialization must
+        // refuse without renaming either slot or changing the rebuilt player.
+        names={lcs::key("special08"),lcs::key("special09")};refs={1,1};
+        actor=936;model=0;loaded=true;
+        const auto names_before_refusal=names;const int renamed_before_refusal=renamed;
+        lcs::SaPlayerSkins fully_occupied(world);check(!fully_occupied.initialize("plr3"));
+        check(model==0 && names==names_before_refusal && renamed==renamed_before_refusal);
+        // Exact retail CStreaming::ReInit state: it hashes the empty string
+        // into model-info keys 290..299, instead of restoring special08/09.
+        names={lcs::key(""),lcs::key("")};refs={0,0};actor=948;model=0;
+        lcs::SaPlayerSkins empty_after_load(world);check(empty_after_load.initialize("plr3"));
+        check(model==297 && names[0]==lcs::key("lcs_plr3"));
+        names={lcs::key(""),lcs::key("")};refs={1,0};actor=960;model=0;
+        lcs::SaPlayerSkins busy_empty_after_load(world);check(busy_empty_after_load.initialize("plr3"));
+        check(model==298 && names[0]==lcs::key(""));
+        names={lcs::key(""),lcs::key("")};refs={1,1};actor=972;model=0;
+        const auto empty_names=names;const auto empty_renamed=renamed;
+        lcs::SaPlayerSkins busy_reset_slots(world);check(!busy_reset_slots.initialize("plr3"));
+        check(model==0 && names==empty_names && renamed==empty_renamed);
+        std::cout<<"PASS: retail empty-key LOAD reset, occupied slots, streaming retry and foreign-skin protection\n";
         return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

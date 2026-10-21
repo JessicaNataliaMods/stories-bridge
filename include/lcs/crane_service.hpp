@@ -139,6 +139,7 @@ public:
     }
 
 private:
+    friend class NativeAdapter;
     struct Target {int32_t handle=-1;uintptr_t entity=0;uint8_t generation=0;};
     struct Crane {
         std::array<float,3> origin{};uint32_t seed=0;

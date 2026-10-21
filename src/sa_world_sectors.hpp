@@ -19,6 +19,7 @@ struct SaWorldSectorModelBinding {
 // stages an original state; request/complete/commit are the source 1590-1592
 // three-phase protocol. The engine owns all SA pool/SCM ABI details.
 class SaWorldSectors {
+    friend struct CampaignServicesSave;
     struct Layer;
     struct Plan {
         uint64_t world_epoch = 0;

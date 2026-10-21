@@ -4,6 +4,7 @@ namespace lcs {
 struct CollectiveCandidate {ObjectiveActor actor;int32_t type=0;uint8_t created_by=0;};
 // Original global table: 32 entries shared by all script threads, not 32 per group.
 class Collectives {
+    friend struct CampaignServicesSave;
     struct Entry {int32_t group=-1;int32_t ped=0;};
     std::array<Entry,32> entries_{};
     int32_t next_=0;

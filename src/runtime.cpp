@@ -2,10 +2,70 @@
 #include "ScriptCommands.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <iterator>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace lcs {
 namespace {
+constexpr uint64_t kFnvOffset = 14695981039346656037ull;
+constexpr uint64_t kFnvPrime = 1099511628211ull;
+constexpr size_t kMaximumRuntimeState = 112u * 1024u * 1024u;
+constexpr uint8_t kRuntimeStateMagic[8] = {'L','C','S','R','U','N','0','1'};
+constexpr uint32_t kRuntimeStateVersion = 1;
+constexpr uint32_t kNoSavedIndex = UINT32_MAX;
+
+uint64_t hash_byte(uint64_t hash,uint8_t byte) { return (hash^byte)*kFnvPrime; }
+uint64_t state_checksum(const std::vector<uint8_t>& bytes,size_t length) {
+    uint64_t hash=kFnvOffset;
+    for(size_t i=0;i<length;++i)hash=hash_byte(hash,bytes[i]);
+    return hash;
+}
+int32_t signed_bits(uint32_t bits) { int32_t value;std::memcpy(&value,&bits,sizeof(value));return value; }
+class StateWriter {
+public:
+    std::vector<uint8_t> bytes;
+    void u8(uint8_t value) { bytes.push_back(value); }
+    void u16(uint16_t value) { for(unsigned i=0;i<2;++i)bytes.push_back(uint8_t(value>>(8*i))); }
+    void u32(uint32_t value) { for(unsigned i=0;i<4;++i)bytes.push_back(uint8_t(value>>(8*i))); }
+    void u64(uint64_t value) { for(unsigned i=0;i<8;++i)bytes.push_back(uint8_t(value>>(8*i))); }
+    void raw(const uint8_t* data,size_t size) { bytes.insert(bytes.end(),data,data+size); }
+    void string(const std::string& value) {
+        if(value.size()>UINT16_MAX)throw std::runtime_error("LCS thread text exceeds save-state limit");
+        u16(uint16_t(value.size()));raw(reinterpret_cast<const uint8_t*>(value.data()),value.size());
+    }
+};
+class StateReader {
+    const std::vector<uint8_t>& bytes_;
+    size_t position_=0,end_;
+    void require(size_t size) const {
+        if(position_>end_ || size>end_-position_)throw std::runtime_error("Truncated LCS runtime save state");
+    }
+public:
+    StateReader(const std::vector<uint8_t>& bytes,size_t begin,size_t end):bytes_(bytes),position_(begin),end_(end){}
+    uint8_t u8() { require(1);return bytes_[position_++]; }
+    uint16_t u16() { const auto low=u8();return uint16_t(low)|uint16_t(u8())<<8; }
+    uint32_t u32() {
+        const auto b0=u8(),b1=u8(),b2=u8(),b3=u8();
+        return uint32_t(b0)|uint32_t(b1)<<8|uint32_t(b2)<<16|uint32_t(b3)<<24;
+    }
+    uint64_t u64() { const auto low=u32(),high=u32();return uint64_t(low)|(uint64_t(high)<<32); }
+    std::vector<uint8_t> bytes(size_t size) {
+        require(size);std::vector<uint8_t> result(bytes_.begin()+position_,bytes_.begin()+position_+size);position_+=size;return result;
+    }
+    std::string string(size_t maximum) {
+        const auto size=u16();if(size>maximum)throw std::runtime_error("LCS thread text exceeds save-state limit");
+        require(size);std::string result(reinterpret_cast<const char*>(bytes_.data()+position_),size);position_+=size;return result;
+    }
+    size_t remaining() const { return end_-position_; }
+};
+uint32_t remaining_wait(uint32_t wake,uint32_t now) {
+    const auto delta=wake-now;
+    return delta && delta<=uint32_t(std::numeric_limits<int32_t>::max()) ? delta : 0;
+}
 uint32_t code_region_end(const Vm& vm,uint32_t address) {
     if(address<vm.main_size)return vm.main_size<=vm.memory.size()?vm.main_size:0;
     const uint64_t mission_end=uint64_t(vm.main_size)+vm.mission_size();
@@ -75,6 +135,38 @@ bool valid_recovery_frame(const Vm& vm,const Thread& thread) {
 }
 bool active_code_address(const Vm& vm,uint32_t address) {
     return code_region_end(vm,address)!=0;
+}
+bool valid_runtime_thread(const Vm& vm,const Thread& thread) {
+    if(thread.stack_size>thread.stack.size() || thread.locals_base>96 ||
+       !(thread.and_or==0 || (thread.and_or>=1 && thread.and_or<=8) ||
+         (thread.and_or>=21 && thread.and_or<=28)))return false;
+    if(!thread.active)return true;
+    if(!active_code_address(vm,thread.ip))return false;
+    uint16_t base=thread.locals_base;
+    for(size_t i=thread.stack_size;i>0;--i) {
+        const auto frame=thread.stack[i-1];
+        if(frame&(1u<<23)) {
+            Thread caller=thread;caller.locals_base=base;
+            if(!valid_function_recovery_frame(vm,caller,frame))return false;
+            const auto metadata=frame&((1u<<22)-1);
+            if(metadata+3ull>vm.memory.size())return false;
+            const auto offset=vm.memory[metadata+2];
+            if(base<offset)return false;
+            base=uint16_t(base-offset);
+        } else if(!valid_plain_recovery_frame(vm,frame))return false;
+    }
+    return base==0;
+}
+uint8_t thread_flags(const Thread& thread) {
+    return uint8_t(thread.condition) | uint8_t(thread.inverted)<<1 | uint8_t(thread.active)<<2 |
+        uint8_t(thread.waiting)<<3 | uint8_t(thread.message_wait)<<4 |
+        uint8_t(thread.death_arrest_enabled)<<5 | uint8_t(thread.death_arrest_executed)<<6;
+}
+void restore_thread_flags(Thread& thread,uint8_t flags) {
+    if(flags&0x80)throw std::runtime_error("Invalid LCS thread flags in save state");
+    thread.condition=bool(flags&1);thread.inverted=bool(flags&2);thread.active=bool(flags&4);
+    thread.waiting=bool(flags&8);thread.message_wait=bool(flags&16);
+    thread.death_arrest_enabled=bool(flags&32);thread.death_arrest_executed=bool(flags&64);
 }
 }
 Runtime::Runtime(ScmImage image) : image_(std::move(image)), vm_(image_) {
@@ -195,6 +287,186 @@ void Runtime::resume(ScriptId id) {
     if (!s.thread.active || !s.blocked) throw std::runtime_error("Only blocked LCS threads can be resumed");
     if(s.result!=StepResult::unsupported)throw std::runtime_error("Failed script requires repair; unsafe automatic command replay rejected");
     s.blocked=false; s.thread.diagnostic.clear(); s.result=StepResult::continued;
+}
+std::vector<uint8_t> Runtime::save_state() const {
+    if(ticking_)throw std::runtime_error("Cannot save LCS runtime during a scheduler tick");
+    std::array<bool,128> scheduled{};
+    for(const auto id:active_) {
+        const auto slot=std::find_if(scripts_.begin(),scripts_.end(),[id](const Script& s){return id && s.id==id;});
+        if(slot==scripts_.end() || !slot->thread.active)
+            throw std::runtime_error("Invalid LCS active-thread queue cannot be saved");
+        const auto index=size_t(slot-scripts_.begin());
+        if(scheduled[index])throw std::runtime_error("Duplicate LCS active-thread ID cannot be saved");
+        scheduled[index]=true;
+    }
+    uint64_t maximum_id=0;
+    for(size_t i=0;i<scripts_.size();++i) {
+        const auto& script=scripts_[i];
+        if(script.processing)throw std::runtime_error("Cannot save LCS runtime during script processing");
+        if(!script.id)continue;
+        for(size_t prior=0;prior<i;++prior)if(scripts_[prior].id==script.id)
+            throw std::runtime_error("Duplicate LCS script ID cannot be saved");
+        maximum_id=std::max(maximum_id,script.id);
+        const auto result=static_cast<uint8_t>(script.result);
+        if(result>static_cast<uint8_t>(StepResult::failed) ||
+           !valid_runtime_thread(vm_,script.thread) || script.thread.last_opcode>0x7fff ||
+           script.thread.name.size()>8 || script.thread.diagnostic.size()>4096 ||
+           (script.blocked && (!script.thread.active ||
+              (script.result!=StepResult::unsupported && script.result!=StepResult::failed))) ||
+           (script.thread.active && (script.result==StepResult::terminated ||
+              (!script.blocked && (script.result==StepResult::unsupported || script.result==StepResult::failed)))) ||
+           (!script.thread.active && (script.blocked || script.result!=StepResult::terminated)) ||
+           (script.thread.active!=scheduled[i]))
+            throw std::runtime_error("Invalid LCS script state cannot be saved");
+    }
+    if((next_id_ && next_id_<=maximum_id) || (!next_id_ && maximum_id!=UINT64_MAX))
+        throw std::runtime_error("Invalid LCS next-script ID cannot be saved");
+    if(mission_index_) {
+        if(image_.exclusive_missions)throw std::runtime_error("Exclusive LCS mission state cannot be saved by this runtime");
+        if(*mission_index_>=image_.mission_offsets.size())throw std::runtime_error("Invalid loaded LCS mission index");
+        const auto expected=image_.mission(*mission_index_);
+        if(expected.size()!=vm_.mission_size() ||
+           !std::equal(expected.begin(),expected.end(),vm_.memory.begin()+vm_.main_size))
+            throw std::runtime_error("Loaded LCS mission code differs from the source image");
+    } else if(vm_.mission_size())throw std::runtime_error("Loaded LCS mission has no source index");
+    if(on_mission_offset_ && (*on_mission_offset_<8 || (*on_mission_offset_%4) ||
+       uint64_t(*on_mission_offset_)+4>vm_.variable_space))
+        throw std::runtime_error("Invalid LCS mission flag cannot be saved");
+
+    const auto vm_state=vm_.save_state();
+    StateWriter writer;writer.raw(kRuntimeStateMagic,sizeof(kRuntimeStateMagic));
+    writer.u32(kRuntimeStateVersion);writer.u32(uint32_t(vm_state.size()));
+    writer.raw(vm_state.data(),vm_state.size());
+    writer.u32(mission_index_ ? uint32_t(*mission_index_) : kNoSavedIndex);
+    writer.u32(on_mission_offset_.value_or(kNoSavedIndex));writer.u64(next_id_);
+    writer.u16(uint16_t(scripts_.size()));
+    for(const auto& script:scripts_) {
+        writer.u64(script.id);
+        if(!script.id)continue;
+        const auto& thread=script.thread;
+        writer.u32(thread.ip);
+        writer.u32(thread.waiting ? remaining_wait(thread.wake_time,now_) : 0);
+        for(const auto value:thread.stack)writer.u32(value);
+        for(const auto value:thread.locals)writer.u32(uint32_t(value));
+        writer.u16(thread.stack_size);writer.u16(thread.locals_base);writer.u16(thread.and_or);
+        writer.u8(thread_flags(thread));writer.u32(thread.last_ip);writer.u16(thread.last_opcode);
+        const uint8_t flags=uint8_t(script.mission)|uint8_t(script.resident)<<1|
+            uint8_t(script.blocked)<<2|uint8_t(script.bootstrap)<<3;
+        writer.u8(flags);writer.u64(script.awaiting_initial_slice);
+        writer.u8(static_cast<uint8_t>(script.result));writer.string(thread.name);writer.string(thread.diagnostic);
+    }
+    writer.u16(uint16_t(active_.size()));for(const auto id:active_)writer.u64(id);
+    if(writer.bytes.size()+8>kMaximumRuntimeState)throw std::runtime_error("LCS runtime save state exceeds size limit");
+    const auto checksum=state_checksum(writer.bytes,writer.bytes.size());writer.u64(checksum);
+    return std::move(writer.bytes);
+}
+void Runtime::restore_state(const std::vector<uint8_t>& state,uint32_t now) {
+    if(ticking_)throw std::runtime_error("Cannot restore LCS runtime during a scheduler tick");
+    if(state.size()<32 || state.size()>kMaximumRuntimeState)
+        throw std::runtime_error("Invalid LCS runtime save-state size");
+    StateReader checksum_reader(state,state.size()-8,state.size());
+    if(state_checksum(state,state.size()-8)!=checksum_reader.u64())
+        throw std::runtime_error("LCS runtime save-state checksum mismatch");
+    StateReader reader(state,0,state.size()-8);
+    const auto magic=reader.bytes(sizeof(kRuntimeStateMagic));
+    if(!std::equal(std::begin(kRuntimeStateMagic),std::end(kRuntimeStateMagic),std::begin(magic)) ||
+       reader.u32()!=kRuntimeStateVersion)
+        throw std::runtime_error("Unsupported LCS runtime save-state format");
+    const auto vm_size=reader.u32();
+    if(vm_size>96u*1024u*1024u+48u)throw std::runtime_error("Embedded LCS VM state exceeds size limit");
+    const auto vm_state=reader.bytes(vm_size);
+    const auto saved_mission=reader.u32(),saved_mission_flag=reader.u32();
+    const auto saved_next_id=reader.u64();
+    if(reader.u16()!=scripts_.size())throw std::runtime_error("LCS runtime thread-pool layout mismatch");
+    std::optional<size_t> staged_mission;
+    if(saved_mission!=kNoSavedIndex) {
+        if(image_.exclusive_missions)throw std::runtime_error("Exclusive LCS missions are unsupported by this runtime");
+        if(saved_mission>=image_.mission_offsets.size())throw std::runtime_error("Saved LCS mission index is invalid");
+        staged_mission=size_t(saved_mission);
+    }
+    std::optional<uint32_t> staged_mission_flag;
+    if(saved_mission_flag!=kNoSavedIndex) {
+        if(saved_mission_flag<8 || saved_mission_flag%4 || uint64_t(saved_mission_flag)+4>vm_.variable_space)
+            throw std::runtime_error("Saved LCS mission flag is outside global storage");
+        staged_mission_flag=saved_mission_flag;
+    }
+    std::array<Script,128> staged_scripts{};
+    uint64_t maximum_id=0;
+    for(size_t i=0;i<staged_scripts.size();++i) {
+        auto& script=staged_scripts[i];script.id=reader.u64();
+        if(!script.id)continue;
+        for(size_t prior=0;prior<i;++prior)if(staged_scripts[prior].id==script.id)
+            throw std::runtime_error("Duplicate LCS script ID in save file");
+        maximum_id=std::max(maximum_id,script.id);
+        auto& thread=script.thread;thread.ip=reader.u32();
+        const auto remaining=reader.u32();
+        if(remaining>uint32_t(std::numeric_limits<int32_t>::max()))
+            throw std::runtime_error("Saved LCS WAIT exceeds timer range");
+        for(auto& value:thread.stack)value=reader.u32();
+        for(auto& value:thread.locals)value=signed_bits(reader.u32());
+        thread.stack_size=reader.u16();thread.locals_base=reader.u16();thread.and_or=reader.u16();
+        restore_thread_flags(thread,reader.u8());thread.wake_time=now+remaining;
+        if(!thread.waiting && remaining)throw std::runtime_error("Nonwaiting LCS thread has a saved WAIT deadline");
+        thread.last_ip=reader.u32();thread.last_opcode=reader.u16();
+        const auto flags=reader.u8();
+        if(flags&0xf0)throw std::runtime_error("Invalid LCS script flags in save state");
+        script.mission=bool(flags&1);script.resident=bool(flags&2);script.blocked=bool(flags&4);
+        script.bootstrap=bool(flags&8);script.processing=false;
+        script.awaiting_initial_slice=reader.u64();
+        if(script.awaiting_initial_slice==script.id)
+            throw std::runtime_error("LCS script cannot await its own initial slice");
+        const auto result=reader.u8();if(result>static_cast<uint8_t>(StepResult::failed))
+            throw std::runtime_error("Invalid LCS script result in save state");
+        script.result=static_cast<StepResult>(result);
+        thread.name=reader.string(8);thread.diagnostic=reader.string(4096);
+        if(thread.last_opcode>0x7fff || thread.stack_size>thread.stack.size() || thread.locals_base>96 ||
+           !(thread.and_or==0 || (thread.and_or>=1 && thread.and_or<=8) ||
+             (thread.and_or>=21 && thread.and_or<=28)) ||
+           (script.blocked && (!thread.active ||
+              (script.result!=StepResult::unsupported && script.result!=StepResult::failed))) ||
+           (thread.active && (script.result==StepResult::terminated ||
+              (!script.blocked && (script.result==StepResult::unsupported || script.result==StepResult::failed)))) ||
+           (!thread.active && (script.blocked || script.result!=StepResult::terminated)))
+            throw std::runtime_error("Invalid LCS script state in save file");
+    }
+    if((saved_next_id && saved_next_id<=maximum_id) || (!saved_next_id && maximum_id!=UINT64_MAX))
+        throw std::runtime_error("Invalid saved LCS next-script ID");
+    const auto active_count=reader.u16();if(active_count>staged_scripts.size())
+        throw std::runtime_error("Saved LCS active-thread count exceeds the pool");
+    std::vector<ScriptId> staged_active;staged_active.reserve(active_count);
+    std::array<bool,128> scheduled{};
+    for(size_t i=0;i<active_count;++i) {
+        const auto id=reader.u64();
+        const auto slot=std::find_if(staged_scripts.begin(),staged_scripts.end(),[id](const Script& s){return id && s.id==id;});
+        if(slot==staged_scripts.end() || !slot->thread.active)
+            throw std::runtime_error("Saved LCS active queue references a missing thread");
+        const auto index=size_t(slot-staged_scripts.begin());
+        if(scheduled[index])throw std::runtime_error("Saved LCS active queue contains a duplicate thread");
+        scheduled[index]=true;staged_active.push_back(id);
+    }
+    if(reader.remaining())throw std::runtime_error("Trailing bytes in LCS runtime save state");
+    for(size_t i=0;i<staged_scripts.size();++i)
+        if(staged_scripts[i].id && (staged_scripts[i].thread.active!=scheduled[i]))
+            throw std::runtime_error("Saved LCS active queue is incomplete");
+
+    Vm staged_vm=vm_;staged_vm.restore_state(vm_state);
+    if(staged_mission) {
+        const auto expected=image_.mission(*staged_mission);
+        if(expected.size()!=staged_vm.mission_size() ||
+           !std::equal(expected.begin(),expected.end(),staged_vm.memory.begin()+staged_vm.main_size))
+            throw std::runtime_error("Saved LCS mission code does not match this SCM image");
+    } else if(staged_vm.mission_size())throw std::runtime_error("Save state has mission code without a mission index");
+    if(staged_mission_flag && uint64_t(*staged_mission_flag)+4>staged_vm.variable_space)
+        throw std::runtime_error("Saved LCS mission flag does not fit this SCM image");
+    for(const auto& script:staged_scripts)if(script.id && script.thread.active &&
+       !valid_runtime_thread(staged_vm,script.thread))
+        throw std::runtime_error("Saved LCS thread points outside loaded code");
+
+    static_assert(std::is_nothrow_move_assignable<Script>::value,"Runtime restore commit must not throw");
+    vm_.restore_state(vm_state);
+    scripts_=std::move(staged_scripts);active_=std::move(staged_active);
+    mission_index_=staged_mission;on_mission_offset_=staged_mission_flag;next_id_=saved_next_id;
+    now_=now;budget_=10000;executions_.clear();
 }
 bool Runtime::notify_player_restart() {
     if(!on_mission_offset_ || *on_mission_offset_<8 || *on_mission_offset_%4 ||

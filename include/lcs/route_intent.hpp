@@ -398,6 +398,7 @@ public:
     // Real accepted source objective with an as-yet unprojected consumer.
     // Revoke knowledge; never turn a native task poll into replacement NONE.
     void untracked_objective(int32_t handle){actors_.erase(handle);}
+    bool has_active_route()const{for(const auto& pair:actors_)if(pair.second.current==follow_route || pair.second.previous==follow_route)return true;return false;}
     void clear(){actors_.clear();} // serial deliberately survives world cleanup
 };
 }

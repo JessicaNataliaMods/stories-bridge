@@ -226,6 +226,7 @@ public:
     uint32_t phase_ticks(int32_t id)const{return exists(id)?ferries_[size_t(id)].time_along:0;}
 
 private:
+    friend class NativeAdapter;
     static constexpr float half_pi=1.57079632679f,pi=3.14159265359f,door_ms=10000.0f;
     struct Ferry {
         bool exists=false;int32_t id=0;

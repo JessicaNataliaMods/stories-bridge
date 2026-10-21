@@ -52,9 +52,12 @@ public:
     void load_mission(const std::vector<uint8_t>& code);
     void restart_after_death_arrest(Thread&);
     uint32_t mission_size() const { return mission_size_; }
+    std::vector<uint8_t> save_state() const;
+    void restore_state(const std::vector<uint8_t>& state);
 private:
     struct Ref { bool global; uint32_t index; };
     uint32_t mission_size_ = 0;
+    uint64_t image_fingerprint_ = 0;
     void require_code(const Thread&, size_t bytes) const;
     uint8_t byte(Thread&);
     uint16_t word(Thread&);

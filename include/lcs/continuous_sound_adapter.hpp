@@ -8,6 +8,7 @@ struct ContinuousEntityReceipt {bool entered=false,accepted=false;int32_t entity
 // Script lifetime boundary for retail402/403, bound to the campaign audio consumer.
 // Backend ownership is keyed by the full token, including its internal epoch.
 class ContinuousSoundAdapter {
+    friend struct CampaignServicesSave;
     ContinuousSoundObjects objects_;
     std::optional<ContinuousSoundObjects::Snapshot> uncertain_;
 public:

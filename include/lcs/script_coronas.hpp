@@ -11,6 +11,7 @@ struct ScriptCorona {
     bool active=true;
 };
 class ScriptCoronas {
+    friend struct CampaignServicesSave;
     inline static uint32_t next_id_=0; // original process-global counter, not reset by script Init
     // Retired nodes retain unique renderer IDs until this campaign is destroyed.
     // Never let an allocator recycle an ID while the native corona fades out.

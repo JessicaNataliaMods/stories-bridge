@@ -82,6 +82,11 @@ public:
     ScriptId load_mission(size_t index);
     void terminate(ScriptId id);
     void resume(ScriptId id);
+    // Captures SCM state and scheduler threads. Runtime restoration rebases
+    // WAIT deadlines to the caller's current game timer; native engine handles
+    // held in SCM variables remain the adapter's responsibility.
+    std::vector<uint8_t> save_state() const;
+    void restore_state(const std::vector<uint8_t>& state,uint32_t now);
     // Newly started ordinary scripts run next tick. LOAD_AND_LAUNCH_MISSION_INTERNAL
     // processes its child immediately, matching Script6.cpp. elapsed_ms comes from
     // game time, not wall time; timers advance even while a script is waiting.

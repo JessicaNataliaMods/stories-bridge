@@ -102,27 +102,27 @@ SaPlayerSkins::SaPlayerSkins(const std::filesystem::path& world) {
     for(int i=0;i<2;++i) {
         uint32_t name=0;uint16_t refs=0;
         if(!slot_info(slots[i],name,refs))throw std::runtime_error("Toni slots are not native ped models");
-        const bool original=name==key(i==0?"special08":"special09");
+        const bool original=name==key(i==0?"special08":"special09") || name==key("");
         bool converted=false;
         for(const auto& row:assets_)converted=converted || name==key(row.second);
-        // Native restart can retain a loaded outfit and its references. Reading
-        // or reusing that exact asset is safe; renaming a referenced slot is not.
-        if((!original && !converted) || (original && refs))throw std::runtime_error("Toni skin slot is used by another mod/actor");
+        // CStreaming::ReInit resets special-model keys 290..299 to the
+        // empty-name key, not special08/09. A referenced reset slot remains
+        // unavailable for renaming; an empty unreferenced slot is reusable.
+        if(!original && !converted)throw std::runtime_error("Toni skin slot is used by another mod/actor");
     }
 }
 bool SaPlayerSkins::begin(int32_t actor,const std::string& input) {
     const auto label=lower(input);const auto row=assets_.find(label);
     if(row==assets_.end() || actor<0 || actor!=player_actor() || (pending_>=0 && actor!=actor_))return false;
     if(pending_>=0)return actor==actor_ && label==requested_;
-    actor_=actor;requested_=label;
-    if(worn_==label && actor_model(actor)==current_) {pending_=current_;return true;}
+    if(worn_==label && actor_model(actor)==current_) {actor_=actor;requested_=label;pending_=current_;return true;}
     // A new Campaign has no committed slot yet, but streaming can still own
     // the previous session's exact outfit. Acquire it without RequestSpecialModel
     // (which would rename/reload a live model, including other actors' model).
     if(current_<0)for(const auto slot:slots) {
         uint32_t name=0;uint16_t refs=0;
         if(slot_info(slot,name,refs) && name==key(row->second) && execute_sa({0x0247,{slot}}).executed) {
-            pending_=slot;return true;
+            actor_=actor;requested_=label;pending_=slot;return true;
         }
     }
     // Native load rebuilds CJ but can keep the committed special model. Reuse
@@ -131,14 +131,23 @@ bool SaPlayerSkins::begin(int32_t actor,const std::string& input) {
     uint32_t committed_name=0;uint16_t committed_refs=0;
     if(worn_==label && current_>=0 && slot_info(current_,committed_name,committed_refs) &&
        committed_name==key(row->second) && execute_sa({0x0247,{current_}}).executed) {
-        pending_=current_;return true;
+        actor_=actor;requested_=label;pending_=current_;return true;
     }
-    const auto target=current_==slots[0]?slots[1]:slots[0];uint32_t name=0;uint16_t refs=0;
-    if(!slot_info(target,name,refs) || refs)return false;
-    bool owned=name==key(target==slots[0]?"special08":"special09");
-    for(const auto& item:assets_)owned=owned || name==key(item.second);
-    if(!owned || !request(target,row->second.c_str()))return false;
-    pending_=target;return true;
+    // Prefer alternating away from the currently worn slot, then fall back to
+    // the other native Toni slot. A reference means the slot is still in use;
+    // never request a rename for it, even when its name is a known outfit.
+    const int preferred=current_==slots[0]?slots[1]:current_==slots[1]?slots[0]:slots[0];
+    const int candidates[]={preferred,preferred==slots[0]?slots[1]:slots[0]};
+    for(const auto target:candidates) {
+        uint32_t name=0;uint16_t refs=0;
+        if(!slot_info(target,name,refs) || refs)continue;
+        bool owned=name==key(target==slots[0]?"special08":"special09") || name==key("");
+        for(const auto& item:assets_)owned=owned || name==key(item.second);
+        if(!owned)continue;
+        if(!request(target,row->second.c_str()))return false;
+        actor_=actor;requested_=label;pending_=target;return true;
+    }
+    return false;
 }
 bool SaPlayerSkins::finish(int32_t actor) {
     if(actor!=actor_ || actor!=player_actor() || pending_<0)return false;

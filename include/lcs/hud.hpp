@@ -19,9 +19,12 @@ struct HudRequest {
     bool custom=false;
 };
 class HudBridge {
+    friend struct CampaignServicesSave;
     struct Entry {uint32_t original=0;bool active=false;};
     std::array<Entry,4> entries_{}; // one original clock and three counters
     bool frozen_=false;
+    std::array<std::optional<HudRequest>,4> saved_requests_{};
+    std::array<std::optional<bool>,3> saved_prefixes_{};
     std::array<uint8_t,4> pending_foreground_{{255,255,255,255}},pending_background_{{255,255,255,255}};
 public:
     static bool handles(uint16_t);

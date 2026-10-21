@@ -202,6 +202,7 @@ class NativeAdapter {
     struct OriginalZone {std::string name;int32_t type=0,level=0;std::array<float,6> bounds{};};
     std::vector<OriginalZone> zones_;
     std::optional<Binding> binding(int32_t id)const;
+    std::vector<uint8_t> save_state_projected(uint32_t now_ms) const;
 public:
     // SA facts for the 1593 reaction; the exact ped identity is re-proved by the provider on every read.
     struct AttackPolicyActor {bool alive=false,on_foot=false,cop=false,released=false;};
@@ -393,6 +394,11 @@ public:
     // source NONE/route declaration or grant fresh initialization authority.
     std::function<void(int32_t)> source_actor_goal_unknown;
     void clear_walking_for_source_route(int32_t actor){walking_objectives_.erase(actor);accepted_walk_tasks_.erase(actor);kill_objectives_.erase(actor);}
+    // Private campaign/service state for a paired normal SA save. The image,
+    // callbacks and live native pointers are never serialized. now_ms is the
+    // current SA timer used to preserve relative service deadlines.
+    std::vector<uint8_t> save_state(uint32_t now_ms) const;
+    bool restore_state(const std::vector<uint8_t>& bytes,uint32_t now_ms,std::string& diagnostic);
     // Synchronous notifications from an observed native record mutation, on
     // the game thread. Later snapshots cannot substitute for these callbacks.
     void walking_task_associated(size_t slot,const ScriptTaskRecord& before,
