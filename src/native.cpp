@@ -11,6 +11,10 @@
 #include <set>
 
 namespace lcs {
+// Retail CRadar::Draw3dMarkers (PS2 jump table 0x3A7020) skips BLIP_COORD:
+// only car/char/object arrows and contact-point cylinders are drawn. Display
+// values match SA (0 neither, 1 marker, 2 blip, 3 both); keep the radar bit.
+static int32_t coord_blip_display(int32_t display) {return display&2;}
 void NativeAdapter::observe_source_actor_acquired(int32_t handle) {
     if(handle<0 || !source_actor_acquired)return;
     const auto actor=live_ped_identity?live_ped_identity(handle):std::nullopt;
@@ -2900,6 +2904,11 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
     const auto changed_music_area=opcode==COMMAND_SET_AREA_VISIBLE?std::optional<int32_t>(call.inputs[0]):std::nullopt;
     if(flat_native_world && opcode==COMMAND_SET_AREA_VISIBLE)call.inputs[0]=0;
     if(opcode==COMMAND_ADD_HOSPITAL_RESTART || opcode==COMMAND_ADD_POLICE_RESTART)call.inputs.push_back(0);
+    // Retail CRadar::Draw3dMarkers draws no 3D marker for BLIP_COORD (see
+    // coord_blip_display); keep only the radar bit of a coordinate blip.
+    if(opcode==COMMAND_CHANGE_BLIP_DISPLAY && call.inputs.size()==2 && coord_blips_.count(call.inputs[0]))
+        call.inputs[1]=coord_blip_display(call.inputs[1]);
+    if(opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD && call.inputs.size()==5)call.inputs[4]=coord_blip_display(call.inputs[4]);
     if(opcode==COMMAND_SET_EXTRA_COLOURS && flat_native_world) {
         if(call.inputs[0]<1 || call.inputs[0]>32){thread.diagnostic="Unknown original extra color bank";return StepResult::unsupported;}
         call.inputs[0]=1; // Current native lighting profile, as in the working opening scene.
@@ -3263,7 +3272,17 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
     if(opcode==COMMAND_REMOVE_SPHERE)owned_spheres_.erase(call.inputs[0]);
     const std::string operation=opcode_name(opcode);
     if(call.outputs==1 && result.values[0]>=0 && operation.rfind("COMMAND_ADD_",0)==0 && operation.find("BLIP")!=std::string::npos)owned_blips_.insert(result.values[0]);
-    if(opcode==COMMAND_REMOVE_BLIP)owned_blips_.erase(call.inputs[0]);
+    if(opcode==COMMAND_REMOVE_BLIP){owned_blips_.erase(call.inputs[0]);coord_blips_.erase(call.inputs[0]);}
+    if((opcode==COMMAND_ADD_BLIP_FOR_COORD || opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD) && call.outputs==1 && result.values[0]>=0) {
+        coord_blips_.insert(result.values[0]);
+        // Source ADD_BLIP_FOR_COORD uses BLIP_DISPLAY_BOTH; native 018A draws
+        // SA's own marker for it. The blip already exists, so a refused
+        // radar-only update is reported but does not replay the creation.
+        if(opcode==COMMAND_ADD_BLIP_FOR_COORD) {
+            const auto radar=execute({0x018B,{result.values[0],coord_blip_display(3)}});
+            if(!radar.executed)try{if(diagnostic_event)diagnostic_event("Coordinate blip kept SA marker; radar-only display refused: "+radar.diagnostic);}catch(...){}
+        }
+    }
     if(opcode==COMMAND_SET_CHAR_OBJ_GOTO_COORD_ON_FOOT)walking_objectives_[call.inputs[0]]=call;
     else if(source_projected) {
         if(result.native_entered) {walking_objectives_.erase(call.inputs[0]);accepted_walk_tasks_.erase(call.inputs[0]);}

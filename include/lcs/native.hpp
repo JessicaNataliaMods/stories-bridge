@@ -96,6 +96,9 @@ class NativeAdapter {
     std::vector<int32_t> vehicle_colour_map_;
     const ScmImage& image_;
     std::unordered_set<int32_t> owned_blips_,owned_spheres_;
+    // BLIP_COORD handles: radar-only in SA (retail draws no 3D marker for them).
+    // Process-local; mission coordinate blips do not survive a save.
+    std::unordered_set<int32_t> coord_blips_;
     struct Binding {int32_t id;ModelKind kind;};
     std::unordered_map<int32_t,Binding> models_;
     std::unordered_map<std::string,Binding> named_models_;

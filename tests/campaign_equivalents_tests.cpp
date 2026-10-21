@@ -252,7 +252,7 @@ int main(int argc,char** argv){try {
         case 0x0226:r.values[0]=100;break;case 0x0227:r.values[0]=1000;break;
         case 0x0327:r.values[0]=-1;break;
         case 0x0470:case 0x00E2:case 0x01FA:r.values[0]=0;break;
-        case 0x051E:r.values[0]=13;break;
+        case 0x051E:r.values[0]=12;break; // retail 051E stores eRadioID-1: RADIO_OFF(13) -> 12
         case 0x00BC:if(call.text=="VIC1_10")playable_at=now;if(call.text=="VIC1_7")first_clothes=first_walk=true;if(call.text=="VIC1_8"){first_clothes=false;first_walk=first_exit_mode=true;}break;
         case 0x01B4:player_control=call.inputs[1]!=0;break;
         case 0x07AF:r.values[0]=50;break;

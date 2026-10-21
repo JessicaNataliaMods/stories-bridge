@@ -22,7 +22,7 @@ int main(){try{
     const auto x=entity_bits(20.f),y=entity_bits(-10.f),z=entity_bits(-100.f);
     struct Case{uint16_t source,native;std::vector<int32_t> inputs,expected;size_t outputs;};
     for(const auto& s:std::vector<Case>{
-        {COMMAND_ADD_BLIP_FOR_COORD_OLD,0x0167,{x,y,z,2,3},{x,y,z,2,3},1},
+        {COMMAND_ADD_BLIP_FOR_COORD_OLD,0x0167,{x,y,z,2,3},{x,y,z,2,2},1}, // retail draws no BLIP_COORD marker
         {COMMAND_START_SCRIPT_FIRE,0x02CF,{x,y,z},{x,y,z,0,1},1},
         {COMMAND_CREATE_PROTECTION_PICKUP,0x04A6,{x,y,z,10000,60},{x,y,z,10000,60},1},
         {COMMAND_GET_CLOSEST_STRAIGHT_ROAD,0x04B9,{x,y,z,entity_bits(1),entity_bits(50)},{x,y,z,entity_bits(1),entity_bits(50)},7},
@@ -73,6 +73,19 @@ int main(){try{
     accept=true;entered=false;adapter.bind_model(124,800,"out_of_bank",ModelKind::vehicle);
     auto bad_counter=program(COMMAND_GET_NUM_OF_MODELS_KILLED_BY_PLAYER,{124},1);Thread invalid_counter;const auto before_counter=calls;
     check(step(bad_counter,invalid_counter)==StepResult::unsupported && calls==before_counter && invalid_counter.ip==64,"Valid streaming model outside actual 800-row kill bank cannot index native memory");
+    // Coordinate blips stay radar-only natively; other blips keep their display.
+    std::vector<NativeCall> blip_calls;
+    adapter.execute=guard_native_executor([&](const NativeCall& call){++calls;packet=call;blip_calls.push_back(call);NativeResult r;r.executed=true;r.condition=true;
+        for(size_t i=0;i<7;++i)r.values[i]=int32_t(i+101);if(call.opcode==0x051E)r.values[0]=radio;return r;});
+    {auto vm=program(COMMAND_ADD_BLIP_FOR_COORD,{x,y,z},1);Thread t;
+     check(step(vm,t)==StepResult::continued && t.locals[0]==101 && blip_calls.size()==2 && blip_calls[0].opcode==0x018A &&
+           blip_calls[1].opcode==0x018B && blip_calls[1].inputs==std::vector<int32_t>{101,2},"Coordinate blip is created then limited to the radar");}
+    blip_calls.clear();
+    {auto vm=program(COMMAND_CHANGE_BLIP_DISPLAY,{101,3});Thread t;
+     check(step(vm,t)==StepResult::continued && blip_calls.size()==1 && blip_calls[0].inputs==std::vector<int32_t>{101,2},"Coordinate blip display keeps only the radar bit");}
+    blip_calls.clear();
+    {auto vm=program(COMMAND_CHANGE_BLIP_DISPLAY,{777,3});Thread t;
+     check(step(vm,t)==StepResult::continued && blip_calls.size()==1 && blip_calls[0].inputs==std::vector<int32_t>{777,3},"Entity blips keep the source marker display");}
     // Retail 051E stores eRadioID-1: -1 emergency scanner .. 12 off.
     for(const auto& row:std::vector<std::pair<int32_t,int32_t>>{{-1,-1},{0,8},{2,0},{10,9},{11,10},{12,10}}) {
         radio=row.first;auto vm=program(COMMAND_GET_RADIO_CHANNEL,{},1);Thread t;
