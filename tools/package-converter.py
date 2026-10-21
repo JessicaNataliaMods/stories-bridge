@@ -51,12 +51,12 @@ copy(root/'tools/ped_rig_audit.py',source/'tools/ped_rig_audit.py')
 copy(root/'tools/native_collisions.py',source/'tools/native_collisions.py')
 for name in ('prepare-gameplay-peds.py','gameplay_ped_profile.py'):
     copy(root/'tools'/name,source/'tools'/name)
-for name in ('vehicle-fleet-conversion.md','weapon-model-conversion.md','gameplay-assets-integration.md','gameplay-peds-bindings-v18.md','ped-rig-population-v18.md'):
+for name in ('vehicle-fleet-conversion.md','vehicle-class-conversion.md','weapon-model-conversion.md','gameplay-assets-integration.md','gameplay-peds-bindings-v18.md','ped-rig-population-v18.md'):
     copy(root/'docs'/name,out/'docs'/name)
     copy(root/'docs'/name,source/'docs'/name)
 copy(root/'docs/native-object-collisions.md',out/'docs/native-object-collisions.md')
 copy(root/'docs/native-object-collisions.md',source/'docs/native-object-collisions.md')
-for name in ('converter_launcher.cpp','ps2_asset_writer.cpp','convert_rw.cpp','convert_vehicle.cpp','convert_vehicle.hpp','convert_ped.cpp','convert_ped.hpp','sa_map_lighting.hpp'):
+for name in ('converter_launcher.cpp','ps2_asset_writer.cpp','convert_rw.cpp','convert_vehicle.cpp','convert_vehicle.hpp','convert_vehicle_classes.cpp','convert_vehicle_classes.hpp','convert_ped.cpp','convert_ped.hpp','sa_map_lighting.hpp'):
     copy(root/'src'/name,source/'src'/name)
 source_extensions={'.c','.cpp','.h','.hpp','.inc','.in','.cmake','.txt','.md','.lua','.rc','.def','.idl','.err'}
 for vendor in ('librw/librw-master','librwgta/librwgta-master'):

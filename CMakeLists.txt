@@ -168,7 +168,7 @@ if(EXISTS "${LIBRW_SOURCE}/CMakeLists.txt" AND EXISTS "${LIBRWGTA_SOURCE}/src/gt
   add_library(offline_rwgta STATIC ${gta_plugin_sources})
   target_include_directories(offline_rwgta PUBLIC "${LIBRWGTA_SOURCE}/src")
   target_link_libraries(offline_rwgta PUBLIC librw::librw)
-  add_executable(lcs-convert-rw src/convert_rw.cpp src/convert_vehicle.cpp src/convert_ped.cpp)
+  add_executable(lcs-convert-rw src/convert_rw.cpp src/convert_vehicle.cpp src/convert_vehicle_classes.cpp src/convert_ped.cpp)
   target_link_libraries(lcs-convert-rw PRIVATE offline_rwgta)
   add_executable(lcs-ps2-write src/ps2_asset_writer.cpp)
   target_link_libraries(lcs-ps2-write PRIVATE offline_rwgta bcrypt)

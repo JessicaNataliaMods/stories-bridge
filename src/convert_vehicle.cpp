@@ -334,6 +334,35 @@ rw::Frame* unique(rw::Clump* c,const char* name,bool required=true) {
     if(!found && required)throw std::runtime_error(std::string("Missing vehicle frame: ")+name);
     return found;
 }
+void normalize_rcbandit_body_frame_names(rw::Clump* vehicle) {
+    if(!vehicle || !vehicle->getFrame())throw std::runtime_error("Missing SA vehicle clump");
+    auto root=vehicle->getFrame();
+    if(std::strcmp(gta::getNodeName(root),"rcbandit"))return;
+
+    // The original LCS RC Bandit uses these exact capitalized body-frame
+    // names. Validate its known frame/atomic layout before spelling them as
+    // the canonical SA names expected by the shared automobile adapter.
+    auto high=unique(vehicle,"Chassis_hi",false);
+    auto low=unique(vehicle,"Chassis_vlo",false);
+    if(!high || !low || high==root || low==root || high==low ||
+       unique(vehicle,"chassis_hi",false) || unique(vehicle,"chassis_vlo",false))
+        throw std::runtime_error("RC Bandit does not match its original chassis frame contract");
+    unique(vehicle,"chassis_dummy");
+    for(const char* name:{"wheel_rf_dummy","wheel_lf_dummy","wheel_rb_dummy","wheel_lb_dummy"})
+        unique(vehicle,name);
+
+    size_t high_atomics=0,low_atomics=0;
+    FORLIST(link,vehicle->atomics) {
+        auto atomic=rw::Atomic::fromClump(link);
+        if(atomic->getFrame()==high)++high_atomics;
+        if(atomic->getFrame()==low)++low_atomics;
+    }
+    if(high_atomics!=1 || low_atomics!=1 || high->objectList.count()!=1 || low->objectList.count()!=1)
+        throw std::runtime_error("RC Bandit chassis frames must each own exactly one atomic");
+
+    std::strcpy(gta::getNodeName(high),"chassis_hi");
+    std::strcpy(gta::getNodeName(low),"chassis_vlo");
+}
 bool inside(rw::Frame* frame,rw::Frame* parent) {
     for(auto f=frame;f;f=f->getParent())if(f==parent)return true;return false;
 }
@@ -386,6 +415,13 @@ float clamped_env_shininess(float coefficient) {
     if(coefficient>1.0f)return 1.0f;
     return coefficient;
 }
+float lcs_env_shininess(float coefficient) {
+    // The LCS vehicle MatFX shader writes envMapCoefficient * 0.5 to its
+    // shininess input. Retain the existing normalized SA coefficient domain
+    // before scaling: over-range source values must not bypass the reduction
+    // by saturating the target's byte (some source materials exceed 1.0).
+    return clamped_env_shininess(coefficient)*0.5f;
+}
 void set_envmat_shininess(gta::EnvMat* env,float coefficient) {
     // librwgta exposes the decoded value as getShininess() but has no setter;
     // EnvMat stores the normalized value in one byte and streams five floats.
@@ -407,7 +443,7 @@ CarRenderStats car_render_contract(rw::Clump* car,bool enable_missing_pipelines)
             if(rw::MatFX::getEffects(material)!=rw::MatFX::ENVMAP)continue;
             auto matfx=rw::MatFX::get(material);
             if(!matfx)throw std::runtime_error("SA car ENVMAP material has no MatFX payload");
-            const float coefficient=clamped_env_shininess(matfx->getEnvCoefficient());
+            const float coefficient=lcs_env_shininess(matfx->getEnvCoefficient());
             ++stats.envmap_materials;
             auto envmat=gta::getEnvMat(material);
             if(enable_missing_pipelines) {
@@ -465,6 +501,25 @@ CarRenderStats car_render_contract(rw::Clump* car,bool enable_missing_pipelines)
         throw std::runtime_error("SA car ENVMAP still references missing LCS texture xv_vehicleenv128");
     return stats;
 }
+CarRenderStats apply_sa_vehicle_common(rw::Clump* vehicle,const std::vector<uint8_t>& collision_bytes) {
+    if(!vehicle || !vehicle->getFrame())throw std::runtime_error("Missing SA vehicle clump");
+    if(!collision_bytes.empty()) {
+        if(collision_bytes.size()>std::numeric_limits<rw::uint32>::max())
+            throw std::runtime_error("Embedded vehicle collision data exceeds SA plugin capacity");
+        auto collision=collision_plugin(vehicle);
+        if(collision->data || collision->size)
+            throw std::runtime_error("Original vehicle clump already contains collision plugin data");
+    }
+    const auto render=car_render_contract(vehicle,true);
+    if(!collision_bytes.empty()) {
+        auto collision=collision_plugin(vehicle);
+        collision->data=new rw::uint8[collision_bytes.size()];
+        collision->size=static_cast<rw::uint32>(collision_bytes.size());
+        std::memcpy(collision->data,collision_bytes.data(),collision_bytes.size());
+        validate_car_col3(collision->data,collision->size);
+    }
+    return render;
+}
 void check_sa_boat(rw::Clump* boat) {
     auto root=boat->getFrame();
     if(!root || std::strcmp(gta::getNodeName(root),"tropic"))
@@ -509,9 +564,47 @@ void check_sa_boat(rw::Clump* boat) {
         throw std::runtime_error("LCS ferry component names remain in SA boat hierarchy");
 }
 }
+void adapt_sa_vehicle_common(rw::Clump* vehicle,const std::filesystem::path& collision_path) {
+    if(!vehicle || !vehicle->getFrame())throw std::runtime_error("Missing SA vehicle clump");
+    std::vector<uint8_t> collision_bytes;
+    if(!collision_path.empty())collision_bytes=read_car_collision(collision_path);
+    const auto render=apply_sa_vehicle_common(vehicle,collision_bytes);
+    std::cout<<"sa_vehicle_common=true envmap_materials="<<render.envmap_materials
+             <<" envmap_materials_with_texture="<<render.envmap_textures
+             <<" envmat_materials="<<render.envmat_materials
+             <<" envmat_materials_created="<<render.envmat_materials_created
+             <<" envmap_remap_xv_vehicleenv128_to_xvehicleenv128="<<render.envmap_xv_vehicleenv128_remapped
+             <<" envmap_textures_xvehicleenv128="<<render.envmap_xvehicleenv128_textures
+             <<" envmap_atomics="<<render.envmap_atomics
+             <<" envmap_atomic_pipelines_activated="<<render.envmap_pipelines_activated
+             <<" envmap_pipelines_enabled="<<render.envmap_pipelines_enabled
+             <<" envmap_atomics_without_normals="<<render.envmap_atomics_without_normals
+             <<" nonopaque_materials_preserved="<<render.nonopaque_materials
+             <<" embedded_col_plugin="<<(collision_bytes.empty()?"false":"true")<<' ';
+}
+void validate_sa_vehicle_common(rw::Clump* vehicle) {
+    if(!vehicle || !vehicle->getFrame())throw std::runtime_error("Missing SA vehicle clump");
+    const auto render=car_render_contract(vehicle,false);
+    auto collision=collision_plugin(vehicle);
+    if(!collision->data || !collision->size)
+        throw std::runtime_error("SA vehicle clump has no embedded collision plugin data");
+    validate_car_col3(collision->data,collision->size);
+    std::cout<<"sa_vehicle_common_validated=true atomics="<<vehicle->countAtomics()
+             <<" envmap_materials="<<render.envmap_materials
+             <<" envmap_materials_with_texture="<<render.envmap_textures
+             <<" envmat_materials="<<render.envmat_materials
+             <<" envmap_textures_xvehicleenv128="<<render.envmap_xvehicleenv128_textures
+             <<" envmap_atomics="<<render.envmap_atomics
+             <<" envmap_atomic_pipelines_activated="<<render.envmap_pipelines_activated
+             <<" envmap_pipelines_enabled="<<render.envmap_pipelines_enabled
+             <<" envmap_atomics_without_normals="<<render.envmap_atomics_without_normals
+             <<" nonopaque_materials="<<render.nonopaque_materials
+             <<" embedded_col_plugin=true game_executed=false\n";
+}
 void adapt_sa_car(rw::Clump* car,const std::filesystem::path& wheel_path,float wheel_scale,
                   const std::filesystem::path& collision_path) {
     if(!std::isfinite(wheel_scale) || wheel_scale<=0 || wheel_scale>4)throw std::runtime_error("Invalid original wheel scale");
+    normalize_rcbandit_body_frame_names(car);
     if(unique(car,"chassis",false))throw std::runtime_error("Vehicle is already adapted or has ambiguous chassis");
     std::vector<uint8_t> collision_bytes;
     if(!collision_path.empty()) {
@@ -559,14 +652,7 @@ void adapt_sa_car(rw::Clump* car,const std::filesystem::path& wheel_path,float w
         target->removeChild();car->getFrame()->addChild(target);target->matrix=transform;
         std::strcpy(gta::getNodeName(target),name.c_str());++extras;
     }
-    const auto render=car_render_contract(car,true);
-    if(!collision_bytes.empty()) {
-        auto collision=collision_plugin(car);
-        collision->data=new rw::uint8[collision_bytes.size()];
-        collision->size=static_cast<rw::uint32>(collision_bytes.size());
-        std::memcpy(collision->data,collision_bytes.data(),collision_bytes.size());
-        validate_car_col3(collision->data,collision->size);
-    }
+    const auto render=apply_sa_vehicle_common(car,collision_bytes);
     check(car);
     std::cout<<"sa_car_chassis=true original_main_wheel=true native_cloned_wheels=true original_extras="<<extras
              <<" envmap_materials="<<render.envmap_materials

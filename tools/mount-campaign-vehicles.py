@@ -46,7 +46,7 @@ def read_ide(text):
         elif re.fullmatch(r"[a-z]+", line, flags=re.I):
             section = line.lower()
         elif section == "cars" and "," in line:
-            fields = [part.strip() for part in line.split(",")]
+            fields = re.split(r"[,\s]+", line.strip())
             if len(fields) < 11:
                 raise ValueError("Truncated vehicle IDE row")
             try:
@@ -117,7 +117,7 @@ def merge_ide(stage_text, fleet_text, native_text, mappings):
         native = native_rows[model_id]["fields"]
         if fields[1].lower() != item["NativeName"].lower():
             raise ValueError("Prepared native model name disagrees with its manifest")
-        if fields[3].lower() != "car" or fields[4].upper() != item["NativeHandling"].upper():
+        if fields[3].lower() != item.get("PhysicalClass", "car") or fields[4].upper() != item["NativeHandling"].upper():
             raise ValueError("Prepared IDE row has the wrong class or handling name")
         if fields[2].lower() != native[2].lower():
             raise ValueError("Prepared TXD dictionary disagrees with the native vehicle slot")
@@ -153,7 +153,8 @@ def merge_ide(stage_text, fleet_text, native_text, mappings):
         ]
         # SA's two fire engines intentionally share FIRETRUK. Keep that native
         # relationship explicit; generic fallback slots are chosen unshared.
-        if uses != [item["NativeId"]] and not (item["Name"] == "firetruk" and
+        selected_users = {other["NativeId"] for other in mappings if other["NativeHandling"] == item["NativeHandling"]}
+        if set(uses) != selected_users and not (item["Name"] == "firetruk" and
                 item["NativeId"] == 407 and item["NativeHandling"] == "FIRETRUK" and set(uses) == {407,544}):
             raise ValueError("Selected handling name is shared or ambiguous: " + item["NativeHandling"])
     merged = "".join(lines)
@@ -186,6 +187,33 @@ def merge_handling(stage_text, fleet_text, native_text, mappings):
         lines[stage_rows[name]["line"]] = _handling_replacement(lines[stage_rows[name]["line"]], fields)
         selected.append({"NativeHandling": name, "Fields": fields})
     merged = "".join(lines)
+    # Class physics are separate records in handling.cfg. Mount them together
+    # with the common row so a converted bike/boat cannot keep donor physics.
+    def special_rows(text):
+        result = {}
+        for index, line in enumerate(text.splitlines(keepends=True)):
+            fields = line.split()
+            if len(fields) > 2 and fields[0] in {"!", "%", "$"}:
+                key = tuple(fields[:2])
+                if key in result:
+                    raise ValueError("Duplicate specialized handling row: " + str(key))
+                result[key] = (index, fields)
+        return result
+    stage_special = special_rows(stage_text)
+    fleet_special = special_rows(fleet_text)
+    native_special = special_rows(native_text)
+    merged_lines = merged.splitlines(keepends=True)
+    for item in mappings:
+        for line in item.get("SpecialHandling", []):
+            fields = line.split()
+            key = tuple(fields[:2])
+            if key not in stage_special or key not in native_special or key not in fleet_special:
+                raise ValueError("Missing specialized handling consumer: " + str(key))
+            if stage_special[key][1] != native_special[key][1] or fleet_special[key][1] != fields:
+                raise ValueError("Specialized handling changed before mount: " + str(key))
+            index = stage_special[key][0]
+            merged_lines[index] = _handling_replacement(merged_lines[index], fields)
+    merged = "".join(merged_lines)
     final_rows = read_handling(merged)
     for item in mappings:
         if final_rows[item["NativeHandling"]]["fields"] != fleet_rows[item["NativeHandling"]]["fields"]:
@@ -216,8 +244,8 @@ def load_fleet(fleet):
     if not manifest.get("Prepared") or manifest.get("Installed") or manifest.get("GameExecuted") or manifest.get("CampaignPlayable"):
         raise ValueError("Fleet must be prepared and verified offline, not installed or game-tested")
     vehicles = [row for row in manifest.get("Vehicles", []) if row.get("Prepared")]
-    if manifest.get("PreparedCount") != 60 or len(vehicles) != 60:
-        raise ValueError("Fleet manifest must contain exactly 60 prepared vehicles")
+    if not vehicles or manifest.get("PreparedCount") != len(vehicles) or len(vehicles) > manifest.get("VehicleDefinitions", 0):
+        raise ValueError("Fleet manifest prepared count does not match its vehicle records")
     output_files = {}
     for record in manifest.get("OutputFiles", []):
         relative = _normalize_relative(record.get("RelativePath", ""))
@@ -233,8 +261,10 @@ def load_fleet(fleet):
             raise ValueError("Prepared fleet vehicle lacks a native binding")
         mappings.append({"LcsId": int(row["LcsId"]), "Name": str(row["Name"]).lower(),
                          "NativeId": int(row["NativeId"]), "NativeName": str(row["NativeName"]),
-                         "NativeHandling": str(row["NativeHandling"]).upper()})
-    for key in ("LcsId", "NativeId", "NativeName", "NativeHandling"):
+                         "NativeHandling": str(row["NativeHandling"]).upper(),
+                         "PhysicalClass": row.get("PhysicalClass", "car"),
+                         "SpecialHandling": row.get("SpecialHandling", [])})
+    for key in ("LcsId", "NativeId", "NativeName"):
         values = [str(item[key]).casefold() for item in mappings]
         if len(set(values)) != len(values):
             raise ValueError("Prepared fleet has duplicate " + key + " bindings")
@@ -266,8 +296,8 @@ def load_fleet(fleet):
             final_assets.append({"source": source, "relative": destination,
                                  "sha256": expected, "bytes": source.stat().st_size})
     destinations = [asset["relative"].casefold() for asset in final_assets]
-    if len(destinations) != 120 or len(set(destinations)) != 120:
-        raise ValueError("Fleet must produce 60 distinct DFF/TXD destination pairs")
+    if len(destinations) != 2 * len(mappings) or len(set(destinations)) != len(destinations):
+        raise ValueError("Fleet must produce one distinct DFF/TXD destination pair per vehicle")
     if manifest.get("SharedTextures"):
         shared = manifest["SharedTextures"]
         relative = shared["PreparedPath"]

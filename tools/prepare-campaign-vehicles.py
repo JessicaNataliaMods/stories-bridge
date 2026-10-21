@@ -12,15 +12,21 @@ import re
 import struct
 import subprocess
 from ps2_world import Game
-from vehicle_config_fields import convert_handling as adapt_handling, convert_ide as adapt_ide
+from vehicle_config_fields import convert_handling as adapt_handling, convert_ide as adapt_ide, convert_special_handling
 from vehicle_config import convert_carcols, parse_carcols
 
 ROOT = Path(__file__).resolve().parents[1]
 TYPE_FLAGS = {0x10000: "bike", 0x20000: "heli", 0x40000: "plane", 0x80000: "boat"}
+CLASS_BLOCKERS = {
+    "heli": "Requires a verified mapping of original rotors to SA static/moving rotor nodes; rendering callbacks alone do not prove the runtime component contract",
+    "plane": "Requires a class-specific landing-gear/component and flight-consumer adapter; original wheel/LOD fields cannot be treated as SA automobile fields",
+    "train": "Requires a native train component, carriage and track-consumer adapter; an SA slot name alone does not establish compatibility",
+}
 # Dedicated engine behavior depends on these SA IDs. Name matches are reserved
 # first; ordinary unmatched cars use ordinary car slots, never special classes.
 ALIASES = {"hotrod": "hotknife", "kuruma": "primo", "police": "copcarla", "fbicar": "fbiranch"}
 RESERVED = set("firetruk trash ambulan rhino towtruck combine forklift vortex kart tractor caddy rcbandit rctiger securica bus coach mrwhoop barracks packer tanker cement sweeper dumper dozer utility flatbed firela hotknife copcarla copcarsf copcarvg copcarru swatvan fbiranch fbitruck enforcer".split())
+RESERVED.add("tropic")  # The separately converted mission ferry owns this slot.
 
 
 def sha(path):
@@ -40,7 +46,9 @@ def read_ide(path):
         elif re.fullmatch("[a-z]+", line):
             section = line
         elif section == "cars":
-            fields = [x.strip() for x in line.split(",")]
+            # SA's loader accepts whitespace as well as commas (including the
+            # retail DODO and WAYFARER rows with no comma between model/TXD).
+            fields = re.split(r"[,\s]+", line.strip())
             if len(fields) < 11:
                 raise ValueError("Truncated vehicle IDE row")
             rows.append(fields)
@@ -135,10 +143,13 @@ def validate(output, converter):
     for record in manifest["Vehicles"]:
         if record["Prepared"]:
             name = record["NativeName"]
-            run(converter, output / "models" / (name + ".dff"), "--validate-sa-car")
+            kind = record.get("PhysicalClass", "car")
+            validator = {"car": "--validate-sa-car", "bike": "--validate-sa-bike",
+                         "boat": "--validate-sa-generic-boat"}[kind]
+            run(converter, output / "models" / (name + ".dff"), validator)
     run(converter, output / "models", "--validate-actors")
     run(converter, output / "vehicles.col", "--validate-col")
-    print(f"PASS: {manifest['PreparedCount']} original cars; {len(manifest['OutputFiles'])} output hashes; gameExecuted=false")
+    print(f"PASS: {manifest['PreparedCount']} original vehicles; {len(manifest['OutputFiles'])} output hashes; gameExecuted=false")
 
 
 def prepare(args):
@@ -176,13 +187,15 @@ def prepare(args):
         vehicles.append(record)
         if not fields:
             record["Reason"] = "No handling row in the original retail library"
-        elif kind != "car":
-            record["Reason"] = "Requires its original " + kind + " component/physics adapter"
+        elif name == "ferry":
+            record["Reason"] = "Already handled by the dedicated mission ferry package (TROPIC); preserve its doors and ramps"
+        elif kind not in {"car", "bike", "boat"}:
+            record["Reason"] = CLASS_BLOCKERS.get(kind, "Requires its original " + kind + " component/physics adapter")
         else:
             _, unknown = convert_handling(fields, row[4], row)
             if unknown:
                 record["Reason"] = f"LCS handling flags still need an adapter: 0x{unknown:X}"
-            elif int(row[11]) not in wheel_names:
+            elif kind == "car" and int(row[11]) not in wheel_names:
                 record["Reason"] = "Original wheel model is not in the seven-wheel library"
             elif name not in collisions:
                 record["Reason"] = "Original named vehicle collision missing"
@@ -190,7 +203,7 @@ def prepare(args):
                 record["Reason"] = "Original full vehicle geometry missing"
             else:
                 desired = native_names.get(ALIASES.get(name, name))
-                if desired and desired[3] == "car":
+                if desired and desired[3] == kind:
                     if int(desired[0]) in used:
                         raise ValueError("Two original vehicles claim the same native slot")
                     slots[name] = desired
@@ -201,10 +214,10 @@ def prepare(args):
         # Leave special engine IDs to their corresponding actual vehicles.
         # Generic fallback slots must not alter another native model's physics
         # through a shared handling name (e.g. damaged Glendale / Rancher lure).
-        available = [r for r in native if r[3] == "car" and r[1].lower() not in RESERVED and int(r[0]) not in used
+        available = [r for r in native if r[3] == record["PhysicalClass"] and r[1].lower() not in RESERVED and int(r[0]) not in used
                      and sum(other[4] == r[4] for other in native) == 1]
         if not available:
-            raise ValueError("SA's bounded native car slots are exhausted")
+            raise ValueError("SA's bounded native slots are exhausted for " + record["PhysicalClass"])
         slots[record["Name"]] = available[0]
         used.add(int(available[0][0]))
     (out / "models").mkdir(parents=True)
@@ -243,6 +256,8 @@ def prepare(args):
         run(args.converter, source / "models/generic/wheels.DFF", out / "wheels" / (wheel + ".dff"), "--atomic-name", wheel + "_l0")
     native_updates = {}
     handling_updates = {}
+    special_updates = {}
+    source_handling_text = (source / "DATA/HANDLING.CFG").read_text(encoding="ascii")
     col_chunks = []
     bindings = []
     for record in vehicles:
@@ -256,19 +271,31 @@ def prepare(args):
         original_dff = car_dir / (name + ".dff")
         original_txd = car_dir / (row[2].lower() + ".txd")
         sources.update([original_dff, original_txd])
-        record.update(NativeId=int(slot[0]), NativeName=alias, NativeHandling=slot[4], OriginalWheel=wheel_names[int(row[11])], WheelScale=float(row[12]))
+        kind = record["PhysicalClass"]
+        record.update(NativeId=int(slot[0]), NativeName=alias, NativeHandling=slot[4],
+                      OriginalWheel=wheel_names[int(row[11])] if kind == "car" else "embedded-original", WheelScale=float(row[12]))
         record["SharedNativeHandlingModels"] = [dict(NativeId=int(other[0]),NativeName=other[1])
             for other in native if other[4] == slot[4] and other[0] != slot[0]]
         try:
+            definition = adapt_ide(row, model_id=int(slot[0]), model_name=alias,
+                texture_dictionary=slot[2], handling_name=slot[4], wheel_model_asset=record["OriginalWheel"], physical_class=kind)
+            physics = adapt_handling(lcs_handling[row[4]], slot[4], row, physical_class=kind)
             # Vehicle clumps must carry their own native COLModel. An external
             # COL registration alone is insufficient for a standalone DFF override.
             legacy_col = out / "checks" / (name + "-source.col")
             mapped_col = out / "checks" / (name + "-native.col")
             legacy_col.write_bytes(alias_collision(collisions[name], alias))
             log = run(args.converter, legacy_col, "--map-col", mapped_col)
-            log += "\n" + run(args.converter, original_dff, out / "models" / (alias + ".dff"), "--sa-car", out / "wheels" / (record["OriginalWheel"] + ".dff"), row[12], mapped_col)
+            if kind == "car":
+                conversion = ["--sa-car", out / "wheels" / (record["OriginalWheel"] + ".dff"), row[12], mapped_col]
+                validator = "--validate-sa-car"
+            else:
+                conversion = ["--sa-bike" if kind == "bike" else "--sa-generic-boat", mapped_col]
+                validator = "--validate-sa-bike" if kind == "bike" else "--validate-sa-generic-boat"
+            special = convert_special_handling(source_handling_text, row[4], slot[4], kind)
+            log += "\n" + run(args.converter, original_dff, out / "models" / (alias + ".dff"), *conversion)
             log += "\n" + run(args.converter, original_txd, out / "models" / (slot[2] + ".txd"))
-            log += "\n" + run(args.converter, out / "models" / (alias + ".dff"), "--validate-sa-car")
+            log += "\n" + run(args.converter, out / "models" / (alias + ".dff"), validator)
             (out / "checks" / (name + ".txt")).write_text(log + "\n", encoding="utf-8")
             (out / "checks" / (name + "-hierarchy.txt")).write_text(run(args.converter, out / "models" / (alias + ".dff"), "--info") + "\n", encoding="utf-8")
         except ValueError as e:
@@ -276,17 +303,20 @@ def prepare(args):
             record["NativeId"] = None
             record["NativeName"] = None
             continue
-        definition = adapt_ide(row, model_id=int(slot[0]), model_name=alias,
-            texture_dictionary=slot[2], handling_name=slot[4], wheel_model_asset=record["OriginalWheel"])
         native_updates[int(slot[0])] = definition["fields"]
-        physics = adapt_handling(lcs_handling[row[4]], slot[4], row)
         handling, unknown = physics["fields"], physics["unmapped_flags"]
         record["Configuration"] = {"Definition": definition, "Handling": physics}
         if unknown:
             raise ValueError("Unknown handling bits reached a native car binding")
-        if slot[4] in handling_updates:
-            raise ValueError("Prepared cars share a native handling slot")
+        if slot[4] in handling_updates and handling_updates[slot[4]] != handling:
+            raise ValueError("Prepared vehicles disagree on a shared native handling slot")
         handling_updates[slot[4]] = handling
+        for special_line in special:
+            key = tuple(special_line.split()[:2])
+            if key in special_updates and special_updates[key] != special_line:
+                raise ValueError("Prepared vehicles disagree on shared specialized handling")
+            special_updates[key] = special_line
+        record["SpecialHandling"] = special
         col_chunks.append(alias_collision(collisions[name], alias))
         bindings.append("\t".join([row[0], slot[0], name, alias, "vehicle"]))
         record["EmbeddedCollision"] = True
@@ -305,6 +335,16 @@ def prepare(args):
         fields = handling_updates.get(m.group(1))
         return "\t".join(fields) if fields else m.group(0)
     native_handling = re.sub(r"^([A-Z0-9_]+)[ \t]+[^\r\n]+", replace_handling, native_handling, flags=re.M)
+    special_seen = set()
+    def replace_special(m):
+        key = tuple(m.group(0).split()[:2])
+        if key in special_updates:
+            special_seen.add(key)
+            return special_updates[key]
+        return m.group(0)
+    native_handling = re.sub(r"^[!%$][ \t]*[^\r\n]+", replace_special, native_handling, flags=re.M)
+    if special_seen != set(special_updates):
+        raise ValueError("Selected native handling has no specialized consumer row")
     (out / "handling.cfg").write_text(native_handling, encoding="ascii")
     (out / "vehicle-bindings.tsv").write_text("\n".join(bindings) + "\n", encoding="ascii")
     if len(read_ide(out / "vehicles.ide")) != len(native):
@@ -343,11 +383,14 @@ def prepare(args):
                     "OriginalChromeRasterSha256": hashlib.sha256(pixels).hexdigest(),
                     "EnvironmentAdapter": {"xv_vehicleenv128": "xvehicleenv128",
                         "reason": "Use the native SA vehicle environment map; the original named LCS raster is absent"},
+                    "EnvironmentShininess": {"Source": "Original MatFX ENVMAP coefficient", "ClampInput": [0, 1], "Scale": 0.5,
+                        "Reason": "Preserve the LCS vehicle shader coefficient scaling in SA's normalized EnvMat field",
+                        "SpecularInferred": False},
                     "Resolution": "SA CVehicleModelInfo::FindTextureCB common vehicle dictionary"},
                 "SourceFiles": [{"Path": str(p), "Sha256": sha(p)} for p in sorted(sources)],
                 "OutputFiles": [{"RelativePath": str(p.relative_to(out)), "Sha256": sha(p)} for p in files]}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"Prepared {manifest['PreparedCount']}/{len(original)} original cars in {out}; gameExecuted=false installed=false")
+    print(f"Prepared {manifest['PreparedCount']}/{len(original)} original vehicles in {out}; gameExecuted=false installed=false")
     for record in vehicles:
         if not record["Prepared"]:
             print(f"BLOCKED {record['LcsId']} {record['Name']}: {record['Reason']}")
