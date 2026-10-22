@@ -1,12 +1,14 @@
 #include <windows.h>
 #include "sa_world_preview.hpp"
 #include "sa_map_culling.hpp"
+#include "lcs/world_membership_cleanup.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <sstream>
 #include <utility>
+#include <map>
 
 namespace lcs {
 SaWorldPreview::SaWorldPreview(const std::filesystem::path& directory) {
@@ -270,4 +272,82 @@ bool SaWorldPreview::service() {
 }
 std::uint64_t SaWorldPreview::double_sided_draws() const {return no_cull_draws;}
 bool SaWorldPreview::culling_healthy() const {return !culling_failed;}
+namespace {
+struct ShutdownLink {uintptr_t head;bool single;};
+bool snapshot_shutdown_building(uintptr_t entity,const WorldRenderRule* rules,bool* owned) {
+    __try {
+        *owned=false;
+        const auto pool=*reinterpret_cast<const uintptr_t*>(0xB74498);
+        if(!pool)return false;
+        const auto items=*reinterpret_cast<const uintptr_t*>(pool);
+        const auto flags=*reinterpret_cast<const uintptr_t*>(pool+4);
+        const auto count=*reinterpret_cast<const int32_t*>(pool+8);
+        if(count<0 || count>200000 || !items || !flags)return false;
+        if(entity<items || entity>=items+size_t(count)*0x38 || (entity-items)%0x38)return true;
+        const auto slot=(entity-items)/0x38;
+        if(*reinterpret_cast<const uint8_t*>(flags+slot)&128)return false;
+        const auto model=*reinterpret_cast<const uint16_t*>(entity+0x22);
+        if(model>=20000 || !rules[model].owned)return true;
+        if((*reinterpret_cast<const uint8_t*>(entity+0x36)&7)!=1)return false;
+        const auto vt=*reinterpret_cast<const uintptr_t*>(entity);
+        if(!vt || *reinterpret_cast<const uintptr_t*>(vt+12)!=0x534AE0)return false;
+        *owned=true;return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+bool read_shutdown_node(uintptr_t address,uintptr_t* item,uintptr_t* next) {
+    __try {*item=*reinterpret_cast<const uintptr_t*>(address);*next=*reinterpret_cast<const uintptr_t*>(address+4);return true;}
+    __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+bool repair_shutdown_link(uintptr_t head,bool single,uintptr_t entity) {
+    __try {
+        uintptr_t previous=0,node=*reinterpret_cast<uintptr_t*>(head);
+        for(size_t guard=0;node && guard<200000;++guard) {
+            const auto next=*reinterpret_cast<uintptr_t*>(node+4);
+            if(*reinterpret_cast<uintptr_t*>(node)==entity) {
+                if(previous)*reinterpret_cast<uintptr_t*>(previous+4)=next;
+                else *reinterpret_cast<uintptr_t*>(head)=next;
+                if(!single && next)*reinterpret_cast<uintptr_t*>(next+8)=previous;
+                // Use the same native node-pool deallocators as CEntity::Remove.
+#ifdef LCS_WORLD_SHUTDOWN_NODE_FREE
+                LCS_WORLD_SHUTDOWN_NODE_FREE(node,single);
+#else
+                reinterpret_cast<void(__cdecl*)(uintptr_t)>(single?0x552390:0x5523D0)(node);
+#endif
+            } else previous=node;
+            node=next;
+        }
+        return node==0;
+    } __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+bool reindex_shutdown_building(uintptr_t entity,bool add) {
+    __try {reinterpret_cast<void(__thiscall*)(uintptr_t)>(add?0x533020:0x534AE0)(entity);return true;}
+    __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+}
+bool SaWorldPreview::reconcile_shutdown_membership(size_t* repaired) {
+    *repaired=0;
+    std::map<uintptr_t,std::vector<ShutdownLink>> linked;
+    // Snapshot actual membership, not current bounds: changed bounds are the
+    // reason native Remove can leave old nodes behind. No entities are deleted.
+    for(unsigned family=0;family<2;++family) {
+        const size_t count=family?14400:900;
+        for(size_t i=0;i<count;++i) {
+            const uintptr_t head=family?0xB7D0B8+8*i:0xB99EB8+4*i;
+            uintptr_t node=0,unused=0;if(!read_shutdown_node(head,&node,&unused))return false;
+            size_t guard=0;
+            for(;node && guard<200000;++guard) {
+                uintptr_t item=0,next=0;if(!read_shutdown_node(node,&item,&next))return false;
+                bool owned=false;if(!snapshot_shutdown_building(item,rules_.data(),&owned))return false;
+                if(owned)linked[item].push_back({head,family==0});
+                node=next;
+            }
+            if(node)return false;
+        }
+    }
+    return reconcile_world_membership(linked,
+        [this](uintptr_t entity){bool owned=false;return snapshot_shutdown_building(entity,rules_.data(),&owned) && owned;},
+        [](uintptr_t entity){return reindex_shutdown_building(entity,false);},
+        [](const ShutdownLink& list,uintptr_t entity){return repair_shutdown_link(list.head,list.single,entity);},
+        [](uintptr_t entity){return reindex_shutdown_building(entity,true);},repaired);
+}
 }

@@ -84,11 +84,13 @@ bool apply(SaCrusherEntities entities,float angle,bool* entered) {
         }
         if(!matrix)return false;
         // CGarage::UpdateCrusherAngle: SetRotateXOnly(TWOPI-door), UpdateRW,
-        // UpdateRwFrame. The hinge position is fixed, as in the original;
-        // no removal/reinsertion or change to another entity is necessary.
+        // A fixed hinge does not imply fixed XY bounds: GetBoundRect rotates
+        // the COL box. Remove using the old pose before changing that pose.
+        reinterpret_cast<void(__thiscall*)(uintptr_t)>(0x534AE0)(entities.lid);
         reinterpret_cast<void(__thiscall*)(uintptr_t,float)>(0x59AFA0)(matrix,2.0f*3.14159265359f-angle);
         reinterpret_cast<void(__thiscall*)(uintptr_t)>(0x446F90)(entities.lid);
         reinterpret_cast<void(__thiscall*)(uintptr_t)>(0x532B00)(entities.lid);
+        reinterpret_cast<void(__thiscall*)(uintptr_t)>(0x533020)(entities.lid);
         const float c=std::cos(-angle),s=std::sin(-angle);
         const float actual[]={*reinterpret_cast<float*>(matrix),*reinterpret_cast<float*>(matrix+0x14),
             *reinterpret_cast<float*>(matrix+0x18),*reinterpret_cast<float*>(matrix+0x24),*reinterpret_cast<float*>(matrix+0x28)};

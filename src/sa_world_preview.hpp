@@ -52,6 +52,9 @@ class SaWorldPreview {
 public:
     explicit SaWorldPreview(const std::filesystem::path& directory);
     bool service();
+    // Reindex only linked converted CBuildings before native teardown. Detached
+    // story buildings and population-owned dummies must remain detached.
+    bool reconcile_shutdown_membership(size_t* repaired);
     std::uint64_t double_sided_draws() const;
     bool culling_healthy() const;
 };

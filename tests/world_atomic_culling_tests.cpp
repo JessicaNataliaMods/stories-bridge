@@ -2,6 +2,9 @@
 // RenderWare state. Never load or execute GTA or access a graphics device.
 #include <cstdint>
 static std::uintptr_t test_engine=0;
+static unsigned shutdown_nodes_freed=0;
+static void test_shutdown_free(std::uintptr_t,bool){++shutdown_nodes_freed;}
+#define LCS_WORLD_SHUTDOWN_NODE_FREE test_shutdown_free
 static void* __cdecl test_each_atomic(void*,void*(__cdecl*)(void*,void*),void*);
 #define LCS_MAP_CULLING_FIXTURE test_engine
 #define LCS_CLUMP_ATOMIC_ITERATOR test_each_atomic
@@ -47,6 +50,20 @@ static void* __cdecl test_each_atomic(void* clump,void*(__cdecl* callback)(void*
     return clump;
 }
 int main() {
+    // Exercise the production pointer-list unlinker with authored nodes, not
+    // game memory. Removing duplicate owned nodes must preserve foreign nodes
+    // and repair both forward and backward links before native deallocation.
+    {
+        uintptr_t a[3]{1,0,0},b[3]{9,0,0},c[3]{1,0,0};
+        a[1]=reinterpret_cast<uintptr_t>(b);b[1]=reinterpret_cast<uintptr_t>(c);
+        b[2]=reinterpret_cast<uintptr_t>(a);c[2]=reinterpret_cast<uintptr_t>(b);
+        uintptr_t head=reinterpret_cast<uintptr_t>(a);
+        check(lcs::repair_shutdown_link(reinterpret_cast<uintptr_t>(&head),false,1));
+        check(head==reinterpret_cast<uintptr_t>(b) && b[1]==0 && b[2]==0 && shutdown_nodes_freed==2);
+        uintptr_t single[2]{1,0};head=reinterpret_cast<uintptr_t>(single);
+        check(lcs::repair_shutdown_link(reinterpret_cast<uintptr_t>(&head),true,1));
+        check(head==0 && shutdown_nodes_freed==3);
+    }
     static_assert(sizeof(void*)==4,"Native RW profile is Win32");
     alignas(4) unsigned char device[0x30]{};
     try {

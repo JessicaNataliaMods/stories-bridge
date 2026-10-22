@@ -1,8 +1,29 @@
 #include "../src/sa_world_preview.hpp"
 #include "../src/sa_map_culling.hpp"
 #include <stdexcept>
+#include "../include/lcs/world_membership_cleanup.hpp"
+#include <map>
+#include <algorithm>
 int main() {
     const auto check=[](bool condition){if(!condition)throw std::runtime_error("LOD range/island regression");};
+    {
+        // Building 1 moved from sector 0 to 2 without relinking. It also has
+        // a duplicate old node. Building 2 is intentionally detached; 9 is
+        // owned by another mod. Native Remove only searches current bounds.
+        std::map<int,std::vector<int>> heads{{0,{1,1,9}},{1,{1}},{2,{}}};
+        const std::map<int,std::vector<int>> actual{{1,{0,0,1}}};
+        auto erase=[&](int head,int entity){auto& v=heads[head];v.erase(std::remove(v.begin(),v.end(),entity),v.end());return true;};
+        size_t repaired=0;
+        check(lcs::reconcile_world_membership(actual,[](int entity){return entity==1;},
+            [&](int entity){return erase(2,entity);},erase,
+            [&](int entity){heads[2].push_back(entity);return true;},&repaired));
+        check(repaired==1 && heads[0]==std::vector<int>{9} && heads[1].empty() && heads[2]==std::vector<int>{1});
+        // Stock teardown now encounters the owned building once, and its
+        // stock Remove empties all current links before destruction.
+        int destructions=0;
+        while(!heads[2].empty()){int entity=heads[2].front();check(erase(2,entity));++destructions;}
+        check(destructions==1 && heads[0]==std::vector<int>{9});
+    }
     lcs::WorldRenderRule ordinary{true,true,110,10002,31};
     check(!lcs::preview_lod_visible(ordinary,1,90,1,true));
     check(lcs::preview_lod_visible(ordinary,1,90,1,false));

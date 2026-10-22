@@ -1880,6 +1880,15 @@ void __cdecl on_marker_shutdown(){
     original_marker_shutdown();
 }
 void __cdecl on_world_shutdown(){
+    // Retire script-owned mutations first, then normalize actual links while
+    // the old CBuilding pool and model bounds are still alive. Native shutdown
+    // retains sole responsibility for destruction, in its original order.
+    campaign.reset();
+    if(world_preview) {
+        size_t repaired=0;
+        const bool complete=world_preview->reconcile_shutdown_membership(&repaired);
+        log(std::string("World shutdown building reindex: complete=")+(complete?"1":"0")+" buildings="+std::to_string(repaired));
+    }
     // Native pool tags can repeat after LOAD/new game. Retire receipts at the
     // actual world boundary, before native code destroys any sector members.
     retire_campaign_world();

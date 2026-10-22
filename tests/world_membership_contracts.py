@@ -36,7 +36,7 @@ assert 'inspected_world=false;world_failure=false;' in retire
 # LCS campaign merely because the old VM was retired at that boundary.
 assert pe.read(0x53C6A7,4) == bytes.fromhex('a867ba00')
 assert 'campaign_load_requires_restore=loading;' in asi
-load_guard = asi.split('if(campaign_load_requires_restore) {',1)[1].split('\n    }',1)[0]
+load_guard = asi.split('if(campaign_load_requires_restore && !pending_campaign_load) {',1)[1].split('\n    }',1)[0]
 assert 'return;' in load_guard and 'start_main' not in load_guard
 preview = (root/'src'/'sa_world_preview.cpp').read_text()
 assert '0xB7449C' in preview and 'object+0x170' in preview
@@ -48,3 +48,12 @@ garages = (root/'src/sa_garages.cpp').read_text()
 register = garages.split('bool register_native(',1)[1].split('\n}\n}',1)[0]
 assert register.index('reinterpret_cast<AddOne>(0x4471E0)') < register.index('0x96C024)!=count+1') < register.index('(0x447600)(garage)')
 print('PASS: physical membership, promoted dummy ownership, shutdown dispatch, and both world retirement CALLs; PE read only')
+
+# Native list-node releases used by the shutdown reindexer match the retail
+# Remove branches; both still run through the engine's node allocators.
+for site, target in ((0x534C49,0x552390),(0x534E41,0x5523D0)):
+    call=pe.read(site,5)
+    assert call[0]==0xE8 and site+5+int.from_bytes(call[1:],'little',signed=True)==target
+crusher=(root/'src/sa_crusher.cpp').read_text().split('bool apply(',1)[1].split('\n}',1)[0]
+assert crusher.index('(0x534AE0)') < crusher.index('(0x59AFA0)') < crusher.index('(0x532B00)') < crusher.index('(0x533020)')
+print('PASS: native node-pool release ABI and crusher Remove/rotate/UpdateRW/Add ordering')
