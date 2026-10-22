@@ -40,6 +40,34 @@ No LCS o cano giratório é um modelo separado (`minigun2`, 294) desenhado sobre
 - velocidade, raio, duração e dispersão de projéteis e área (b..e);
 - nos tipos reaproveitados: espaço de inventário do LCS (corpo a corpo 1, submetralhadora 4, pesadas 7) e, nos corpo a corpo, o combo de golpe (`KNIFE` para faca/chave de fenda, `BBALLBAT` para taco); a Ingram copia grupo de animação, laços e flags da Micro Uzi, e a M60 os da minigun.
 
-Os três níveis de habilidade do SA recebem os mesmos valores (o LCS não tem habilidade com armas). Cadência e tempo de recarga do LCS não têm coluna no SA (vêm dos laços da animação) e não são convertidos. Laços de animação e grupos de animação continuam os do SA até a conversão das animações de arma.
+Os três níveis de habilidade do SA recebem os mesmos valores (o LCS não tem habilidade com armas). Cadência e tempo de recarga do LCS não têm coluna no SA (vêm dos laços da animação) e não são convertidos.
 
-O validador do pacote (`tools/validate-modloader-map.py`) regenera o `weapon.dat` e a minigun a partir dos arquivos de origem e compara byte a byte.
+A partir da v95, nas armas de fogo cujas animações foram convertidas (abaixo), todos os níveis de habilidade usam o grupo de animação do LCS e os laços do `WEAPON.DAT` original (colunas R..X → T..Z do SA): sem variantes de pouca habilidade nem pistolas duplas, como no LCS. A arma que já usa esse grupo no SA mantém as próprias flags; a que muda de grupo recebe as flags padrão da arma do SA dona do grupo (a Micro Uzi passa a usar o grupo `uzi`, de duas mãos, como a Uzi do LCS; a escopeta de cano curto passa ao grupo `buddy`).
+
+## Animações das armas (v95)
+
+Os blocos de animação de arma do SA (`anim/anim.img`, formato ANP3) são reconstruídos em `anim/weapons/<bloco>.ifp`, que o modloader (`std.stream`) usa no lugar das entradas de mesmo nome do `anim.img`. Cada animação que tem equivalente no LCS é trocada pela animação original convertida; as que só existem no SA (por exemplo `2guns_crouchfire`, `sawnoff_reload`) ficam byte a byte iguais.
+
+| Bloco do SA | Animações trocadas |
+| --- | --- |
+| `colt45` | `colt45_fire`, `_reload`, `_crouchfire`, `_crouchreload` |
+| `python` | `python_fire` (e `_fire_poor`), `_reload`, `_crouchfire`, `_crouchreload` |
+| `shotgun` | `shotgun_fire` (e `_fire_poor`), `_crouchfire` |
+| `buddy` | `buddy_fire` (e `_fire_poor`), `_reload`, `_crouchfire` |
+| `uzi` | `UZI_fire` (e `_fire_poor`), `_reload`, `_crouchfire`, `_crouchreload` |
+| `rifle` | `RIFLE_fire` (e `_fire_poor`), `_load`, `_crouchfire`, `_crouchload` |
+| `flame` | `FLAME_fire` |
+| `grenade` | `WEAPON_start_throw`, `WEAPON_throw`, `WEAPON_throwu` |
+
+Conversão de cada animação (blocos ANPK do LCS em `out/img-v1`):
+
+- ossos pelo nome do LCS para o id do SA (mesma numeração: 0–5, 21–25, 31–35, 41–44, 51–54); nós que não são ossos do pedestre (o `FLAME_fire` anima o nó `chnsaw`) são ignorados;
+- rotação: o ANPK guarda o quaternion conjugado, o ANP3 não, então x, y, z mudam de sinal; escala 4096;
+- tempo em 1/60 s;
+- translação só na raiz (escala 1024): nos outros ossos a translação do LCS carrega o comprimento dos ossos do LCS e deformaria os pedestres do SA.
+
+As convenções foram conferidas nos dados: o `colt45_reload` convertido reproduz os quaternions e a duração do `colt45_reload` do próprio SA.
+
+Ficam como no SA: as animações corpo a corpo (o SA monta o combate a partir de conjuntos de combos com nomes próprios), o sniper (o bloco do LCS não tem o mapa de ossos verificado), o lança-foguetes (nomes diferentes) e a M60, que usa o grupo `flame`.
+
+O validador do pacote (`tools/validate-modloader-map.py`) regenera o `weapon.dat`, a minigun e os blocos de animação a partir dos arquivos de origem e compara byte a byte. O instalador recusa outro mod que substitua `weapon.dat` ou esses blocos.

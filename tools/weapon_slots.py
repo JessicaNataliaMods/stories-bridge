@@ -46,6 +46,12 @@ MELEE_COMBOS = {"knife": "KNIFE", "screwdrv": "KNIFE", "baseball": "BBALLBAT", "
 # Gun types that were unused SA slots copy the animation data of the SA weapon
 # they now behave like (Ingram: one-handed SMG; M60: heavy hip-fired weapon).
 BORROWED_GUN_ROWS = {"PISTOL_SILENCED": "MICRO_UZI", "COUNTRYRIFLE": "MINIGUN"}
+# v95+: original animation group (WEAPON.DAT column P) -> SA group whose block
+# carries the converted original animations (tools/weapon_animations.py), and
+# the SA weapon that natively uses that group: a weapon moved to another group
+# takes that weapon's standard-skill flags; others keep their own.
+ANIMATED_GROUPS = {"colt45": "PISTOL", "python": "DESERT_EAGLE", "shotgun": "SHOTGUN", "buddy": "SPAS12",
+                   "uzi": "MP5", "rifle": "M4", "flame": "FTHROWER", "grenade": "GRENADE"}
 
 
 def original_weapons(text):
@@ -103,7 +109,7 @@ def sa_type_models(sa_text, sa_model_names):
     return result
 
 
-def convert_weapon_dat(sa_text, original_text, models, sa_model_names):
+def convert_weapon_dat(sa_text, original_text, models, sa_model_names, animations=False):
     """SA weapon.dat with the values of each mapped original weapon:
     weapon range, target range (capped by it), clip, damage, fire offset,
     projectile speed/radius/lifespan/spread, slot; gift melee types get the
@@ -111,11 +117,13 @@ def convert_weapon_dat(sa_text, original_text, models, sa_model_names):
     rows = original_weapons(original_text)
     sources = primary_sources(rows, models, sa_type_models(sa_text, sa_model_names))
     by_name = {SA_WEAPON_NAMES[t]: rows[i] for t, i in sources.items()}
-    borrowed = {}
+    borrowed, standard = {}, {}
     for line in sa_text.splitlines():
         fields = line.split()
         if fields and fields[0] == '$' and fields[1] in BORROWED_GUN_ROWS.values():
             borrowed.setdefault(fields[1], []).append(fields)
+        if fields and fields[0] == '$' and len(fields) > 25 and fields[14] == '1':
+            standard.setdefault(fields[1], fields)
     output = []
     seen = {name: 0 for name in BORROWED_GUN_ROWS}
     for line in sa_text.splitlines():
@@ -156,6 +164,16 @@ def convert_weapon_dat(sa_text, original_text, models, sa_model_names):
             fields[11:14] = original[11:14]
         if len(fields) == 30 and original[1] in ('PROJECTILE', 'AREA_EFFECT'):
             fields[26:30] = original[7:11]
+        group = original[14].lower()
+        if animations and group in ANIMATED_GROUPS:
+            # Every skill row plays the converted original group (LCS has no
+            # weapon skill, low-skill or twin-pistol variants), with that
+            # group's native flags and the original animation loops.
+            own = standard.get(fields[1])
+            template = own if own and own[8] == group else standard[ANIMATED_GROUPS[group]]
+            fields[8] = group
+            fields[25] = template[25]
+            fields[18:25] = original[15:22]
         output.append('\t'.join(fields))
     return '\r\n'.join(output) + '\r\n'
 

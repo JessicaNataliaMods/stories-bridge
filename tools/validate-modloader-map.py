@@ -10,6 +10,7 @@ from native_collisions import retained_definitions, validate as validate_native_
 from gameplay_ped_profile import validate as validate_gameplay_peds
 from bootstrap_player_exports import export_player_globals
 import weapon_slots
+import weapon_animations
 
 
 def collision_records(path):
@@ -408,8 +409,9 @@ def validate_campaign(package, map_report):
             raise ValueError('Weapon visual manifest changed')
         weapons=json.loads(manifest_file.read_text(encoding='utf-8'))
         slotted=campaign.get('version',0)>=94
-        if weapons['gameExecuted'] or weapons['installed'] or weapons['behaviorChanged']!=slotted or any(weapons[key] for key in
-            ('audioChanged','animationsChanged','handAlignmentRuntimeVerified')):
+        animated=campaign.get('version',0)>=95
+        if weapons['gameExecuted'] or weapons['installed'] or weapons['behaviorChanged']!=slotted or weapons['animationsChanged']!=animated or any(weapons[key] for key in
+            ('audioChanged','handAlignmentRuntimeVerified')):
             raise ValueError('Invalid weapon visual scope or runtime claims')
         source=pathlib.Path(weapons['sourceManifest'])
         if digest(source)!=weapons['sourceManifestSha256']:
@@ -454,9 +456,27 @@ def validate_campaign(package, map_report):
                     fields=[value.strip() for value in line.split(',')];sa_models[int(fields[0])]=fields[1].lower()
             regenerated=weapon_slots.convert_weapon_dat((game/'data/weapon.dat').read_text(encoding='latin1'),
                 (package/'metadata/lcs-source/DATA/WEAPON.DAT.bin').read_text(encoding='latin1'),
-                {row['originalModelId']:row['originalName'].lower() for row in converted['converted']},sa_models).encode('latin1')
+                {row['originalModelId']:row['originalName'].lower() for row in converted['converted']},sa_models,animations=animated).encode('latin1')
             if (package/'data/weapon.dat').read_bytes()!=regenerated or weapons['weaponDat']['sha256']!=hashlib.sha256(regenerated).hexdigest():
                 raise ValueError('Converted weapon.dat differs from its sources')
+        if animated:
+            # Rebuild each SA gun block from SA's anim.img and the original blocks.
+            step=campaign['weaponAnimations95']
+            entries=weapon_animations.img_entries(pathlib.Path(map_report['gameDirectory'])/'anim/anim.img')
+            root=pathlib.Path(__file__).resolve().parents[1]
+            originals={}
+            for name,row in step['originalSources'].items():
+                data=(root/row['relative']).read_bytes()
+                if hashlib.sha256(data).hexdigest()!=row['sha256']:raise ValueError('Original weapon animation source changed: '+name)
+                originals[name]=data
+            expected_blocks={}
+            for block,mapping in weapon_animations.BLOCKS.items():
+                data,_=weapon_animations.rebuild_block(entries[block+'.ifp'],{name:originals[name] for name,_ in mapping.values()})
+                expected_blocks['anim/weapons/'+block+'.ifp']=hashlib.sha256(data).hexdigest()
+            if {row['relative']:row['sha256'] for row in step['blocks']}!=expected_blocks or \
+               any(digest(package/relative)!=sha for relative,sha in expected_blocks.items()) or \
+               {path.relative_to(package).as_posix() for path in (package/'anim').rglob('*.ifp')}!=set(expected_blocks):
+                raise ValueError('Converted weapon animation blocks differ from their sources')
         for row in weapons['files']:
             if expected.get(row['relative'])!=row['sha256'] or digest(package/row['relative'])!=row['sha256']:
                 raise ValueError('Weapon visual differs from converted source')

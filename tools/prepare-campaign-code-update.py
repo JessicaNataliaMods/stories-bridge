@@ -32,7 +32,8 @@ def mutable_profile(relative, version):
            (version >= 82 and relative.as_posix() in ('data/gta.dat', 'data/lcs/info.zon', 'data/lcs/map.zon')) or \
            (version >= 83 and relative.as_posix() == 'data/timecyc.dat') or \
            (version >= 84 and relative.as_posix() == 'models/lcs/paths.img') or \
-           (version >= 94 and relative.as_posix() == 'data/lcs/native-equivalents.tsv')
+           (version >= 94 and relative.as_posix() == 'data/lcs/native-equivalents.tsv') or \
+           (version >= 95 and relative.as_posix() == 'data/weapon.dat')
 
 
 PATH_KEYS = ('WorldDirectory', 'DataDirectory', 'ResourceDirectory', 'CutsceneDirectory', 'AudioDirectory')
@@ -148,6 +149,49 @@ def remount_weapons(output, campaign, game):
     campaign['weaponVisuals'] = dict(manifest='metadata/weapon-visuals.json',
                                      sha256=digest(output/'metadata/weapon-visuals.json'), slots=len(slots))
     return manifest
+
+
+def mount_weapon_animations(output, campaign, game):
+    """v95: SA gun animation blocks with the original LCS animations
+    (tools/weapon_animations.py) and weapon.dat with the original loops."""
+    animations = tool_module('weapon_animations')
+    slots_module = tool_module('weapon_slots')
+    entries = animations.img_entries(game/'anim/anim.img')
+    source_directory = ROOT/'out/img-v1'
+    sources, files, replaced = {}, [], {}
+    for block, mapping in sorted(animations.BLOCKS.items()):
+        originals = {}
+        for name, _ in mapping.values():
+            data = (source_directory/(name + '.ifp')).read_bytes()
+            originals[name] = data
+            sources[name] = hashlib.sha256(data).hexdigest()
+        data, names = animations.rebuild_block(entries[block + '.ifp'], originals)
+        relative = 'anim/weapons/' + block + '.ifp'
+        (output/relative).parent.mkdir(parents=True, exist_ok=True)
+        (output/relative).write_bytes(data)
+        files.append(dict(relative=relative, sha256=digest(output/relative)))
+        replaced[block] = names
+    visuals_path = output/'metadata/weapon-visuals.json'
+    visuals = json.loads(visuals_path.read_text(encoding='utf-8'))
+    converted = json.loads(Path(visuals['sourceManifest']).read_text(encoding='utf-8'))
+    weapon_dat = output/'data/weapon.dat'
+    replace_mutable(weapon_dat, slots_module.convert_weapon_dat(
+        (game/'data/weapon.dat').read_text(encoding='latin1'),
+        (output/'metadata/lcs-source/DATA/WEAPON.DAT.bin').read_text(encoding='latin1'),
+        {row['originalModelId']: row['originalName'].lower() for row in converted['converted']},
+        sa_weapon_models(game), animations=True).encode('latin1'))
+    visuals['weaponDat']['sha256'] = digest(weapon_dat)
+    visuals['animationsChanged'] = True
+    visuals_path.write_text(json.dumps(visuals, indent=2) + '\n', encoding='utf-8')
+    updated = {'data/weapon.dat': digest(weapon_dat), 'metadata/weapon-visuals.json': digest(visuals_path)}
+    for row in campaign['originalResources']:
+        if row['relative'] in updated:
+            row['sha256'] = updated[row['relative']]
+    campaign['originalResources'] += files
+    campaign['weaponVisuals']['sha256'] = digest(visuals_path)
+    return dict(blocks=files, originalSources={name: dict(relative='out/img-v1/' + name + '.ifp', sha256=sha)
+                for name, sha in sorted(sources.items())}, replaced=replaced,
+                meleeAnimations='SA combo sets kept', gameExecuted=False)
 
 
 def tool_module(name):
@@ -335,6 +379,9 @@ def prepare(base, output, version, notes, refresh, original_data):
             separatedOriginals=['chisel','hockeystick','handaxe','cleaver','machete','ingramsl','m60'],
             minigunBarrel='frame minigun2', sharedTargets={'sniper': ['laser'], 'brassknuckle': ['fingers']},
             animationsConverted=False, gameExecuted=False)
+    if version >= 95 and not campaign.get('weaponAnimations95'):
+        game_directory = Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])
+        campaign['weaponAnimations95'] = mount_weapon_animations(output, campaign, game_directory)
     if version >= 90:
         campaign['originalResources']=[row for row in campaign['originalResources']
                                        if not packaged_audio(pathlib.PurePosixPath(row['relative']))]

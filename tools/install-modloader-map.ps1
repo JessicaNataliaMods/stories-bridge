@@ -41,7 +41,7 @@ if(Test-Path -LiteralPath (Join-Path $taskPackage 'metadata\gameplay-peds.json')
 }
 foreach($taskFile in Get-ChildItem -LiteralPath $taskModloader -Recurse -File){
     if($taskFile.FullName.StartsWith($taskTarget+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){continue}
-    if($taskFile.Name -in @('gta.dat','water.dat','main.scm','gta3.img','gta_int.img') -or ($taskMetadata.mode -eq 'Campaign' -and $taskFile.Name -in @('cuts.img','cutscene.img','american.gxt','french.gxt','german.gxt','italian.gxt','spanish.gxt','LcsSaBridge.asi'))){throw "Conflicting Modloader override: $($taskFile.FullName)"}
+    if($taskFile.Name -in @('gta.dat','water.dat','main.scm','gta3.img','gta_int.img') -or ($taskMetadata.mode -eq 'Campaign' -and $taskFile.Name -in @('cuts.img','cutscene.img','american.gxt','french.gxt','german.gxt','italian.gxt','spanish.gxt','LcsSaBridge.asi','weapon.dat','colt45.ifp','python.ifp','shotgun.ifp','buddy.ifp','uzi.ifp','rifle.ifp','flame.ifp','grenade.ifp'))){throw "Conflicting Modloader override: $($taskFile.FullName)"}
     if($taskSkinNames.Contains($taskFile.Name) -or ($taskSkinNames.Count -gt 0 -and $taskFile.Name -in @('peds.ide','pedgrp.dat'))){throw "Conflicting gameplay skin override: $($taskFile.FullName)"}
     if($taskFile.Extension -in @('.txt','.md') -and $taskFile.FullName -notlike '*\.data\*'){
         if(Select-String -LiteralPath $taskFile.FullName -Pattern '^(?:IDE|IPL|IMG|CDIMAGE|COLFILE \d|TEXDICTION|MODELFILE|HIERFILE) \w+[\\/].*\.(?:IDE|IPL|ZON|IMG|COL|TXD|DFF)\s*$' -Quiet){throw "Conflicting level entries in readme: $($taskFile.FullName)"}
