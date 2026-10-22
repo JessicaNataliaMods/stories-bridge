@@ -297,7 +297,7 @@ int main(int argc,char** argv){try{
           !native_crouch_duration(-2) && !native_crouch_duration(65536),"Persistent original crouch uses native zero timeout without truncating finite durations");
     auto turret=program(COMMAND_ATTACH_CHAR_TO_CAR,{301,501,bits(1.f),bits(2.f),bits(3.f),2,bits(80.f),24});Thread mounted;
     native.equivalent_entities=true;
-    check(step(turret,mounted)==StepResult::continued && packet.opcode==0x0464 && packet.inputs[7]==28 && packet.inputs[5]==2 && packet.inputs[6]==bits(80.f),"Turret attachment translates the weapon while preserving facing and degree limit");
+    check(step(turret,mounted)==StepResult::continued && packet.opcode==0x0464 && packet.inputs[7]==23 && packet.inputs[5]==2 && packet.inputs[6]==bits(80.f),"Turret attachment translates the weapon (silenced Ingram -> SA silenced pistol, docs/weapons.md) while preserving facing and degree limit");
     native.equivalent_entities=false;Thread unavailable;const auto before_turret=calls;
     check(step(turret,unavailable)==StepResult::unsupported && unavailable.ip==64 && calls==before_turret,"Unmapped exclusive turret weapon cannot reach the native task");
     for(int wheel=0;wheel<4;++wheel){auto vm=program(COMMAND_BURST_CAR_TYRE,{501,wheel});Thread t;check(step(vm,t)==StepResult::continued && packet.inputs[1]==wheel && packet.opcode==0x04FE,"Tyre effects retain native bike aliases and individual wheel selection");}
@@ -338,7 +338,7 @@ int main(int argc,char** argv){try{
         if(weapon==0 || weapon==1)return 0;if(weapon>=2 && weapon<=9)return 1;
         if(weapon==22 || weapon==24)return 2;if(weapon>=25 && weapon<=27)return 3;
         if(weapon==28 || weapon==29 || weapon==32)return 4;if(weapon==30 || weapon==31)return 5;
-        if(weapon==34)return 6;if(weapon==35 || weapon==37 || weapon==38)return 7;
+        if(weapon==34)return 6;if(weapon==33 || weapon==35 || weapon==37 || weapon==38)return 7; // converted weapon.dat: country rifle (M60) is heavy
         if(weapon==43)return 9;if(weapon==40)return 12;return 8;
     };
     native.execute=[&](const NativeCall& call){if(call.opcode!=0x04B8)return original_execute(call);packet=call;++calls;
@@ -355,11 +355,13 @@ int main(int argc,char** argv){try{
     check(step(sniper,rifle)==StepResult::continued && rifle.locals[0]==28 && rifle.locals[1]==12 && rifle.locals[2]==285,"Original sniper slot nine maps to SA seven rather than native heavy weapons");
     native.equivalent_entities=true;
     auto give=program(COMMAND_GIVE_WEAPON_TO_CHAR,{301,32,300});Thread armed;check(step(give,armed)==StepResult::continued,"Give equivalent M60 through real native weapon request");
-    inventory_slots[6]={{31,300,356}};
+    inventory_slots[8]={{33,300,357}};
     auto heavy=program(COMMAND_GET_CHAR_WEAPON_IN_SLOT,{301,8},3);Thread machinegun;
-    check(step(heavy,machinegun)==StepResult::continued && machinegun.locals[0]==32 && machinegun.locals[1]==300 && machinegun.locals[2]==289,"M60 identity survives its M4 counterpart in a different native inventory slot");
+    check(step(heavy,machinegun)==StepResult::continued && machinegun.locals[0]==32 && machinegun.locals[1]==300 && machinegun.locals[2]==289,"M60 maps to its own SA country-rifle slot in the heavy inventory slot");
     inventory_slots[8]={{35,1,359}};Thread ambiguous;
-    check(step(heavy,ambiguous)==StepResult::unsupported && ambiguous.ip==64 && ambiguous.locals[0]==0,"Multiple weapons from different SA slots cannot silently select the wrong original heavy weapon");
+    // All original heavy weapons now share SA's heavy slot, as in LCS: the slot
+    // holds one weapon and resolves to its own original identity.
+    check(step(heavy,ambiguous)==StepResult::continued && ambiguous.locals[0]==30 && ambiguous.locals[1]==1 && ambiguous.locals[2]==287,"The shared heavy slot resolves the rocket launcher to its original identity");
     inventory_slots.clear();Thread empty;check(step(sniper,empty)==StepResult::continued && empty.locals[0]==0 && empty.locals[1]==0 && empty.locals[2]==-1,"Empty slot retains original unarmed identity and model");
     native.execute=original_execute;
     int32_t seen_actor=0,seen_type=-1;std::optional<bool> seen=false;

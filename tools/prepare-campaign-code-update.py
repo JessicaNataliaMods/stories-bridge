@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import shutil
+from pathlib import Path
 from bootstrap_player_exports import export_player_globals, report as bootstrap_report
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -30,7 +31,8 @@ def mutable_profile(relative, version):
     return (version >= 32 and relative.as_posix() == 'data/script/main.scm') or \
            (version >= 82 and relative.as_posix() in ('data/gta.dat', 'data/lcs/info.zon', 'data/lcs/map.zon')) or \
            (version >= 83 and relative.as_posix() == 'data/timecyc.dat') or \
-           (version >= 84 and relative.as_posix() == 'models/lcs/paths.img')
+           (version >= 84 and relative.as_posix() == 'models/lcs/paths.img') or \
+           (version >= 94 and relative.as_posix() == 'data/lcs/native-equivalents.tsv')
 
 
 PATH_KEYS = ('WorldDirectory', 'DataDirectory', 'ResourceDirectory', 'CutsceneDirectory', 'AudioDirectory')
@@ -48,6 +50,104 @@ def replace_mutable(target, data):
     temporary = target.with_name(target.name + '.new')
     temporary.write_bytes(data)
     os.replace(temporary, target)
+
+
+def sa_weapon_models(game):
+    names, section = {}, ''
+    for line in (game/'data/default.ide').read_text(encoding='latin1').splitlines():
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if ',' not in line:
+            section = '' if line.lower() == 'end' else line.lower()
+        elif section == 'weap':
+            fields = [value.strip() for value in line.split(',')]
+            names[int(fields[0])] = fields[1].lower()
+    return names
+
+
+def remount_weapons(output, campaign, game):
+    """v94: every original weapon on its own SA weapon model (tools/weapon_slots.py),
+    the minigun body and barrel in one clump, and SA weapon.dat values from the
+    original WEAPON.DAT. Returns the weapon-visuals manifest."""
+    slots_module = tool_module('weapon_slots')
+    old_manifest = json.loads((output/'metadata/weapon-visuals.json').read_text(encoding='utf-8'))
+    source_manifest = Path(old_manifest['sourceManifest'])
+    if digest(source_manifest) != old_manifest['sourceManifestSha256']:
+        raise ValueError('Weapon conversion provenance changed')
+    converted = json.loads(source_manifest.read_text(encoding='utf-8'))
+    if not converted['complete'] or converted['failures'] or converted['gameExecuted']:
+        raise ValueError('Weapon conversion must be complete and verified offline')
+    by_name = {row['originalName'].lower(): row for row in converted['converted']}
+    models = {row['originalModelId']: row['originalName'].lower() for row in converted['converted']}
+    sa_models = sa_weapon_models(game)
+    sa_ids = {name: model for model, name in sa_models.items()}
+    # Script model bindings follow the new slots.
+    bindings = output/'data/lcs/native-equivalents.tsv'
+    # The vehicle fleet record pins the bindings as mounted before this step;
+    # keep that hash and a digest of the untouched non-weapon rows.
+    entity_rows = [line for line in bindings.read_text(encoding='ascii').splitlines() if not line.endswith('\tobject')]
+    campaign['weaponEquivalents94'] = dict(beforeSha256=digest(bindings),
+        entityRowsSha256=hashlib.sha256('\n'.join(entity_rows).encode('ascii')).hexdigest())
+    rows = []
+    for line in bindings.read_text(encoding='ascii').splitlines():
+        fields = line.split('\t')
+        if len(fields) == 5 and fields[4] == 'object' and fields[2] in slots_module.WEAPON_TARGETS:
+            target = slots_module.WEAPON_TARGETS[fields[2]]
+            fields[1], fields[3] = str(sa_ids[target]), target
+        rows.append('\t'.join(fields))
+    replace_mutable(bindings, ('\n'.join(rows) + '\n').encode('ascii'))
+    campaign['equivalentSha256'] = digest(bindings)
+    groups = {}
+    for name in models.values():
+        groups.setdefault(slots_module.WEAPON_TARGETS[name], []).append(name)
+    for row in old_manifest['files']:
+        (output/row['relative']).unlink(missing_ok=True)
+    slots, files = [], []
+    rw = source_manifest.parent/'rw-assets'
+    def source_bytes(row, extension, key):
+        data = (rw/(row['asset'] + extension)).read_bytes()
+        if hashlib.sha256(data).hexdigest() != row[key]:
+            raise ValueError('Converted weapon changed: ' + row['asset'])
+        return data
+    for target, names in sorted(groups.items()):
+        selected = slots_module.CANONICAL.get(target, names[0] if len(names) == 1 else None)
+        if selected is None:
+            raise ValueError('Shared weapon target needs a canonical original: ' + target)
+        row = by_name[selected]
+        dff, txd = source_bytes(row, '.dff', 'dffSHA256'), source_bytes(row, '.txd', 'txdSHA256')
+        slot = dict(nativeModel=sa_ids[target], nativeName=target, selectedOriginal=row['originalName'],
+                    originalModel=row['originalModelId'], aliases=sorted(set(names) - {selected}))
+        if target == 'minigun':
+            barrel = by_name['minigun2']
+            dff = slots_module.assemble_minigun(dff, source_bytes(barrel, '.dff', 'dffSHA256'))
+            txd = slots_module.merge_textures(txd, source_bytes(barrel, '.txd', 'txdSHA256'))
+            slot['assembly'] = dict(barrel='minigun2', frame='minigun2', rule='LCS CPed minigun top atomic')
+            slot['aliases'].remove('minigun2')
+        for data, extension in ((dff, '.dff'), (txd, '.txd')):
+            relative = 'weapons/' + target + extension
+            (output/relative).parent.mkdir(parents=True, exist_ok=True)
+            (output/relative).write_bytes(data)
+            files.append(dict(relative=relative, sha256=digest(output/relative)))
+        slots.append(slot)
+    weapon_dat = output/'data/weapon.dat'
+    weapon_dat.write_bytes(slots_module.convert_weapon_dat(
+        (game/'data/weapon.dat').read_text(encoding='latin1'),
+        (output/'metadata/lcs-source/DATA/WEAPON.DAT.bin').read_text(encoding='latin1'),
+        models, sa_models).encode('latin1'))
+    manifest = dict(format=2, sourceManifest=str(source_manifest), sourceManifestSha256=digest(source_manifest),
+                    slots=slots, files=files, weaponDat=dict(relative='data/weapon.dat', sha256=digest(weapon_dat)),
+                    installed=False, gameExecuted=False, behaviorChanged=True, audioChanged=False,
+                    animationsChanged=False, handAlignmentRuntimeVerified=False)
+    (output/'metadata/weapon-visuals.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+    old_files = {row['relative'] for row in old_manifest['files']}
+    campaign['originalResources'] = [row for row in campaign['originalResources']
+                                     if row['relative'] not in old_files and row['relative'] != 'metadata/weapon-visuals.json']
+    campaign['originalResources'] += files + [dict(relative='data/weapon.dat', sha256=digest(weapon_dat)),
+        dict(relative='metadata/weapon-visuals.json', sha256=digest(output/'metadata/weapon-visuals.json'))]
+    campaign['weaponVisuals'] = dict(manifest='metadata/weapon-visuals.json',
+                                     sha256=digest(output/'metadata/weapon-visuals.json'), slots=len(slots))
+    return manifest
 
 
 def tool_module(name):
@@ -228,6 +328,13 @@ def prepare(base, output, version, notes, refresh, original_data):
     if version >= 53:
         campaign['runtimeSafeguards'].update(typedRemoteVehicleExplosion=True,guardedFocusedRemoteVehicle=True,
             nativeRemoteExplosionEnteredFailureReceipt=True)
+    if version >= 94 and not campaign.get('weaponSlots94'):
+        game_directory = Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])
+        weapons = remount_weapons(output, campaign, game_directory)
+        campaign['weaponSlots94'] = dict(slots=len(weapons['slots']), weaponDat='data/weapon.dat',
+            separatedOriginals=['chisel','hockeystick','handaxe','cleaver','machete','ingramsl','m60'],
+            minigunBarrel='frame minigun2', sharedTargets={'sniper': ['laser'], 'brassknuckle': ['fingers']},
+            animationsConverted=False, gameExecuted=False)
     if version >= 90:
         campaign['originalResources']=[row for row in campaign['originalResources']
                                        if not packaged_audio(pathlib.PurePosixPath(row['relative']))]

@@ -9,6 +9,7 @@ from traffic_profile import audit as path_audit
 from native_collisions import retained_definitions, validate as validate_native_collisions
 from gameplay_ped_profile import validate as validate_gameplay_peds
 from bootstrap_player_exports import export_player_globals
+import weapon_slots
 
 
 def collision_records(path):
@@ -83,8 +84,12 @@ def validate_campaign(package, map_report):
         relative='metadata/lcs-source/DATA/WEAPON.DAT.bin'
         if not any(row['relative']==relative for row in campaign['originalResources']):
             raise ValueError('Missing original mission weapon definitions')
-        if list(package.rglob('weapon.dat')):
+        # v94+: data/weapon.dat is the SA table converted from the original
+        # WEAPON.DAT (tools/weapon_slots.py); it is checked with the weapon slots.
+        if campaign.get('version',0)<94 and list(package.rglob('weapon.dat')):
             raise ValueError('Original weapon data must not override SA weapon.dat')
+        if campaign.get('version',0)>=94 and list(package.rglob('weapon.dat'))!=[package/'data/weapon.dat']:
+            raise ValueError('Converted weapon.dat must be the only SA weapon table')
     if campaign.get('version',0)>=22:
         interiors=json.loads((package/'metadata/campaign-interiors.json').read_text())
         if interiors['gameExecuted'] or len(interiors['models'])!=15 or any(not row['nativeMeshReread'] or not row['triangles'] or row['vertices']>65535 for row in interiors['models']):
@@ -215,6 +220,8 @@ def validate_campaign(package, map_report):
             if not required.issubset({row['executable'] for row in proof['checks'] if row['passed']}) or \
                 (campaign.get('version',0)<90 and not any(row['relative']=='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin' for row in proof['inputs'])):
                 raise ValueError('Finale startup checks or authenticated input missing')
+        if campaign.get('version',0)>=94:
+            expected_checks+=1
         if campaign.get('version',0)>=92:
             expected_checks+=1
             if 'lcs-radio-tests.exe' not in {row['executable'] for row in proof['checks'] if row['passed']}:
@@ -289,6 +296,7 @@ def validate_campaign(package, map_report):
                 'original-marker-contracts.log','validate-script-marker-resources.log'))
             if campaign.get('version',0)>=90:required_outputs.add('lcs-ps2-audio-source-tests.log')
             if campaign.get('version',0)>=92:required_outputs.add('lcs-radio-tests.log')
+            if campaign.get('version',0)>=94:required_outputs.add('weapon-slot-contracts.log')
             if {row['output'] for row in proof['checks']}!=required_outputs:raise ValueError('Campaign regression proof outputs do not match required checks')
         for row in proof['inputs']:
             if digest(package/row['relative'])!=row['sha256']:raise ValueError('Campaign startup input changed: '+row['relative'])
@@ -384,6 +392,14 @@ def validate_campaign(package, map_report):
             if wanted.get(row['relative'])!=row['sha256'].lower() or digest(package/row['relative'])!=row['sha256'].lower():
                 raise ValueError('Mounted fleet geometry/textures differ')
         for row in mounted['Configs']:
+            if row['relative']=='data/lcs/native-equivalents.tsv' and campaign.get('weaponEquivalents94'):
+                # v94 re-targets only the weapon object rows (tools/weapon_slots.py).
+                weapons_step=campaign['weaponEquivalents94']
+                entity_rows=[line for line in (package/row['relative']).read_text(encoding='ascii').splitlines() if not line.endswith('\tobject')]
+                if row['afterSha256'].lower()!=weapons_step['beforeSha256'] or digest(package/row['relative'])!=campaign['equivalentSha256'] or \
+                   hashlib.sha256('\n'.join(entity_rows).encode('ascii')).hexdigest()!=weapons_step['entityRowsSha256']:
+                    raise ValueError('Fleet bindings changed beyond the weapon slot rows')
+                continue
             if digest(package/row['relative'])!=row['afterSha256'].lower():raise ValueError('Fleet composite configuration changed')
     if campaign.get('weaponVisuals'):
         visual=campaign['weaponVisuals']
@@ -391,8 +407,9 @@ def validate_campaign(package, map_report):
         if digest(manifest_file)!=visual['sha256']:
             raise ValueError('Weapon visual manifest changed')
         weapons=json.loads(manifest_file.read_text(encoding='utf-8'))
-        if weapons['gameExecuted'] or weapons['installed'] or any(weapons[key] for key in
-            ('behaviorChanged','audioChanged','animationsChanged','handAlignmentRuntimeVerified')):
+        slotted=campaign.get('version',0)>=94
+        if weapons['gameExecuted'] or weapons['installed'] or weapons['behaviorChanged']!=slotted or any(weapons[key] for key in
+            ('audioChanged','animationsChanged','handAlignmentRuntimeVerified')):
             raise ValueError('Invalid weapon visual scope or runtime claims')
         source=pathlib.Path(weapons['sourceManifest'])
         if digest(source)!=weapons['sourceManifestSha256']:
@@ -403,17 +420,43 @@ def validate_campaign(package, map_report):
         if not converted['complete'] or converted['failures'] or len(weapons['slots'])!=visual['slots']:
             raise ValueError('Incomplete weapon conversion')
         expected={}
+        by_name={row['originalName'].lower():row for row in converted['converted']}
+        rw=source.parent/'rw-assets'
         for slot in weapons['slots']:
             row=by_id[slot['originalModel']]
             binding='\t'.join(map(str,(slot['originalModel'],slot['nativeModel'],
                 slot['selectedOriginal'].lower(),slot['nativeName'],'object')))
             if binding not in bindings or row['originalName']!=slot['selectedOriginal']:
                 raise ValueError('Weapon visual does not match script model binding')
-            for extension,key in (('.dff','dffSHA256'),('.txd','txdSHA256')):
+            if slotted and weapon_slots.WEAPON_TARGETS[slot['selectedOriginal'].lower()]!=slot['nativeName']:
+                raise ValueError('Weapon slot differs from the packaged slot plan')
+            sums={'.dff':row['dffSHA256'],'.txd':row['txdSHA256']}
+            if slot.get('assembly'):
+                # Rebuild the minigun body+barrel clump from the converted sources.
+                barrel=by_name[slot['assembly']['barrel']]
+                sums={'.dff':hashlib.sha256(weapon_slots.assemble_minigun((rw/(row['asset']+'.dff')).read_bytes(),
+                          (rw/(barrel['asset']+'.dff')).read_bytes())).hexdigest(),
+                      '.txd':hashlib.sha256(weapon_slots.merge_textures((rw/(row['asset']+'.txd')).read_bytes(),
+                          (rw/(barrel['asset']+'.txd')).read_bytes())).hexdigest()}
+            for extension in ('.dff','.txd'):
                 relative='weapons/'+slot['nativeName']+extension
                 if relative in expected:raise ValueError('Duplicate weapon target')
-                expected[relative]=row[key]
+                expected[relative]=sums[extension]
         if len(weapons['files'])!=len(expected):raise ValueError('Weapon file inventory mismatch')
+        if slotted:
+            game=pathlib.Path(map_report['gameDirectory'])
+            sa_models={};section=''
+            for line in (game/'data/default.ide').read_text(encoding='latin1').splitlines():
+                line=line.split('#',1)[0].strip()
+                if not line:continue
+                if ',' not in line:section='' if line.lower()=='end' else line.lower()
+                elif section=='weap':
+                    fields=[value.strip() for value in line.split(',')];sa_models[int(fields[0])]=fields[1].lower()
+            regenerated=weapon_slots.convert_weapon_dat((game/'data/weapon.dat').read_text(encoding='latin1'),
+                (package/'metadata/lcs-source/DATA/WEAPON.DAT.bin').read_text(encoding='latin1'),
+                {row['originalModelId']:row['originalName'].lower() for row in converted['converted']},sa_models).encode('latin1')
+            if (package/'data/weapon.dat').read_bytes()!=regenerated or weapons['weaponDat']['sha256']!=hashlib.sha256(regenerated).hexdigest():
+                raise ValueError('Converted weapon.dat differs from its sources')
         for row in weapons['files']:
             if expected.get(row['relative'])!=row['sha256'] or digest(package/row['relative'])!=row['sha256']:
                 raise ValueError('Weapon visual differs from converted source')

@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from weapon_slots import WEAPON_TARGETS
 
 
 def ide(path):
@@ -33,17 +34,8 @@ VEHICLES = {
     "angel": "freeway", "angel2": "freeway", "noodleboy": "pizzaboy", "sanchez2": "sanchez",
     "rcgoblin": "rcgoblin", "rcraider": "rcraider", "vcnmav": "maverick",
 }
-WEAPONS = {
-    "cellphone": "cellphone", "chisel": "knifecur", "hockeystick": "bat", "nitestick": "nitestick", "bat": "bat",
-    "brassknuckle": "brassknuckle", "screwdriver": "knifecur", "golfclub": "golfclub", "nightstick": "nitestick",
-    "knifecur": "knifecur", "baseball": "bat", "handaxe": "bat", "cleaver": "knifecur", "machete": "katana",
-    "katana": "katana", "chnsaw": "chnsaw", "grenade": "grenade", "teargas": "teargas", "molotov": "molotov",
-    "missile": "missile", "glock17": "colt45", "python": "desert_eagle", "ak47": "ak47", "chromegun": "chromegun",
-    "shotgspa": "shotgspa", "buddyshot": "sawnoff", "m4": "m4", "tec9": "tec9", "uzi": "micro_uzi",
-    "ingramsl": "micro_uzi", "mp5k": "mp5lng", "sniper": "sniper", "laser": "sniper",
-    "rocketla": "rocketla", "flame": "flame", "m60": "m4", "minigun": "minigun", "minigun2": "minigun",
-    "bomb": "satchel", "camera": "camera", "fingers": "brassknuckle",
-}
+# One SA weapon model per original weapon: tools/weapon_slots.py (docs/weapons.md).
+WEAPONS = WEAPON_TARGETS
 
 
 def prepare(game, source, output):

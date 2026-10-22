@@ -93,6 +93,8 @@ def validate(package,source,validation_build=None):
                          [ORIGINAL_AUDIO,source/'audio',package/'data/lcs/cutscenes/index.tsv']))
     if campaign.get('version',0)>=92:
         commands.append((validation_build/'Release/lcs-radio-tests.exe',[ORIGINAL_AUDIO]))
+    if campaign.get('version',0)>=94:
+        commands.append((pathlib.Path(sys.executable),['-B',ROOT/'tests/weapon_slot_contracts.py']))
     checks=[]
     for exe,args in commands:
         result=subprocess.run([str(exe),*(str(p) for p in args)],capture_output=True,text=True,timeout=60)

@@ -20,7 +20,9 @@ std::vector<EquivalentEntity> read_equivalents(std::istream& in) {
         else throw std::runtime_error("Invalid native equivalent entity class");
         if((e.kind==ModelKind::vehicle && (e.native<400 || e.native>611)) ||
            (e.kind==ModelKind::ped && e.native>=290) ||
-           (e.kind==ModelKind::object && (e.original<258 || e.native<330 || e.native>373)))throw std::runtime_error("Equivalent must be a regular native entity, not a special streaming slot");
+           // SA weapon models are 321..373 (default.ide weap); the gift models
+           // 321..326 carry original melee weapons (docs/weapons.md).
+           (e.kind==ModelKind::object && (e.original<258 || e.native<321 || e.native>373)))throw std::runtime_error("Equivalent must be a regular native entity, not a special streaming slot");
         result.push_back(e);
     }
     if(result.empty())throw std::runtime_error("Empty native equivalent entity profile");

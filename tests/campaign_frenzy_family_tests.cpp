@@ -42,16 +42,17 @@ int main(){try{
         auto vm=program(COMMAND_START_KILL_FRENZY,{pair.first,-1,10,-2,-1,-1,-1,0},&label);Thread t;
         check(step(vm,t)==StepResult::continued && packet.inputs[0]==pair.second && packet.inputs[1]==-1,"Damage-class selector/time sentinel retain original meaning");status=2;
     }
-    // Both M4 and the deferred LCS M60 use a native assault-rifle equivalent.
+    // The deferred LCS M60 starts the rampage with its own SA type (country rifle, docs/weapons.md).
     // The source identity must follow the temporary rampage then be restored.
     auto give=program(COMMAND_GIVE_WEAPON_TO_PLAYER,{0,26,100});Thread given;check(step(give,given)==StepResult::continued,"Set original interrupted M4 identity");
     auto frenzy=program(COMMAND_START_KILL_FRENZY,{32,10000,5,-1,-1,-1,-1,1},&label);Thread started;
-    check(step(frenzy,started)==StepResult::continued && packet.inputs[0]==31,"Deferred LCS M60 uses configured SA equivalent");
+    check(step(frenzy,started)==StepResult::continued && packet.inputs[0]==33,"Deferred LCS M60 uses its own SA weapon type");
     auto query=program(COMMAND_GET_CURRENT_PLAYER_WEAPON,{0},nullptr,1);Thread during;
     auto malformed=query;malformed.memory.back()=204;Thread invalid;const auto no_query=calls;
     check(step(malformed,invalid)==StepResult::failed && calls==no_query,"Malformed weapon output rejects before any rampage status query");
+    current_weapon=33; // the rampage hands the player the M60's own SA type
     check(step(query,during)==StepResult::continued && during.locals[0]==32,"Actual native rampage weapon keeps its original LCS identity");
-    status=2;Thread after;check(step(query,after)==StepResult::continued && after.locals[0]==26,"Finished rampage restores interrupted source identity instead of retaining temporary M60 alias");
+    current_weapon=31;status=2;Thread after;check(step(query,after)==StepResult::continued && after.locals[0]==26,"Finished rampage restores interrupted source identity instead of retaining temporary M60 alias");
     accept=false;status=0;Thread refused;check(step(frenzy,refused)==StepResult::unsupported && refused.ip==64,"Rejected native start retains the original instruction");
     entered=true;Thread partial;check(step(frenzy,partial)==StepResult::failed && partial.ip==64 && partial.diagnostic.find("requires repair")!=std::string::npos,"Partial native start cannot be retried or counted as mission success");
     entered=false;accept=true;adapter.world_ready=false;Thread unmounted;const auto before=calls;

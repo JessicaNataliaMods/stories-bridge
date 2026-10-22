@@ -88,7 +88,11 @@ void NativeAdapter::walking_task_invalidated(size_t slot) {
     }
 }
 static constexpr int strict_weapon_counterparts[]={0,1,-1,2,3,4,5,-1,-1,-1,8,9,16,39,17,18,-1,22,-1,25,27,26,32,28,-1,29,31,-1,34,-1,35,37,-1,38,40,-1,43};
-static constexpr int equivalent_weapon_counterparts[]={0,1,4,2,3,4,5,5,4,8,8,9,16,39,17,18,35,22,24,25,27,26,32,28,28,29,31,30,34,34,35,37,31,38,40,38,43};
+// Every original weapon has its own SA type (tools/weapon_slots.py, docs/weapons.md):
+// screwdriver/hammer/machete/cleaver use the gift types, the silenced Ingram the
+// silenced pistol and the M60 the country rifle; only the laser scope shares the
+// sniper (SA ties the scope camera to that type) and the heli cannon the minigun.
+static constexpr int equivalent_weapon_counterparts[]={0,1,11,2,3,4,5,10,13,12,8,9,16,39,17,18,35,22,24,25,27,26,32,28,23,29,31,30,34,34,35,37,33,38,40,38,43};
 static bool common_garage_type(int32_t type) {return (type>=0 && type<=5) || type==11 || (type>=14 && type<=21) || type==23 || (type>=24 && type<=32);}
 static std::string lower(std::string s) { for(auto& c:s) c=char(std::tolower(static_cast<unsigned char>(c))); return s; }
 static int32_t float_bits(float value) {int32_t encoded;std::memcpy(&encoded,&value,sizeof(encoded));return encoded;}
