@@ -456,7 +456,9 @@ bool sa_switch_roads(const std::array<float,6>& box,bool cars,bool off,bool rest
     for(int i=0;i<count;++i) {
         const bool same_type=(before[i].cars!=0)==cars;
         if(same_type && (!restore_contained || std::equal(box.begin(),box.end(),before[i].box)))continue;
-        const bool kept=std::any_of(after,after+present,[&](const RoadSwitchRecord& r){return std::memcmp(&r,&before[i],sizeof(r))==0;});
+        // Compare the stored fields only; SA leaves the two padding bytes unset.
+        const bool kept=std::any_of(after,after+present,[&](const RoadSwitchRecord& r){
+            return std::memcmp(r.box,before[i].box,sizeof(r.box))==0 && r.off==before[i].off && r.cars==before[i].cars;});
         if(!kept)append_road_switch(before[i]);
     }
     return true;

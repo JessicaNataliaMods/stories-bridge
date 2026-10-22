@@ -138,7 +138,7 @@ AudioArchive::Ps2Layout AudioArchive::ps2_layout(uint32_t index,const std::vecto
 AudioSample AudioArchive::sample(const std::string& name) const {
     const auto key=upper(name);
     const auto entry=std::find_if(std::begin(names),std::end(names),[&](const NamedSample& value){return upper(value.name)==key;});
-    if(entry==std::end(names) || entry->index>=records_.size())throw std::runtime_error("Original mission audio label is missing: "+key);
+    if(entry==std::end(names) || entry->index>=sample_count())throw std::runtime_error("Original mission audio label is missing: "+key);
     return sample(entry->index);
 }
 AudioSample AudioArchive::sample(uint32_t index) const {

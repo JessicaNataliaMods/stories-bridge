@@ -1419,10 +1419,7 @@ void preflight() {
             log("Mode=WorldPreview; original mission data is not required for the native map bootstrap.");
             return;
         }
-        std::array<wchar_t,32768> data{};
-        GetPrivateProfileStringW(L"LCS",L"DataDirectory",L"",data.data(),DWORD(data.size()),ini.c_str());
-        if (!data[0]) throw std::runtime_error("Set [LCS] DataDirectory in LcsSaBridge.ini");
-        const auto image=lcs::ScmImage::load(source_file(std::filesystem::path(data.data()),L"DATA/MAIN.SCM"));
+        const auto image=lcs::ScmImage::load(source_file(original_data_directory(),L"DATA/MAIN.SCM"));
         lcs::Runtime runtime(image); const auto id=runtime.start_main();
         runtime.tick(0,0);
         const auto& script=runtime.script(id); const auto& thread=script.thread;

@@ -52,6 +52,11 @@ int main(int argc,char** argv){try {
         const auto sample=ps2.sample(index);
         check(sample.pcm.size()==ps2.record(index).size && sample.frequency==ps2.record(index).frequency,"Decoded sample length differs at "+std::to_string(index));
     }
+    size_t labels=0;
+    for(const auto& name:lcs::AudioArchive::mission_names()) {
+        const auto a=ps2.sample(name),b=converted.sample(name);
+        check(a.frequency==b.frequency && !a.pcm.empty() && a.pcm.size()<=b.pcm.size(),"Mission audio label differs: "+name);++labels;
+    }
     for(int32_t news=0;news<14;++news) {
         const auto a=ps2.announcement(news),b=converted.announcement(news);
         check(a.pcm==b.pcm && a.frequency==b.frequency && a.channels==b.channels,"News stream differs from its prepared wave");
@@ -70,6 +75,6 @@ int main(int argc,char** argv){try {
             ++scenes;
         }
     }
-    std::cout<<"PASS: records="<<equal<<" engine_records_refused="<<engine<<" news=14 cutscenes="<<scenes<<"; gameExecuted=false\n";
+    std::cout<<"PASS: records="<<equal<<" engine_records_refused="<<engine<<" mission_labels="<<labels<<" news=14 cutscenes="<<scenes<<"; gameExecuted=false\n";
     return 0;
 } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
