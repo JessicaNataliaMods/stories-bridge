@@ -41,6 +41,9 @@ public:
     AudioSample announcement(int32_t index) const;
     AudioSample frontend_effect(int32_t script_sound) const;
     AudioSample phone_ring_sample() const; // retail event76 maps to raw sample236
+    // Radio retune: DoPoliceRadioCrackle and SOUND_RADIO_CHANGE samples.
+    uint32_t radio_crackle_index() const;
+    uint32_t radio_dial_index(uint32_t dial) const; // dial 0..2
     size_t sample_count()const {return ps2_mode_?ps2_.size():records_.size();}
 };
 // Mission speech is sampled PCM in LCS. SA's same-named opcode takes a numeric

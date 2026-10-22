@@ -712,7 +712,7 @@ struct Campaign {
         if(setting(L"LcsRadio")!=L"0") {
             if(!lcs::sa_radio_profile_matches())log("Original LCS radio refused: SA radio manager profile differs; SA radio stays active");
             else {
-                lcs_radio=std::make_unique<lcs::SaLcsRadio>(original_audio_directory()/L"MUSIC",GetTickCount());
+                lcs_radio=std::make_unique<lcs::SaLcsRadio>(original_audio_directory()/L"MUSIC",GetTickCount(),audio_archive);
                 adapter.lcs_radio=true;
                 adapter.lcs_radio_position=[this](int32_t station,int32_t seek){lcs_radio->script_position(station,seek,GetTickCount());};
                 log("Original LCS radio active: SA station slots stream AUDIO/MUSIC; user tracks and radio off stay native");
@@ -1777,7 +1777,9 @@ void service_original_finale() {
         });
     campaign->frame_updates.run("lcs-radio",lcs::UpdateScope::auxiliary,original_audio_frame,
         "Original LCS radio service unavailable",[](){
-            return !campaign->lcs_radio || campaign->lcs_radio->service(GetTickCount(),campaign->audio.mission_speech_active());
+            if(!campaign->lcs_radio)return true;
+            const auto settings=continuous_native_settings();
+            return settings && campaign->lcs_radio->service(GetTickCount(),campaign->audio.mission_speech_active(),settings->effects_scale);
         });
     campaign->frame_updates.run("ending-tune",lcs::UpdateScope::auxiliary,original_audio_frame,
         "Original finale audio service unavailable",[](){
@@ -1931,6 +1933,16 @@ void __cdecl campaign_loaded(uint8_t,const char*,bool sidecar_ready,bool native_
     if(!sidecar_ready){pending_campaign_load.reset();if(campaign_load_diagnostic.empty())campaign_load_diagnostic="Native save path/slot could not be verified";}
     if(!native_loaded){pending_campaign_load.reset();campaign_load_diagnostic="Native SA save load did not complete";}
 }
+// Radio station names: CAERadioTrackManager::GetRadioStationName (0x4E8380)
+// writes the GXT key "FEA_R%d" (station-1). While the LCS radio plays, SA's
+// station slots carry the original LCS names (FEA_FM0..9, merged into the
+// package text); otherwise SA's own key is kept.
+ScriptProcess original_radio_name_display=nullptr,original_radio_name_engine1=nullptr,original_radio_name_engine2=nullptr;
+template<ScriptProcess* Original> void __fastcall on_radio_station_name(void* self,void*,int8_t station,char* key) {
+    if(campaign && campaign->lcs_radio && key)
+        if(const auto original=lcs::lcs_station_for_sa(station)){std::snprintf(key,8,"FEA_FM%u",unsigned(*original));return;}
+    reinterpret_cast<void(__thiscall*)(void*,int8_t,char*)>(*Original)(self,station,key);
+}
 ScriptProcess original_campaign_save=nullptr,original_campaign_load=nullptr;
 bool bind_campaign_target(uintptr_t site,uintptr_t target) {
     using Profile=lcs::SACampaignSaveProfile;
@@ -1984,6 +1996,12 @@ bool install_hook() {
     });
     const bool audio_main=audio_phase && install_call(0x53E98B,reinterpret_cast<ScriptProcess>(&on_audio_main),original_audio_main);
     const bool audio_menu=audio_phase && install_call(0x53E7BC,reinterpret_cast<ScriptProcess>(&on_audio_menu),original_audio_menu);
+    if(setting(L"Mode")==L"Campaign" && setting(L"LcsRadio")!=L"0" && lcs::sa_radio_profile_matches()) {
+        const bool names=install_call(0x4E9E21,reinterpret_cast<ScriptProcess>(&on_radio_station_name<&original_radio_name_display>),original_radio_name_display) &&
+            install_call(0x55B36A,reinterpret_cast<ScriptProcess>(&on_radio_station_name<&original_radio_name_engine1>),original_radio_name_engine1) &&
+            install_call(0x55B3AE,reinterpret_cast<ScriptProcess>(&on_radio_station_name<&original_radio_name_engine2>),original_radio_name_engine2);
+        if(!names)log("Original LCS radio station names unavailable: SA name call sites differ");
+    }
     const bool mission_hud=lcs::sa_hud_render_profile() && install_call(0x58FBEE,&on_mission_hud,original_mission_hud);
     lcs::sa_hud_render_bound(mission_hud);
     // Wrap the parent HUD call: DrawMissionTimers is skipped in widescreen,

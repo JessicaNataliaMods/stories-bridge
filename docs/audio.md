@@ -48,6 +48,9 @@ Com `LcsRadio=1` (padrão), as estações do LCS substituem o áudio das rádios
 - Enquanto uma estação do SA está ativa, a estação correspondente do LCS toca por uma saída própria, lida bloco a bloco de `AUDIO/MUSIC`.
 - O volume é o volume de rádio do menu (`0xBA6798`, 0..64) vezes o fader de música do SA (`CAEAudioHardware+0x418`), então o menu, os fades de cutscene e de missão continuam valendo. Durante falas de missão o rádio fica em 25, como no `cMusicManager::ServiceTrack`.
 - Enquanto a estação do LCS toca, o volume mestre de música do SA (`+0x410`) fica em zero para silenciar a transmissão do próprio SA. Ele volta ao valor do menu quando o rádio desliga ou quando a estação é a de músicas do usuário.
+- Ao começar uma estação, o volume sobe como no `ServiceTrack`: 10 quadros em silêncio e depois +6 por quadro até 100.
+- Sintonia: enquanto o SA troca de estação (passos pendentes em `0x8CB6F8+0x6C`/`+0x70`), a estação para e toca o chiado do rádio da polícia (`SFX_POLICE_RADIO_CRACKLE`, em loop, volume aleatório de 15 a 34) e até dois cliques de dial (`SFX_RADIO_DIAL_1..3`, volume 127, intervalo de 800 ms) depois de cada toque, como no `cMusicManager` do LCS. O chiado do próprio SA fica silenciado. Esses sons seguem o volume de efeitos do SA.
+- Nome da estação: o SA monta a chave de texto `FEA_R%d` em `GetRadioStationName` (`0x4E8380`). As três chamadas (`0x4E9E21`, `0x55B36A`, `0x55B3AE`) passam pela ponte, que devolve a chave original do LCS (`FEA_FM0..9`, presente no texto do pacote em todos os idiomas). Com `LcsRadio=0` as chamadas não são alteradas.
 
 Estações (ordem da tabela de streams do LCS) e a posição do SA que toca cada uma:
 
@@ -76,7 +79,6 @@ Posição de cada estação: como em `cMusicManager::GetTrackStartPos`, a estaç
 
 Limitações atuais:
 
-- O HUD mostra os nomes das estações do SA.
 - As posições das estações não são gravadas no save; recomeçam das posições de jogo novo ao carregar.
 - Enquanto uma estação do LCS toca, a música de ambiente `CITY` do script também fica sem som (no LCS rádio e ambiente dividem o mesmo stream).
 

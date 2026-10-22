@@ -185,6 +185,8 @@ bool AudioAdapter::tick_announcements(bool eligible) {
     }
     return true;
 }
+uint32_t AudioArchive::radio_crackle_index() const {return SFX_POLICE_RADIO_CRACKLE;}
+uint32_t AudioArchive::radio_dial_index(uint32_t dial) const {return SFX_RADIO_DIAL_1+dial%3;}
 AudioSample AudioArchive::phone_ring_sample() const {
     return sample(236); // independently verified retail dispatcher1B2768
 }
