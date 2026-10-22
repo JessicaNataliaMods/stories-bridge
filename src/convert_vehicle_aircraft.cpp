@@ -112,7 +112,7 @@ bool frame_within(rw::Frame* frame, rw::Frame* ancestor) {
 
 rw::Matrix relative_to_root(rw::Frame* frame, rw::Frame* root) {
     if(!frame || !root || !frame_within(frame, root))
-        throw std::runtime_error("Helicopter skid atomic is outside its clump root");
+        throw std::runtime_error("Helicopter geometry is outside its clump root");
     if(frame == root) {
         rw::Matrix identity;
         identity.setIdentity();
@@ -128,13 +128,15 @@ struct GeometryBounds {
     rw::V3d minimum{};
     rw::V3d maximum{};
     bool has_points = false;
+    size_t point_count = 0;
 
     void add(const rw::V3d& point) {
         if(!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z))
-            throw std::runtime_error("Helicopter skid geometry has nonfinite root-space bounds");
+            throw std::runtime_error("Helicopter geometry has nonfinite root-space bounds");
         if(!has_points) {
             minimum = maximum = point;
             has_points = true;
+            point_count = 1;
             return;
         }
         minimum.x = std::min(minimum.x, point.x);
@@ -143,65 +145,76 @@ struct GeometryBounds {
         maximum.x = std::max(maximum.x, point.x);
         maximum.y = std::max(maximum.y, point.y);
         maximum.z = std::max(maximum.z, point.z);
+        ++point_count;
     }
 };
 
-GeometryBounds skid_bounds_in_root(rw::Clump* heli, rw::Frame* skid, const char* name) {
+GeometryBounds component_bounds_in_root(rw::Clump* heli, rw::Frame* component, const char* name) {
     GeometryBounds bounds;
     auto* root = heli->getFrame();
     FORLIST(link, heli->atomics) {
         auto* atomic = rw::Atomic::fromClump(link);
         auto* frame = atomic->getFrame();
-        if(!frame_within(frame, skid))
+        if(!frame_within(frame, component))
             continue;
         auto* geometry = atomic->geometry;
         if(!geometry || geometry->instData || geometry->numMorphTargets != 1 ||
            !geometry->numVertices || !geometry->morphTargets[0].vertices)
-            throw std::runtime_error(std::string("Helicopter skid bounds require editable source vertices: ") + name);
+            throw std::runtime_error(std::string("Helicopter envelope requires editable source vertices: ") + name);
 
         const auto transform = relative_to_root(frame, root);
         const auto* vertices = geometry->morphTargets[0].vertices;
         for(int i = 0; i < geometry->numVertices; ++i) {
             const auto& source = vertices[i];
             if(!std::isfinite(source.x) || !std::isfinite(source.y) || !std::isfinite(source.z))
-                throw std::runtime_error(std::string("Helicopter skid has nonfinite source vertices: ") + name);
+                throw std::runtime_error(std::string("Helicopter envelope has nonfinite source vertices: ") + name);
             rw::V3d point;
             rw::V3d::transformPoints(&point, &source, 1, &transform);
             bounds.add(point);
         }
     }
     if(!bounds.has_points)
-        throw std::runtime_error(std::string("Helicopter skid has no source geometry: ") + name);
+        throw std::runtime_error(std::string("Helicopter envelope has no source geometry: ") + name);
     return bounds;
 }
 
 using WheelAnchors = std::array<rw::V3d, 4>; // Construction order follows the names below.
 
-WheelAnchors derive_skid_wheel_anchors(rw::Clump* heli, float wheel_size) {
+struct VirtualSuspension {
+    WheelAnchors anchors;
+    float track;
+    float wheelbase;
+    float body_bottom;
+    size_t source_vertices;
+};
+
+VirtualSuspension derive_body_envelope_wheel_anchors(rw::Clump* heli, float wheel_size) {
     if(!std::isfinite(wheel_size) || wheel_size <= 0.0f)
-        throw std::runtime_error("Virtual helicopter suspension anchors require a positive IDE wheel size");
-    auto* left_skid = unique_frame(heli, "skid_left");
-    auto* right_skid = unique_frame(heli, "skid_right");
-    const auto left = skid_bounds_in_root(heli, left_skid, "skid_left");
-    const auto right = skid_bounds_in_root(heli, right_skid, "skid_right");
-    const float left_x = left.minimum.x * 0.5f + left.maximum.x * 0.5f;
-    const float right_x = right.minimum.x * 0.5f + right.maximum.x * 0.5f;
-    if(left_x == right_x || left.minimum.y >= left.maximum.y || right.minimum.y >= right.maximum.y)
-        throw std::runtime_error("Helicopter skid bounds do not define distinct left/right and front/rear anchors");
+        throw std::runtime_error("Virtual helicopter suspension requires a positive IDE wheel size");
+    // The LCS class collision is not a reliable suspension source: it may be
+    // shared with an ambient vehicle or absent from the world collision list.
+    // The original chassis_hi vertices provide one stable source-owned envelope.
+    const auto body = component_bounds_in_root(heli, unique_frame(heli, "chassis_hi"), "chassis_hi");
+    const float track = body.maximum.x - body.minimum.x;
+    const float wheelbase = body.maximum.y - body.minimum.y;
+    // CHeli inherits SA's four-corner suspension setup. Require enough span
+    // for the converted wheel size and a clearly longitudinal aircraft body.
+    if(!std::isfinite(track) || !std::isfinite(wheelbase) ||
+       track <= wheel_size || wheelbase <= wheel_size || wheelbase <= track * 1.05f)
+        throw std::runtime_error("Original helicopter chassis envelope does not define a stable four-point suspension footprint");
 
     const float half_wheel = wheel_size * 0.5f;
-    const float left_z = left.minimum.z + half_wheel;
-    const float right_z = right.minimum.z + half_wheel;
+    const float anchor_z = body.minimum.z + half_wheel;
     WheelAnchors anchors{{
-        {right_x, right.maximum.y, right_z}, // wheel_rf_dummy
-        {left_x, left.maximum.y, left_z},    // wheel_lf_dummy
-        {right_x, right.minimum.y, right_z}, // wheel_rb_dummy
-        {left_x, left.minimum.y, left_z},    // wheel_lb_dummy
+        {body.maximum.x, body.maximum.y, anchor_z}, // wheel_rf_dummy
+        {body.minimum.x, body.maximum.y, anchor_z}, // wheel_lf_dummy
+        {body.maximum.x, body.minimum.y, anchor_z}, // wheel_rb_dummy
+        {body.minimum.x, body.minimum.y, anchor_z}, // wheel_lb_dummy
     }};
     for(const auto& anchor : anchors)
         if(!std::isfinite(anchor.x) || !std::isfinite(anchor.y) || !std::isfinite(anchor.z))
             throw std::runtime_error("Derived helicopter suspension anchor is nonfinite");
-    return anchors;
+    return {anchors, track, wheelbase, body.minimum.z, body.point_count};
 }
 
 bool has_native_wheel_dummies(rw::Clump* heli) {
@@ -240,7 +253,7 @@ void add_empty_wheel_dummy(rw::Clump* heli, const char* name, const rw::V3d& pos
     root->addChild(frame);
 }
 
-void add_skid_wheel_dummies(rw::Clump* heli, const WheelAnchors& anchors) {
+void add_virtual_wheel_dummies(rw::Clump* heli, const WheelAnchors& anchors) {
     static constexpr const char* names[] = {
         "wheel_rf_dummy", "wheel_lf_dummy", "wheel_rb_dummy", "wheel_lb_dummy"
     };
@@ -265,8 +278,6 @@ bool check_source_heli(rw::Clump* heli) {
 
     const bool has_wheels = has_native_wheel_dummies(heli);
     if(!has_wheels) {
-        unique_frame(heli, "skid_left");
-        unique_frame(heli, "skid_right");
         for(const char* name : {"wheel_rf_dummy", "wheel_lf_dummy", "wheel_rb_dummy", "wheel_lb_dummy"})
             require_name_available(heli, name);
     } else
@@ -316,9 +327,9 @@ void require_collision(const std::filesystem::path& collision) {
 void adapt_sa_heli(rw::Clump* heli, const std::filesystem::path& collision, float wheel_size) {
     require_collision(collision);
     const bool has_wheels = check_source_heli(heli);
-    WheelAnchors wheel_anchors{};
+    VirtualSuspension virtual_suspension{};
     if(!has_wheels)
-        wheel_anchors = derive_skid_wheel_anchors(heli, wheel_size);
+        virtual_suspension = derive_body_envelope_wheel_anchors(heli, wheel_size);
     else if(!std::isfinite(wheel_size) || wheel_size <= 0.0f)
         throw std::runtime_error("Helicopter adapter requires a positive converted IDE wheel size");
 
@@ -334,13 +345,26 @@ void adapt_sa_heli(rw::Clump* heli, const std::filesystem::path& collision, floa
         rename_component(heli, "rearrotor", "moving_rotor2", false, true);
 
     if(!has_wheels)
-        add_skid_wheel_dummies(heli, wheel_anchors);
+        add_virtual_wheel_dummies(heli, virtual_suspension.anchors);
 
     check_sa_heli(heli);
     adapt_sa_vehicle_common(heli, collision);
     std::cout << "sa_heli_class=true native_chassis_and_rotor_frames=true "
                  "source_geometry_and_transforms_preserved=true static_rotors_synthesized=false "
-              << "skid_suspension_dummies=" << (!has_wheels ? "derived" : "source") << ' ';
+              << "suspension_dummies=" << (has_wheels ? "source" : "virtual")
+              << " suspension_anchor_source=" << (has_wheels ? "native_frame_positions" : "chassis_hi_envelope");
+    if(!has_wheels)
+        std::cout << " suspension_source_vertices=" << virtual_suspension.source_vertices
+                  << " suspension_track=" << virtual_suspension.track
+                  << " suspension_wheelbase=" << virtual_suspension.wheelbase
+                  << " suspension_body_bottom=" << virtual_suspension.body_bottom
+                  << " suspension_wheel_size=" << wheel_size
+                  << " suspension_x_min=" << virtual_suspension.anchors[1].x
+                  << " suspension_x_max=" << virtual_suspension.anchors[0].x
+                  << " suspension_y_min=" << virtual_suspension.anchors[2].y
+                  << " suspension_y_max=" << virtual_suspension.anchors[0].y
+                  << " suspension_anchor_z=" << virtual_suspension.anchors[0].z;
+    std::cout << ' ';
 }
 
 void validate_sa_heli(const std::filesystem::path& path) {

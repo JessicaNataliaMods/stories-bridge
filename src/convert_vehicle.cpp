@@ -372,6 +372,20 @@ rw::Matrix relative_to_root(rw::Frame* f,rw::Frame* root) {
     return m;
 }
 void check(rw::Clump* car) {
+    // Retail TankControl reads CAR_MISC_C for the muzzle. Its fallback branch
+    // does not initialize the local later consumed by recoil (0x6AEE2B).
+    // The LCS barrel dummy is already the original muzzle, not new geometry.
+    if(std::strcmp(gta::getNodeName(car->getFrame()),"rhino")==0) {
+        auto muzzle=unique(car,"misc_c");
+        auto turret=unique(car,"misc_a");
+        auto pitch=unique(car,"misc_b");
+        if(!inside(muzzle,pitch) || !inside(pitch,turret) || unique(car,"windscreen_dummy",false))
+            throw std::runtime_error("Rhino muzzle must survive native damage-frame collapse inside misc_a/misc_b");
+        if(muzzle==car->getFrame() || muzzle->child || muzzle->objectList.count() || unique(car,"barrel_dummy",false))
+            throw std::runtime_error("SA Rhino requires its original empty barrel point bound to misc_c");
+        if(!std::isfinite(muzzle->matrix.pos.x) || !std::isfinite(muzzle->matrix.pos.y) || !std::isfinite(muzzle->matrix.pos.z))
+            throw std::runtime_error("SA Rhino muzzle position is not finite");
+    }
     if(unique(car,"chassis")==car->getFrame())throw std::runtime_error("SA chassis must be a child frame");
     auto main=unique(car,"wheel_rf_dummy");
     for(const char* name:{"wheel_lf_dummy","wheel_rb_dummy","wheel_lb_dummy"})unique(car,name);
@@ -605,6 +619,24 @@ void adapt_sa_car(rw::Clump* car,const std::filesystem::path& wheel_path,float w
                   const std::filesystem::path& collision_path) {
     if(!std::isfinite(wheel_scale) || wheel_scale<=0 || wheel_scale>4)throw std::runtime_error("Invalid original wheel scale");
     normalize_rcbandit_body_frame_names(car);
+    if(std::strcmp(gta::getNodeName(car->getFrame()),"rhino")==0) {
+        if(unique(car,"misc_c",false))throw std::runtime_error("Rhino muzzle is already adapted");
+        auto muzzle=unique(car,"barrel_dummy");
+        auto turret=unique(car,"windscreen_dummy");
+        if(!inside(muzzle,turret) || unique(car,"misc_a",false) || unique(car,"misc_b",false))
+            throw std::runtime_error("Rhino source turret hierarchy is ambiguous");
+        // Windscreen is damageable in SA: PreprocessHierarchy destroys all
+        // descendant frames, including a nested misc_c. Bind the LCS yaw
+        // pivot to the persistent turret slot instead. Preserve every mesh.
+        std::strcpy(gta::getNodeName(turret),"misc_a");
+        // LCS has no independent elevating gun mesh. An empty native pitch
+        // pivot elevates the muzzle only; original turret geometry stays rigid.
+        auto pitch=rw::Frame::create();pitch->matrix.setIdentity();
+        std::strcpy(gta::getNodeName(pitch),"misc_b");
+        auto parent=muzzle->getParent();muzzle->removeChild();
+        parent->addChild(pitch);pitch->addChild(muzzle);
+        std::strcpy(gta::getNodeName(muzzle),"misc_c");
+    }
     if(unique(car,"chassis",false))throw std::runtime_error("Vehicle is already adapted or has ambiguous chassis");
     std::vector<uint8_t> collision_bytes;
     if(!collision_path.empty()) {
@@ -626,15 +658,46 @@ void adapt_sa_car(rw::Clump* car,const std::filesystem::path& wheel_path,float w
     }
     auto instance=source->clone();auto frame=rw::Frame::create();
     // CSimpleModelInfo::CreateInstance resets the modelling-layout frame.
-    // SA CollapseFramesCB also discards the wheel child's matrix, so bake the
-    // exact LCS uniform wheel scale into the isolated original geometry.
     frame->matrix.setIdentity();
     auto g=instance->geometry;auto& morph=g->morphTargets[0];
-    for(int i=0;i<g->numVertices;++i) {
-        morph.vertices[i].x*=wheel_scale;morph.vertices[i].y*=wheel_scale;morph.vertices[i].z*=wheel_scale;
+    const bool rhino=std::strcmp(gta::getNodeName(car->getFrame()),"rhino")==0;
+    float sx=wheel_scale,sy=wheel_scale,sz=wheel_scale;
+    if(rhino) {
+        // SA applies the IDE wheel size in PreRender. Do not bake it again.
+        // Its tank draws six road wheels per side between the end dummies
+        // (five equal intervals), whereas LCS supplies three per side.
+        // Fit the original tyre radially to that native layout, retaining its
+        // source width and all vertices/triangles/UVs; keep physical IDE size.
+        float radial_radius=0;
+        for(int i=0;i<g->numVertices;++i)
+            radial_radius=std::max(radial_radius,std::hypot(morph.vertices[i].y,morph.vertices[i].z));
+        const auto front=unique(car,"wheel_rf_dummy")->matrix.pos;
+        const auto rear=unique(car,"wheel_rb_dummy")->matrix.pos;
+        const float spacing=std::abs(front.y-rear.y)/5.0f;
+        const float diameter=2.0f*radial_radius*wheel_scale;
+        if(!(spacing>0 && diameter>0))throw std::runtime_error("Rhino wheel layout is degenerate");
+        sx=1.0f;sy=sz=std::min(1.0f,spacing/diameter);
+        std::cout<<"rhino_native_wheel_spacing="<<spacing<<" source_wheel_radial_adapter="<<sy<<' ';
     }
-    morph.boundingSphere.center.x*=wheel_scale;morph.boundingSphere.center.y*=wheel_scale;morph.boundingSphere.center.z*=wheel_scale;
-    morph.boundingSphere.radius*=wheel_scale;
+    for(int i=0;i<g->numVertices;++i) {
+        morph.vertices[i].x*=sx;morph.vertices[i].y*=sy;morph.vertices[i].z*=sz;
+        if(rhino && morph.normals) {
+            auto& n=morph.normals[i];n.x/=sx;n.y/=sy;n.z/=sz;
+            const float length=std::sqrt(n.x*n.x+n.y*n.y+n.z*n.z);
+            if(length>0){n.x/=length;n.y/=length;n.z/=length;}
+        }
+    }
+    morph.boundingSphere.center.x*=sx;morph.boundingSphere.center.y*=sy;morph.boundingSphere.center.z*=sz;
+    if(rhino) {
+        float radius2=0;
+        for(int i=0;i<g->numVertices;++i) {
+            const float dx=morph.vertices[i].x-morph.boundingSphere.center.x;
+            const float dy=morph.vertices[i].y-morph.boundingSphere.center.y;
+            const float dz=morph.vertices[i].z-morph.boundingSphere.center.z;
+            radius2=std::max(radius2,dx*dx+dy*dy+dz*dz);
+        }
+        morph.boundingSphere.radius=std::sqrt(radius2);
+    } else morph.boundingSphere.radius*=wheel_scale;
     std::strcpy(gta::getNodeName(frame),"wheel");
     main->addChild(frame);instance->setFrame(frame);car->addAtomic(instance);
     gta::setPipelineID(instance,0);wheel->destroy();
@@ -690,6 +753,16 @@ void validate_sa_car(const std::filesystem::path& path) {
              <<" envmap_atomics_without_normals="<<render.envmap_atomics_without_normals
              <<" nonopaque_materials="<<render.nonopaque_materials
              <<" game_executed=false\n";
+}
+void validate_sa_rhino_muzzle(const std::filesystem::path& path) {
+    auto car=read_car(path);
+    try {
+        if(std::strcmp(gta::getNodeName(car->getFrame()),"rhino"))
+            throw std::runtime_error("Muzzle hotfix validation requires the original Rhino");
+        check(car);
+    } catch(...) {car->destroy();throw;}
+    car->destroy();
+    std::cout<<"rhino_muzzle_hierarchy_validated=true native_misc_c=true game_executed=false\n";
 }
 void adapt_sa_boat(rw::Clump* boat,const std::filesystem::path& collision_path) {
     if(!boat || !boat->getFrame())throw std::runtime_error("Missing original ferry clump");

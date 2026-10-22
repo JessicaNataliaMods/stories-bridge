@@ -15,6 +15,9 @@ namespace rw { struct Clump; }
 void adapt_sa_car(rw::Clump* car, const std::filesystem::path& wheel, float wheel_scale,
                   const std::filesystem::path& collision = {});
 void validate_sa_car(const std::filesystem::path& car);
+// Focused hierarchy check for a muzzle-only hotfix on an already approved car.
+// Does not re-approve or rewrite that package's material/shader policy.
+void validate_sa_rhino_muzzle(const std::filesystem::path& car);
 // Apply the shared SA vehicle material contract and optionally embed one
 // converted legacy COLL as COL3 without changing the clump hierarchy or root.
 void adapt_sa_vehicle_common(rw::Clump* vehicle, const std::filesystem::path& collision = {});

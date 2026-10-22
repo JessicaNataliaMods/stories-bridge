@@ -2,12 +2,13 @@
 import struct
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from ps2_export import collision
-from vehicle_source_collision import read_vehicle_collision
+from vehicle_source_collision import read_vehicle_collision, derive_body_collision
 
 
 class Chunk:
@@ -39,6 +40,23 @@ def source():
 
 
 class VehicleSourceCollisionTests(unittest.TestCase):
+    def test_explicit_derived_body_collision_transforms_body_and_excludes_rotor(self):
+        import ferrylib
+        root = ferrylib.Frame([1,0,0,0,1,0,0,0,1], [90,0,0], -1, 0, b'')
+        root.name = 'testheli'
+        body = ferrylib.Frame(root.rot, [2,3,4], 0, 0, b'')
+        body.name = 'chassis_hi'
+        rotor = ferrylib.Frame(root.rot, [0,0,99], 0, 0, b'')
+        rotor.name = 'toprotor'
+        clump = SimpleNamespace(frames=[root,body,rotor], atomics=[(1,0,0,0),(2,0,0,0)], raw=b'', geom_nodes=[None])
+        geometry = SimpleNamespace(pos=[(0,0,0),(1,0,0),(0,1,0)], tris=[(0,1,2,0)])
+        with patch('ferrylib.load', return_value=clump), patch('rwgeom.decode_geometry', return_value=geometry):
+            record = derive_body_collision('authored.dff', 'testheli')
+        self.assertEqual(struct.unpack_from('<I', record, 84)[0], 3)
+        self.assertEqual(struct.unpack_from('<3f', record, 88), (2,3,4))
+        self.assertEqual(struct.unpack_from('<I', record, 124)[0], 1)
+        self.assertEqual(struct.unpack_from('<3I4B', record, 128), (0,1,2,6,0,0,255))
+
     def test_bounds_ignore_ps2_vector_padding_and_keep_source_broad_phase(self):
         record = read_vehicle_collision(source(), 7, "testheli")
         self.assertEqual(struct.unpack_from("<10f", record, 32), (4, 1, 2, 3, 0, 0, 0, 6, 7, 8))

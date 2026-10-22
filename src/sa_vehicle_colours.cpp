@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86)
+#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86) && !defined(LCS_VEHICLE_COLOURS_METADATA_ONLY)
 #include <windows.h>
 #endif
 
@@ -26,7 +26,7 @@ namespace {
 
 constexpr size_t kExtendedColourCount = 138;
 constexpr size_t kLcsColourCount = 101;
-constexpr size_t kExpectedVehicleCount = 60;
+constexpr size_t kMaximumVehicleCount = 87;
 
 struct Rgb { uint8_t r=0,g=0,b=0; };
 struct VehicleColours {
@@ -129,7 +129,8 @@ Metadata read_metadata(const std::filesystem::path& path) {
         "Vehicle-colour metadata must define all 138 palette rows");
     require(std::all_of(result.has_map.begin(),result.has_map.end(),[](bool v){return v;}),
         "Vehicle-colour metadata must define all 101 LCS colour mappings");
-    require(result.vehicles.size()==kExpectedVehicleCount,"Vehicle-colour metadata must define all 60 campaign vehicles");
+    require(!result.vehicles.empty() && result.vehicles.size()<=kMaximumVehicleCount,
+        "Vehicle-colour metadata has an empty or oversized campaign vehicle set");
     std::sort(result.vehicles.begin(),result.vehicles.end(),[](const auto& a,const auto& b){return a.model<b.model;});
     for(size_t i=1;i<result.vehicles.size();++i)
         require(result.vehicles[i-1].model!=result.vehicles[i].model,"Duplicate vehicle model in colour metadata");
@@ -142,7 +143,7 @@ Metadata read_metadata(const std::filesystem::path& path) {
     return result;
 }
 
-#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86)
+#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86) && !defined(LCS_VEHICLE_COLOURS_METADATA_ONLY)
 
 constexpr size_t kSaColourCount = 127;
 constexpr size_t kNativeColourSlots = 128;
@@ -472,7 +473,7 @@ void validate_runtime_palette() {
 
 void sa_prepare_vehicle_colours(const std::filesystem::path& metadata_path) {
     const Metadata metadata=read_metadata(metadata_path);
-#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86)
+#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86) && !defined(LCS_VEHICLE_COLOURS_METADATA_ONLY)
     std::lock_guard<std::mutex> lock(g_mutex);
     require(!g_state.faulted,"Vehicle-colour consumer is faulted after an incomplete memory transaction");
     require(profile_matches(),"Vehicle-colour consumer requires the verified retail SA executable profile");
@@ -505,7 +506,7 @@ void sa_prepare_vehicle_colours(const std::filesystem::path& metadata_path) {
 
 std::vector<int32_t> sa_load_vehicle_colours(const std::filesystem::path& metadata_path) {
     const Metadata metadata=read_metadata(metadata_path);
-#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86)
+#if defined(_WIN32) && defined(_MSC_VER) && defined(_M_IX86) && !defined(LCS_VEHICLE_COLOURS_METADATA_ONLY)
     std::lock_guard<std::mutex> lock(g_mutex);
     require(!g_state.faulted,"Vehicle-colour consumer is faulted after an incomplete memory transaction");
     require(g_state.prepared && g_state.metadata_source==metadata.source,

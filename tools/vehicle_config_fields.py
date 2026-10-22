@@ -591,7 +591,8 @@ def _validate_special_numbers(values: Sequence[str], label: str) -> None:
 def convert_special_handling(source_text: str, source_handling: str,
                              native_handling: str,
                              physical_class: str, *,
-                             native_handling_id: Optional[int] = None) -> List[str]:
+                             native_handling_id: Optional[int] = None,
+                             dedicated_ferry_adapter: bool = False) -> List[str]:
     """Convert class-specific LCS rows consumed by SA's handling loader.
 
     Returns ready-to-write SA ``handling.cfg`` lines. Bike fields have the same
@@ -622,7 +623,10 @@ def convert_special_handling(source_text: str, source_handling: str,
         _validate_special_numbers(fields[1:], "LCS bike handling")
         return ["! " + native_handling + " " + " ".join(fields[1:])]
     if vehicle_class == "boat":
-        if source_handling.upper() not in LCS_BOAT_HANDLING_NAMES:
+        ferry = dedicated_ferry_adapter and source_handling.upper() == "FERRY" and native_handling.upper() == "TROPIC"
+        if dedicated_ferry_adapter and not ferry:
+            raise ValueError("Dedicated ferry physics requires the FERRY to TROPIC binding")
+        if source_handling.upper() not in LCS_BOAT_HANDLING_NAMES and not ferry:
             raise ValueError(
                 "LCS boat special handling key is outside the boat pointer range: "
                 + source_handling
@@ -661,7 +665,8 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
                 texture_dictionary: str, handling_name: str,
                 wheel_model_asset: Optional[str] = None,
                 physical_class: Optional[str] = None,
-                lcs_handling_flags: Optional[int] = None) -> Dict[str, object]:
+                lcs_handling_flags: Optional[int] = None,
+                plane_lod_adapter: bool = False) -> Dict[str, object]:
     """Adapt an LCS vehicle row to SA's native vehicles.ide layout.
 
     The optional physical_class selects the native SA vehicle type, while the
@@ -670,33 +675,42 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
     their misc is a wheel ID even though the matching plane/helicopter handling
     flag selects SA's physical type. Cross-type car adaptation therefore
     requires the original handling flags and accepts only the matching plane
-    or helicopter class bit.
+    or helicopter class bit. The source ferry can map to SA's boat type only
+    when its original handling flags carry the boat class bit; ferry-specific
+    doors, ramps, and scripted behavior remain the dedicated package's job.
     Converted car wheel geometry is embedded and receives misc -1; bikes
-    preserve steering angle and scale. Positive source plane LOD model IDs
-    are rejected because SA consumes the corresponding misc token as a wheel
-    model ID, with no proven equivalent for the original LOD reference. SA's
-    native train type accepts the common vehicle row and ignores wheel-only
-    values.
+    preserve steering angle and scale. A source plane's misc is a LOD model
+    ID, while SA consumes that field as a wheel model ID. Positive source
+    plane LODs therefore require the explicit plane_lod_adapter option; their
+    ID is retained in returned class-adaptation metadata and SA receives -1.
+    SA's native train type accepts the common vehicle row and ignores
+    wheel-only values.
     """
     source = [str(value).strip() for value in lcs_fields]
     if len(source) < len(LCS_IDE_FIELD_NAMES):
         raise ValueError("LCS vehicles.ide row must have 14 fields")
     source_type = source[3].lower()
     vehicle_class = (physical_class or source_type).strip().lower()
+    if type(plane_lod_adapter) is not bool:
+        raise ValueError("plane_lod_adapter must be an explicit boolean")
+    if plane_lod_adapter and (source_type != "plane" or vehicle_class != "plane"):
+        raise ValueError("Plane LOD adaptation applies only to source and target plane rows")
     if source_type not in {"car", "bike", "boat", "train", "heli", "plane", "ferry"}:
         raise ValueError("Unsupported LCS vehicles.ide source type: " + source_type)
     if vehicle_class not in SA_VEHICLE_TYPES:
         raise ValueError("Unsupported LCS vehicle class for SA vehicles.ide: " + vehicle_class)
+    ferry_to_boat = source_type == "ferry" and vehicle_class == "boat"
     if source_type != vehicle_class:
-        if source_type != "car" or vehicle_class not in {"plane", "heli"}:
+        car_to_aircraft = source_type == "car" and vehicle_class in {"plane", "heli"}
+        if not ferry_to_boat and not car_to_aircraft:
             raise ValueError(
                 "LCS IDE type %s does not match requested physical class %s"
                 % (source_type, vehicle_class)
             )
         if lcs_handling_flags is None:
             raise ValueError(
-                "LCS car IDE to %s adaptation requires original handling flags"
-                % vehicle_class
+                "LCS %s IDE to %s adaptation requires original handling flags"
+                % (source_type, vehicle_class)
             )
         if not isinstance(lcs_handling_flags, int) or not 0 <= lcs_handling_flags <= 0xFFFFFFFF:
             raise ValueError("LCS handling flags are outside uint32 range")
@@ -706,7 +720,7 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
         ]
         if len(flagged_classes) != 1 or flagged_classes[0] != vehicle_class:
             raise ValueError(
-                "LCS car IDE physical class does not match its handling flags"
+                "LCS IDE physical class does not match its handling flags"
             )
     if source[7].lower() not in SA_VEHICLE_CLASSES:
         raise ValueError("LCS vehicle class is not accepted by the SA FileLoader: " + source[7])
@@ -742,6 +756,7 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
     misc_source_field = LCS_IDE_FIELD_NAMES[11]
     misc_rule = "LCS does not consume misc for this type; use the no-wheel-model default"
     wheel_rule = "use the SA FileLoader's explicit 0.7 wheel-size defaults for a source type with no wheel-scale consumer"
+    plane_lod_id: Optional[int] = None
     if source_type == "car":
         misc_rule = "source car wheel geometry is converted and embedded by --sa-car; -1 prevents a second standalone wheel model"
         misc_field = "wheel_model_id"
@@ -766,16 +781,22 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
             raise ValueError("Invalid LCS plane LOD model ID") from error
         if plane_lod_id < -1:
             raise ValueError("LCS plane LOD model ID must be -1 or nonnegative")
-        if plane_lod_id >= 0:
+        if plane_lod_id >= 0 and not plane_lod_adapter:
             raise ValueError(
-                "LCS plane LOD model ID has no proven equivalent in SA's vehicles.ide misc field, "
-                "which SA consumes as a wheel model ID"
+                "LCS plane LOD model ID requires the explicit plane LOD adapter; "
+                "SA consumes vehicles.ide misc as a wheel model ID"
             )
         misc_source_field = "plane_lod_model_id"
-        misc_rule = (
-            "LCS -1 means no external plane LOD; retain SA wheel_model_id -1 "
-            "instead of binding an unrelated wheel model"
-        )
+        if plane_lod_adapter:
+            misc_rule = (
+                "retain the source plane LOD ID in plane_lod_adaptation metadata; "
+                "SA misc is -1 because its corresponding field is wheel_model_id"
+            )
+        else:
+            misc_rule = (
+                "LCS -1 means no external plane LOD; retain SA wheel_model_id -1 "
+                "instead of binding an unrelated wheel model"
+            )
         front_wheel_size = rear_wheel_size = "1.0"
         wheel_rule = "LCS FileLoader fixes plane wheel scale at 1.0; it does not consume the source scale token"
     elif source_type == "train":
@@ -794,6 +815,8 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
         "retain the original LCS train class as SA's native VEHICLE_TYPE_TRAIN; "
         "the SA loader accepts the common vehicle row and selects its native train renderer"
         if vehicle_class == "train" else
+        "map the original LCS ferry IDE type to SA's native boat type only after its handling flags prove boat behavior; ferry doors, ramps, and scripted behavior are supplied by the dedicated ferry package"
+        if ferry_to_boat else
         "select the native SA vehicle type from the physical class; retain source IDE type separately when interpreting original misc/wheel fields"
     )
     provenance: List[Dict[str, object]] = [
@@ -857,9 +880,35 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
                 "The LCS loader does not consume misc for this type; SA receives -1 so it cannot attach a donor wheel model."
             ),
         })
-    return {
+    result: Dict[str, object] = {
         "fields": output,
         "provenance": provenance,
         "unmapped_source_fields": unmapped,
         "required_special_handling": vehicle_class in {"bike", "boat", "heli", "plane"},
     }
+    if plane_lod_adapter:
+        result["plane_lod_adaptation"] = {
+            "source_field": "plane_lod_model_id",
+            "source_value": source[11],
+            "source_lod_model_id": plane_lod_id if plane_lod_id is not None and plane_lod_id >= 0 else None,
+            "target_field": "wheel_model_id",
+            "target_value": misc_value,
+            "sa_wheel_size_front": front_wheel_size,
+            "sa_wheel_size_rear": rear_wheel_size,
+            "rule": (
+                "SA has no equivalent external plane LOD slot; preserve its LCS ID in metadata, "
+                "use no wheel model, and retain the SA plane wheel-size values"
+            ),
+        }
+    if ferry_to_boat:
+        result["ferry_boat_adaptation"] = {
+            "source_vehicle_type": "ferry",
+            "target_vehicle_type": "boat",
+            "source_handling_flags": "0x%08X" % lcs_handling_flags,
+            "required_source_class_flag": "0x00080000",
+            "rule": (
+                "use the native SA boat class after the original ferry handling row proves boat behavior; "
+                "the dedicated ferry package supplies door/ramp geometry and scripted service"
+            ),
+        }
+    return result

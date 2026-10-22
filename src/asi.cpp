@@ -77,6 +77,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include <set>
 
 namespace {
+bool vehicle_colour_profile_ready=false;
 HMODULE module = nullptr;
 using ScriptProcess = void (__cdecl*)();
 ScriptProcess original_process = nullptr, original_startup_process = nullptr, original_phone_phase = nullptr;
@@ -465,7 +466,7 @@ struct Campaign {
         return &credit_text[language];
     }
     Campaign(const std::filesystem::path& directory,bool first=false,bool restoring=false):image(lcs::ScmImage::load(source_file(directory,L"DATA/MAIN.SCM"))),adapter(image),runtime(image),audio_archive(lcs::AudioArchive::Ps2Audio{},original_audio_directory()),audio(audio_archive),continuous_runtime(audio_archive) {
-        if(setting(L"VehicleColours")==L"1")
+        if(vehicle_colour_profile_ready)
             adapter.bind_vehicle_colours(lcs::sa_load_vehicle_colours(resource_directory()/L"data/lcs/vehicle-colours.dat"));
         continuous_sounds.available=[this](){return !halted && continuous_runtime.available();};
         continuous_sounds.create=[this](const lcs::ContinuousSoundObjects::Snapshot& source){return continuous_runtime.create(source);};
@@ -1974,10 +1975,9 @@ bool install_hook() {
         return false;
     }
     if(setting(L"VehicleColours")==L"1") {
-        try {lcs::sa_prepare_vehicle_colours(resource_directory()/L"data/lcs/vehicle-colours.dat");}
+        try {lcs::sa_prepare_vehicle_colours(resource_directory()/L"data/lcs/vehicle-colours.dat");vehicle_colour_profile_ready=true;}
         catch(const std::exception& error) {
-            log(std::string("Vehicle colour profile refused before native startup: ")+error.what());
-            return false;
+            log(std::string("Vehicle colours unavailable; campaign startup retained: ")+error.what());
         }
     }
     const bool storage=install_campaign_storage();

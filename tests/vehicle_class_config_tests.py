@@ -23,6 +23,15 @@ def ide_row(vehicle_type="bike", handling="MOPED", misc="10", wheel_scale="1.0")
 
 
 class VehicleClassConfigTests(unittest.TestCase):
+    def test_ferry_boat_physics_requires_dedicated_binding_and_reorders_camera(self):
+        text = '% FERRY ' + ' '.join(str(i) for i in range(1, 15)) + '\n'
+        with self.assertRaises(ValueError):
+            convert_special_handling(text, 'FERRY', 'TROPIC', 'boat')
+        with self.assertRaises(ValueError):
+            convert_special_handling(text, 'FERRY', 'OTHER', 'boat', dedicated_ferry_adapter=True)
+        row = convert_special_handling(text, 'FERRY', 'TROPIC', 'boat', dedicated_ferry_adapter=True)[0].split()
+        self.assertEqual(row, ['%', 'TROPIC'] + [str(i) for i in range(1,8)] + [str(i) for i in range(9,15)] + ['8'])
+
     def test_bike_class_flag_and_special_row_keep_original_values(self):
         handling_values = ["1.0"] * 30
         handling_values[14] = "F"
@@ -169,6 +178,91 @@ class VehicleClassConfigTests(unittest.TestCase):
                 handling_name="NATIVE_PLANE",
             )
 
+    def test_plane_lod_adapter_preserves_airtrain_lod_and_sa_wheel_sizes(self):
+        row = ide_row("plane", "AIRTRAIN", "257", "0.0")
+        converted = convert_ide(
+            row,
+            model_id=905,
+            model_name="NATIVE_AIRTRAIN",
+            texture_dictionary="NATIVE_AIRTRAIN",
+            handling_name="NATIVE_AIRTRAIN",
+            plane_lod_adapter=True,
+        )
+        self.assertEqual(converted["fields"][11], "-1")
+        self.assertEqual(converted["fields"][12:14], ["1.0", "1.0"])
+        self.assertEqual(converted["provenance"][11]["source_field"], "plane_lod_model_id")
+        self.assertEqual(converted["provenance"][11]["source_value"], "257")
+        self.assertEqual(converted["plane_lod_adaptation"]["source_lod_model_id"], 257)
+        self.assertEqual(converted["plane_lod_adaptation"]["target_value"], "-1")
+
+    def test_plane_lod_adapter_records_absent_deaddodo_lod(self):
+        row = ide_row("plane", "DEADDODO", "-1", "0.0")
+        converted = convert_ide(
+            row,
+            model_id=906,
+            model_name="NATIVE_DEADDODO",
+            texture_dictionary="NATIVE_DEADDODO",
+            handling_name="NATIVE_DEADDODO",
+            plane_lod_adapter=True,
+        )
+        self.assertEqual(converted["fields"][11], "-1")
+        self.assertEqual(converted["fields"][12:14], ["1.0", "1.0"])
+        self.assertEqual(converted["provenance"][11]["source_value"], "-1")
+        self.assertIsNone(converted["plane_lod_adaptation"]["source_lod_model_id"])
+
+    def test_plane_lod_adapter_rejects_non_plane_source_rows(self):
+        row = ide_row("car", "DODO", "256", "1.0")
+        with self.assertRaisesRegex(ValueError, "only to source and target plane rows"):
+            convert_ide(
+                row,
+                model_id=907,
+                model_name="NATIVE_DODO",
+                texture_dictionary="NATIVE_DODO",
+                handling_name="NATIVE_DODO",
+                wheel_model_asset="embedded-original",
+                physical_class="plane",
+                lcs_handling_flags=0x00040000,
+                plane_lod_adapter=True,
+            )
+
+    def test_ferry_uses_sa_boat_type_only_with_original_boat_flag(self):
+        row = ide_row("ferry", "FERRY", "0", "0.0")
+        converted = convert_ide(
+            row,
+            model_id=908,
+            model_name="TROPIC",
+            texture_dictionary="TROPIC",
+            handling_name="TROPIC",
+            physical_class="boat",
+            lcs_handling_flags=0x00080004,
+        )
+        self.assertEqual(converted["fields"][3], "boat")
+        self.assertEqual(converted["fields"][11], "-1")
+        self.assertEqual(
+            converted["ferry_boat_adaptation"]["source_handling_flags"], "0x00080004"
+        )
+        self.assertEqual(converted["ferry_boat_adaptation"]["required_source_class_flag"], "0x00080000")
+
+        with self.assertRaisesRegex(ValueError, "requires original handling flags"):
+            convert_ide(
+                row,
+                model_id=908,
+                model_name="TROPIC",
+                texture_dictionary="TROPIC",
+                handling_name="TROPIC",
+                physical_class="boat",
+            )
+        with self.assertRaisesRegex(ValueError, "does not match its handling flags"):
+            convert_ide(
+                row,
+                model_id=908,
+                model_name="TROPIC",
+                texture_dictionary="TROPIC",
+                handling_name="TROPIC",
+                physical_class="boat",
+                lcs_handling_flags=0x00020000,
+            )
+
     def test_train_keeps_native_type_and_explicit_common_group_zero(self):
         ide = ide_row("train", "TRAIN", "17", "3.0")
         ide[7] = "ignore"
@@ -182,7 +276,8 @@ class VehicleClassConfigTests(unittest.TestCase):
         )
         self.assertEqual(converted_ide["fields"][3], "train")
         self.assertEqual(len(converted_ide["fields"]), 15)
-        self.assertEqual(converted_ide["provenance"][3]["source_value"], "train")
+        self.assertEqual(converted_ide["provenance"][3]["value"], "train")
+        self.assertEqual(converted_ide["provenance"][3]["source_index"], 3)
         self.assertEqual(converted_ide["provenance"][11]["target_field"], "unused_optional_misc")
 
         handling_values = ["1.0"] * 30

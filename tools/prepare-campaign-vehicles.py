@@ -12,10 +12,11 @@ import re
 import struct
 import subprocess
 import shutil
+import sys
 from ps2_world import Game
 from vehicle_config_fields import convert_handling as adapt_handling, convert_ide as adapt_ide, convert_special_handling
 from vehicle_config import convert_carcols, parse_carcols
-from vehicle_source_collision import read_vehicle_collision
+from vehicle_source_collision import read_vehicle_collision, derive_body_collision
 
 ROOT = Path(__file__).resolve().parents[1]
 TYPE_FLAGS = {0x10000: "bike", 0x20000: "heli", 0x40000: "plane", 0x80000: "boat"}
@@ -26,10 +27,10 @@ CLASS_BLOCKERS = {
 }
 # Dedicated engine behavior depends on these SA IDs. Name matches are reserved
 # first; ordinary unmatched cars use ordinary car slots, never special classes.
-ALIASES = {"hotrod": "hotknife", "kuruma": "primo", "police": "copcarla", "fbicar": "fbiranch", "chopper": "sparrow", "train": "streak"}
+ALIASES = {"hotrod": "hotknife", "kuruma": "primo", "police": "copcarla", "fbicar": "fbiranch", "chopper": "sparrow", "escape": "raindanc", "train": "streak", "ferry": "tropic"}
 RESERVED = set("firetruk trash ambulan rhino towtruck combine forklift vortex kart tractor caddy rcbandit rctiger securica bus coach mrwhoop barracks packer tanker cement sweeper dumper dozer utility flatbed firela hotknife copcarla copcarsf copcarvg copcarru swatvan fbiranch fbitruck enforcer".split())
 RESERVED.add("tropic")  # The separately converted mission ferry owns this slot.
-RESERVED.update({"leviathn", "seaspar", "cargobob", "raindanc"})
+RESERVED.update({"leviathn", "seaspar", "cargobob"})
 
 
 def sha(path):
@@ -202,7 +203,9 @@ def validate(output, converter):
             kind = record.get("PhysicalClass", "car")
             validator = {"car": "--validate-sa-car", "bike": "--validate-sa-bike",
                          "boat": "--validate-sa-generic-boat", "heli": "--validate-sa-heli",
-                         "plane": "--validate-sa-dodo-plane", "train": "--validate-sa-train"}[kind]
+                         "plane": "--validate-sa-dodo-plane" if record["Name"] == "dodo" else "--validate-sa-ambient-plane", "train": "--validate-sa-train"}[kind]
+            if record["Name"] == "ferry":
+                validator = "--validate-sa-boat"
             run(converter, output / "models" / (name + ".dff"), validator)
     run(converter, output / "models", "--validate-actors")
     run(converter, output / "vehicles.col", "--validate-col")
@@ -277,6 +280,8 @@ def prepare(args):
                 if collision is None:
                     raise ValueError("Prepared vehicle lost its source collision: " + name)
                 collisions[name] = collision
+            elif record.get("CollisionSource") == "Derived original rigid body triangles":
+                collisions[name] = derive_body_collision(entities / "resources" / name / (name + ".dff"), name)
             continue
         fields = lcs_handling.get(row[4])
         kind = row[3]
@@ -290,9 +295,7 @@ def prepare(args):
         vehicles.append(record)
         if not fields:
             record["Reason"] = "No handling row in the original retail library"
-        elif name == "ferry":
-            record["Reason"] = "Already handled by the dedicated mission ferry package (TROPIC); preserve its doors and ramps"
-        elif kind not in {"car", "bike", "boat", "heli", "train"} and not (kind == "plane" and name == "dodo"):
+        elif kind not in {"car", "bike", "boat", "heli", "train", "plane"}:
             record["Reason"] = CLASS_BLOCKERS.get(kind, "Requires its original " + kind + " component/physics adapter")
         else:
             _, unknown = convert_handling(fields, row[4], row)
@@ -305,11 +308,15 @@ def prepare(args):
             else:
                 if name not in collisions or not collision_has_volumes(collisions[name]):
                     collision = source_collision(record["LcsId"], name)
-                    if collision is None:
+                    if collision is None and name == "escape":
+                        collision = derive_body_collision(entities / "resources" / name / (name + ".dff"), name)
+                        record["CollisionSource"] = "Derived original rigid body triangles"
+                        record["ClassAdaptations"] = ["Source has no physical collision; SA collision uses original rigid body triangles with CAR surface, excluding rotating rotors. Explicit native-physics adaptation, not retail collision recovery."]
+                    elif collision is None:
                         record["Reason"] = "Original vehicle has no named collision and GAME.DTZ model info has a null collision pointer"
                         continue
                     collisions[name] = collision
-                    record["CollisionSource"] = "PS2 GAME.DTZ"
+                    record.setdefault("CollisionSource", "PS2 GAME.DTZ")
                 desired = native_names.get(ALIASES.get(name, name))
                 if desired and desired[3] == kind:
                     if int(desired[0]) in used:
@@ -419,7 +426,7 @@ def prepare(args):
             try:
                 definition = adapt_ide(row, model_id=int(slot[0]), model_name=alias,
                     texture_dictionary=slot[2], handling_name=slot[4], wheel_model_asset=record["OriginalWheel"], physical_class=kind,
-                    lcs_handling_flags=int(lcs_handling[row[4]][31], 16))
+                    lcs_handling_flags=int(lcs_handling[row[4]][31], 16), plane_lod_adapter=row[3] == "plane")
                 physics = adapt_handling(lcs_handling[row[4]], slot[4], row, physical_class=kind)
                 # Vehicle clumps must carry their own native COLModel.
                 legacy_col = out / "checks" / (name + "-source.col")
@@ -437,17 +444,34 @@ def prepare(args):
                     conversion = ["--sa-" + mode, out / "wheels" / (record["OriginalWheel"] + ".dff"), row[12], mapped_col]
                     validator = "--validate-sa-" + mode
                 else:
-                    mode = {"bike": "bike", "boat": "generic-boat", "heli": "heli", "train": "train"}[kind]
+                    mode = {"bike": "bike", "boat": "generic-boat", "heli": "heli", "train": "train", "plane": "ambient-plane"}[kind]
+                    if name == "ferry":
+                        split_dff = out / "checks/ferry-doors.dff"
+                        audit_path = out / "checks/ferry-door-split-audit.json"
+                        result = subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("split_ferry_doors.py")), str(original_dff), str(split_dff), "--audit", str(audit_path)], capture_output=True, text=True)
+                        if result.returncode:
+                            raise ValueError("Original ferry door/ramp split failed: " + result.stdout + result.stderr)
+                        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                        if not audit["world_space_triangle_multiset_identical"]:
+                            raise ValueError("Ferry split changed original world-space geometry")
+                        original_dff = split_dff
+                        mode = "boat"
+                        record["DedicatedFerryAdapter"] = True
+                        record["ClassAdaptations"] = ["Preserve dedicated TROPIC boat hierarchy and original door/ramp atomics via audited source triangle split. Ferry services remain owned by the existing runtime adapter."]
                     conversion = ["--sa-" + mode, mapped_col]
                     validator = "--validate-sa-" + mode
-                    if kind == "heli":
+                    if kind in {"heli", "plane"}:
                         conversion.append(definition["fields"][12])
                 special = convert_special_handling(source_handling_text, row[4], slot[4], kind,
-                                                  native_handling_id=flying_ids.get(slot[4]))
+                                                  native_handling_id=flying_ids.get(slot[4]), dedicated_ferry_adapter=name == "ferry")
                 if kind in {"heli", "plane"}:
                     record["NativeHandlingId"] = flying_ids[slot[4]]
                 if name == "dodo":
                     record["ClassAdaptations"] = ["Use native SA CPlane flight and four wheel nodes; retain original wing/boot/windscreen damage meshes without SA plane damage slots; native renderer hides the damaged alternatives"]
+                elif kind == "plane":
+                    record["ClassAdaptations"] = ["Use native SA CPlane; retain original front/rear wheel geometry without cloning; derive empty native suspension nodes from original wheel mesh and pivots; source LOD model ID remains metadata rather than an SA wheel ID."]
+                elif kind == "heli" and name in {"escape", "chopper"}:
+                    record.setdefault("ClassAdaptations", []).append("SA four-point virtual suspension uses root-space original chassis envelope; source rotor, skid and body geometry retained. This is a native-physics adaptation of the source ambient helicopter.")
                 if kind == "train":
                     record["ClassAdaptations"] = ["Use native SA CTrain motion and track consumers; retain the original static wheel geometry, bind side door pivots and map source door low LOD to native VLO"]
                 log += "\n" + run(args.converter, original_dff, out / "models" / (alias + ".dff"), *conversion)
@@ -523,7 +547,10 @@ def prepare(args):
         if colour_row.model in selected_names:
             if colour_row.section != "car":
                 raise ValueError("Original LCS cars require exactly two colour channels")
-            indices = colour_row.color_indices
+            # SA stores exactly eight two-channel variants per model. Retain
+            # all source pairs in the manifest and publish only the bounded
+            # native array, never a row that prevents campaign startup.
+            indices = colour_row.color_indices[:16]
             colour_lines.append("car " + " ".join(map(str,
                 (selected_names[colour_row.model]["NativeId"], len(indices)//2, *indices))))
     (out / "vehicle-colours.dat").write_text("\n".join(colour_lines) + "\n", encoding="ascii")
@@ -538,6 +565,10 @@ def prepare(args):
                 "VehicleDefinitions": len(original), "NativeModelCount": len(native), "AdditionalArchiveSlots": 0,
                 "PreparedCount": sum(r["Prepared"] for r in vehicles), "Vehicles": vehicles,
                 "VehicleColours": {"PreparedPath": "vehicle-colours.dat", "TargetPath": "data/lcs/vehicle-colours.dat",
+                    "NativeVariationLimit": 8,
+                    "VariationAdapters": [{"SourceModel": row.model, "SourceIndices": list(row.color_indices),
+                        "Rule": "SA supports eight pairs; publish the first eight in source order"}
+                        for row in parsed_colours.vehicle_rows if row.model in selected_names and len(row.color_indices)>16],
                     "RequiredConsumer": "sa_load_vehicle_colours", "PaletteRows": len(parsed_colours.colors),
                     "OriginalIndexCount": len(colours.lcs_to_sa_colour_map), "Report": colours.report.as_dict()},
                 "NativeColourLoader": colour_loader,

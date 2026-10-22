@@ -278,9 +278,10 @@ def load_fleet(fleet):
         values = [str(item[key]).casefold() for item in mappings]
         if len(set(values)) != len(values):
             raise ValueError("Prepared fleet has duplicate " + key + " bindings")
-    if any(item["LcsId"] == 192 or item["NativeId"] == 454 or item["NativeName"].casefold() == "tropic"
-           for item in mappings):
-        raise ValueError("Prepared fleet must leave the existing ferry TROPIC slot untouched")
+    for item, source in zip(mappings, vehicles):
+        if item["LcsId"] == 192 or item["NativeId"] == 454 or item["NativeName"].casefold() == "tropic":
+            if (item["LcsId"], item["NativeId"], item["NativeName"].casefold(), item["PhysicalClass"]) != (192, 454, "tropic", "boat") or not source.get("DedicatedFerryAdapter"):
+                raise ValueError("Ferry TROPIC slot requires its dedicated door/ramp adapter")
     # Resolve the prepared model and the TXD dictionary selected by its final IDE row.
     fleet_ide_text = (fleet / "vehicles.ide").read_text(encoding="ascii")
     fleet_rows = read_ide(fleet_ide_text)
@@ -398,7 +399,7 @@ def check_other_overrides(game, basenames):
         raise ValueError("Another modloader mod overrides a selected fleet asset/config: " + "; ".join(conflicts[:20]))
 
 
-def mount(fleet, package, game):
+def mount(fleet, package, game, replace_existing=False):
     fleet = Path(fleet).resolve()
     package = Path(package).resolve()
     game = Path(game).resolve()
@@ -413,10 +414,24 @@ def mount(fleet, package, game):
     manifest, manifest_path, source_mappings, mappings, fleet_ide_text, final_assets = load_fleet(fleet)
     campaign_path = package / "metadata/campaign.json"
     campaign = read_json(campaign_path)
-    if int(campaign.get("version", 0)) <= 70 or campaign.get("vehicleFleet"):
+    if int(campaign.get("version", 0)) <= 70 or (campaign.get("vehicleFleet") and not replace_existing):
         raise ValueError("Use a new, unmounted campaign stage created after v70")
-    if (package / REPORT_PATH).exists():
+    if (package / REPORT_PATH).exists() and not replace_existing:
         raise ValueError("Stage already contains campaign-vehicles metadata")
+    if replace_existing:
+        # Replacing an owned fleet is allowed only in a fully pinned package.
+        # This also covers the separately mounted ferry's approved handling.
+        pins = read_json(package / "metadata/package-files.json")
+        pinned = {row["relative"].replace("\\", "/"): row for row in pins}
+        required = [*CONFIG_PATHS, REPORT_PATH, "metadata/campaign.json"]
+        for relative in required:
+            row = pinned.get(relative)
+            if not row or digest(package / relative).lower() != row["sha256"].lower():
+                raise ValueError("Owned fleet upgrade input changed: " + relative)
+        prior = read_json(package / REPORT_PATH)
+        for row in prior["Files"]:
+            if digest(package / row["relative"]).lower() != row["sha256"].lower():
+                raise ValueError("Previous fleet asset changed: " + row["relative"])
 
     config_paths = {relative: package / relative for relative in CONFIG_PATHS}
     game_ide = game / "data/vehicles.ide"
@@ -434,6 +449,23 @@ def mount(fleet, package, game):
     stage_handling_text = config_paths["data/handling.cfg"].read_text(encoding="ascii")
     native_ide_text = game_ide.read_text(encoding="ascii")
     native_handling_text = game_handling.read_text(encoding="ascii")
+    if replace_existing:
+        names = {item["NativeHandling"] for item in mappings}
+        def key(line):
+            fields = line.strip().split()
+            if not fields or fields[0].startswith(";"):
+                return None
+            return tuple(fields[:2]) if fields[0] in {"!", "%", "$", "^"} else (fields[0],)
+        native_lines = {key(line): line for line in native_handling_text.splitlines(keepends=True) if key(line)}
+        restored = []
+        for line in stage_handling_text.splitlines(keepends=True):
+            identity = key(line)
+            if identity and identity[-1] in names:
+                if identity not in native_lines:
+                    raise ValueError("Owned handling has no native baseline: " + str(identity))
+                line = native_lines[identity]
+            restored.append(line)
+        stage_handling_text = "".join(restored)
     merged_ide, selected_ide = merge_ide(stage_ide_text, fleet_ide_text, native_ide_text, mappings)
     merged_handling, selected_handling = merge_handling(stage_handling_text,
                                                         (fleet / "handling.cfg").read_text(encoding="ascii"),
@@ -555,5 +587,6 @@ if __name__ == "__main__":
     parser.add_argument("--fleet", type=Path, required=True, help="Prepared campaign-vehicles output directory")
     parser.add_argument("--package", type=Path, required=True, help="A new campaign stage outside modloader")
     parser.add_argument("--game", type=Path, required=True, help="Read-only native SA reference root")
+    parser.add_argument("--replace-existing", action="store_true", help="Upgrade a hash-verified owned fleet in an existing offline campaign stage")
     args = parser.parse_args()
-    print(json.dumps(mount(args.fleet, args.package, args.game)))
+    print(json.dumps(mount(args.fleet, args.package, args.game, args.replace_existing)))

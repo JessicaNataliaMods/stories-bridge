@@ -12,6 +12,53 @@ from ps2_export import collision as export_collision
 from ps2_world import Game
 
 
+def derive_body_collision(path, name: str) -> bytes:
+    """Explicit SA adaptation for a source vehicle with no physical COL.
+
+    Use the original rigid body triangles in root space, excluding rotating
+    rotors and duplicate LODs. This is derived collision, not recovered retail
+    physics. LCS SURFACE_CAR (6) is mapped once by the existing COL converter.
+    """
+    import ferrylib
+    from rwgeom import decode_geometry
+
+    clump = ferrylib.load(path)
+    roots = [i for i, frame in enumerate(clump.frames) if frame.parent == -1]
+    if len(roots) != 1 or clump.frames[roots[0]].name.casefold() != name.casefold():
+        raise ValueError('Derived vehicle collision requires its original named root')
+    vertices, faces = [], []
+    for frame_index, geometry_index, _flags, _unused in clump.atomics:
+        frame = clump.frames[frame_index]
+        if frame.name not in {'chassis_hi', 'tail', 'skid_left', 'skid_right', 'topknot'}:
+            continue
+        geometry = decode_geometry(clump.raw, clump.geom_nodes[geometry_index])
+        base = len(vertices)
+        points = [ferrylib.to_ancestor(clump, frame_index, roots[0], point) for point in geometry.pos]
+        if not all(math.isfinite(value) for point in points for value in point):
+            raise ValueError('Nonfinite derived vehicle collision vertex')
+        vertices.extend(points)
+        for a, b, c, _material in geometry.tris:
+            if max(a, b, c) >= len(points):
+                raise ValueError('Derived vehicle collision triangle index out of range')
+            if len({a, b, c}) == 3:
+                faces.append(struct.pack('<3I4B', base+a, base+b, base+c, 6, 0, 0, 255))
+    if not vertices or not faces or len(vertices) > 32767 or len(faces) > 32767:
+        raise ValueError('Derived vehicle body has no usable bounded collision mesh')
+    minimum = [min(point[i] for point in vertices) for i in range(3)]
+    maximum = [max(point[i] for point in vertices) for i in range(3)]
+    center = [(a+b)*0.5 for a, b in zip(minimum, maximum)]
+    body = struct.pack('<10f', math.dist(center, maximum), *center, *minimum, *maximum)
+    for array in ([], [], [], [struct.pack('<3f', *point) for point in vertices], faces):
+        body += struct.pack('<I', len(array)) + b''.join(array)
+    raw_name = name.encode('ascii')
+    if len(raw_name) > 23:
+        raise ValueError('Derived vehicle name is too long')
+    body = raw_name.ljust(24, b'\0') + body
+    record = struct.pack('<4sI', b'COLL', len(body)) + body
+    _validate_legacy_record(record, name)
+    return record
+
+
 def _validate_legacy_record(record: bytes, expected_name: str) -> None:
     if len(record) < 32 + 40 + 20 or record[:4] != b'COLL':
         raise ValueError('Original vehicle collision did not serialize as a legacy COLL record')
