@@ -26,6 +26,17 @@ std::vector<uint8_t> decode_spu2_voice(const uint8_t* frames,size_t frame_count)
 // Canonical RIFF PCM bytes exactly as write_pcm_wave stores them.
 std::vector<uint8_t> pcm_wave_bytes(const AudioSample& sample);
 void write_pcm_wave(const std::filesystem::path& path,const AudioSample& sample);
+// Disk-streamed original 32 kHz stereo .VB (radio stations exceed the
+// in-memory stream limit): one 0x4000-byte encoded block per refill, keeping
+// predictor history across refills and looping at the end of the file.
+class Ps2FileMusicStream {
+    struct State;std::unique_ptr<State> state_;
+public:
+    Ps2FileMusicStream(const std::filesystem::path& path,uint64_t encoded_offset);
+    ~Ps2FileMusicStream();
+    AudioSample next_block();
+    uint64_t encoded_size()const;
+};
 AudioSample read_pcm_wave(const std::filesystem::path& path);
 // Reads and decodes an original 32 kHz stereo PS2 .VB stream (cutscene/news).
 AudioSample read_ps2_stream(const std::filesystem::path& path);

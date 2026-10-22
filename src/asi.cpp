@@ -27,6 +27,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "sa_continuous_sound.hpp"
 #include "lcs/continuous_native_settings.hpp"
 #include "sa_ending_tune.hpp"
+#include "sa_lcs_radio.hpp"
 #include "sa_cutscenes.hpp"
 #include "sa_hud.hpp"
 #include "sa_script_coronas.hpp"
@@ -388,6 +389,7 @@ struct Campaign {
     lcs::AudioSample phone_ring;
     lcs::MissionSpeech speech;
     lcs::NativeEndingTune finale;
+    std::unique_ptr<lcs::SaLcsRadio> lcs_radio;
     lcs::SaCredits credits;
     std::array<lcs::TextArchive,5> credit_text;
     lcs::AudioAdapter audio;
@@ -706,6 +708,16 @@ struct Campaign {
             return result;
         };
         adapter.stop_credits=[this](){lcs::NativeResult result;credits.stop();result.executed=true;return result;};
+        // LcsRadio=0 keeps SA's own radio stations.
+        if(setting(L"LcsRadio")!=L"0") {
+            if(!lcs::sa_radio_profile_matches())log("Original LCS radio refused: SA radio manager profile differs; SA radio stays active");
+            else {
+                lcs_radio=std::make_unique<lcs::SaLcsRadio>(original_audio_directory()/L"MUSIC",GetTickCount());
+                adapter.lcs_radio=true;
+                adapter.lcs_radio_position=[this](int32_t station,int32_t seek){lcs_radio->script_position(station,seek,GetTickCount());};
+                log("Original LCS radio active: SA station slots stream AUDIO/MUSIC; user tracks and radio off stay native");
+            }
+        }
         adapter.original_credits_finished=[this](){return credits.finished();};
         if(!first) {
             finale.load(original_audio_directory()/L"MUSIC"/L"FINALE.VB");
@@ -1762,6 +1774,10 @@ void service_original_finale() {
         "Original CITY music service unavailable",[](){
             const auto settings=ending_tune_settings();
             return settings && campaign->service_city_music(settings->paused,settings->music_scale);
+        });
+    campaign->frame_updates.run("lcs-radio",lcs::UpdateScope::auxiliary,original_audio_frame,
+        "Original LCS radio service unavailable",[](){
+            return !campaign->lcs_radio || campaign->lcs_radio->service(GetTickCount(),campaign->audio.mission_speech_active());
         });
     campaign->frame_updates.run("ending-tune",lcs::UpdateScope::auxiliary,original_audio_frame,
         "Original finale audio service unavailable",[](){

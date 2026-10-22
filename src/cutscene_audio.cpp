@@ -122,6 +122,34 @@ AudioSample Ps2MusicStream::next_block(){
     s.cursor+=2*channel_block;if(s.cursor==s.bytes.size())s.cursor=0;
     return sample;
 }
+struct Ps2FileMusicStream::State {
+    std::ifstream file;uint64_t size=0,cursor=0;std::array<MusicPredictor,2> predictors;std::vector<uint8_t> block;
+};
+Ps2FileMusicStream::Ps2FileMusicStream(const std::filesystem::path& path,uint64_t encoded_offset):state_(std::make_unique<State>()){
+    auto& s=*state_;s.file.open(path,std::ios::binary|std::ios::ate);
+    if(!s.file)throw std::runtime_error("Cannot open original PS2 music stream: "+path.string());
+    s.size=uint64_t(s.file.tellg());
+    if(s.size<2*channel_block || s.size%(2*channel_block) || encoded_offset%(2*channel_block) || encoded_offset>=s.size)
+        throw std::runtime_error("Invalid original PS2 music stream size or seek: "+path.string());
+    s.cursor=encoded_offset;s.block.resize(2*channel_block);
+}
+Ps2FileMusicStream::~Ps2FileMusicStream()=default;
+uint64_t Ps2FileMusicStream::encoded_size()const{return state_->size;}
+AudioSample Ps2FileMusicStream::next_block(){
+    auto& s=*state_;AudioSample sample;sample.frequency=32000;sample.channels=2;
+    s.file.seekg(std::streamoff(s.cursor));
+    if(!s.file.read(reinterpret_cast<char*>(s.block.data()),std::streamsize(s.block.size())))throw std::runtime_error("Truncated original PS2 music stream");
+    sample.pcm.reserve(channel_block/frame_size*samples_per_frame*4);
+    for(size_t offset=0;offset<channel_block;offset+=frame_size){
+        const auto left=s.predictors[0].decode(s.block.data()+offset);
+        const auto right=s.predictors[1].decode(s.block.data()+channel_block+offset);
+        for(size_t i=0;i<samples_per_frame;++i)for(const auto value:{left[i],right[i]}){
+            sample.pcm.push_back(uint8_t(value));sample.pcm.push_back(uint8_t(uint16_t(value)>>8));
+        }
+    }
+    s.cursor+=2*channel_block;if(s.cursor>=s.size)s.cursor=0;
+    return sample;
+}
 AudioSample decode_cutscene_vb(const std::vector<uint8_t>& bytes) {
     if(bytes.empty() || bytes.size()% (2*channel_block) || bytes.size()>32*1024*1024)
         throw std::runtime_error("Truncated, empty or oversized stereo PS2 cutscene stream");

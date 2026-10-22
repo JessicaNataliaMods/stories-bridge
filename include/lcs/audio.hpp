@@ -74,6 +74,12 @@ public:
     // position or a refused device); out of range is a genuine silent success.
     bool play_car_jerk(const std::array<float,3>& position);
     bool tick_announcements(bool eligible);
+    // cAudioManager::ShouldDuckMissionAudio: a started mission speech slot
+    // that has not finished. The radio is held at volume 25 meanwhile.
+    bool mission_speech_active() const {
+        for(size_t n=0;n<slots_.size();++n)if(slots_[n].started && finished && !finished(n))return true;
+        return false;
+    }
     bool tick_spatial();
     ContinuousMixContext service_source_mix(float native_scale);
     uint32_t continuous_music_random_word()const {return audio_random_.table(0);}

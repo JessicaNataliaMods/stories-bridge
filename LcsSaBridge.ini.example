@@ -1,3 +1,5 @@
 [LCS]
-; Point this at your own extracted PS2 input; never commit a local configuration.
-DataDirectory=..\private-bridge\originals\lcs-ps2
+; Campaign packages need no paths: every folder is a subfolder of the .asi,
+; and the original PS2 AUDIO folder is copied next to it (docs/audio.md).
+; 0 keeps SA's own radio stations instead of the original LCS radio.
+LcsRadio=1

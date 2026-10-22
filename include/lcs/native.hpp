@@ -381,6 +381,10 @@ public:
     std::function<NativeResult()> stop_credits;
     std::function<bool()> original_credits_finished;
     std::function<NativeResult(int32_t)> change_music_mode;
+    // Original LCS radio replaces SA's radio audio (LcsRadio=1): script radio
+    // commands then tune SA's station slots and seek the LCS station.
+    bool lcs_radio=false;
+    std::function<void(int32_t station,int32_t seek_ms)> lcs_radio_position;
     using Executor=std::function<NativeResult(const NativeCall&)>;
     Executor execute;
     Executor execute_walking_objective;

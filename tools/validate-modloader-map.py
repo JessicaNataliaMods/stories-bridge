@@ -63,8 +63,11 @@ def validate_campaign(package, map_report):
             if (package/folder).exists():raise ValueError('Package must not contain audio: '+folder)
         if any(row['relative'].lower().startswith(('metadata/lcs-source/audio/','data/lcs/cutscenes/audio/')) for row in campaign['originalResources']):
             raise ValueError('Packaged audio still listed as an original resource')
-        if any(line.split('=',1)[0].endswith('Directory') for line in (package/'LcsSaBridge.ini').read_text(encoding='utf-16').splitlines()):
+        ini_lines=(package/'LcsSaBridge.ini').read_text(encoding='utf-16').splitlines()
+        if any(line.split('=',1)[0].endswith('Directory') for line in ini_lines):
             raise ValueError('Self-contained campaign INI must not carry paths')
+        if campaign.get('version',0)>=92 and not any(line in ('LcsRadio=0','LcsRadio=1') for line in ini_lines):
+            raise ValueError('LcsRadio setting missing')
     if campaign.get('version',0)>=57:
         expected='0490cd090214c4ef44bd8f419a5923484c24fb0b005761b9c535734cd526413c'
         user_audio=campaign.get('version',0)>=90
@@ -212,6 +215,10 @@ def validate_campaign(package, map_report):
             if not required.issubset({row['executable'] for row in proof['checks'] if row['passed']}) or \
                 (campaign.get('version',0)<90 and not any(row['relative']=='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin' for row in proof['inputs'])):
                 raise ValueError('Finale startup checks or authenticated input missing')
+        if campaign.get('version',0)>=92:
+            expected_checks+=1
+            if 'lcs-radio-tests.exe' not in {row['executable'] for row in proof['checks'] if row['passed']}:
+                raise ValueError('LCS radio check missing')
         if campaign.get('version',0)>=90:
             expected_checks+=1
             if 'lcs-ps2-audio-source-tests.exe' not in {row['executable'] for row in proof['checks'] if row['passed']}:
@@ -281,6 +288,7 @@ def validate_campaign(package, map_report):
                 'lcs-script-marker-pool-tests.log','lcs-script-marker-render-tests.log',
                 'original-marker-contracts.log','validate-script-marker-resources.log'))
             if campaign.get('version',0)>=90:required_outputs.add('lcs-ps2-audio-source-tests.log')
+            if campaign.get('version',0)>=92:required_outputs.add('lcs-radio-tests.log')
             if {row['output'] for row in proof['checks']}!=required_outputs:raise ValueError('Campaign regression proof outputs do not match required checks')
         for row in proof['inputs']:
             if digest(package/row['relative'])!=row['sha256']:raise ValueError('Campaign startup input changed: '+row['relative'])

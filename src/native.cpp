@@ -2,6 +2,7 @@
 #include "lcs/threat_ranges.hpp"
 #include "lcs/route_vehicle_goal.hpp"
 #include "ScriptCommands.h"
+#include "lcs/lcs_radio.hpp"
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
@@ -2278,11 +2279,16 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         if(!execute || (opcode==COMMAND_SWITCH_CAR_RADIO ? value<0 || value>4 : value<0 || value>10)) {
             thread.diagnostic="Invalid original music/radio policy";return StepResult::unsupported;
         }
-        // LCS radio streams are not mounted. Keep real native music off during
-        // the original mission/cutscene speech, matching the working opening
-        // profile, and retain both original station/seek and music mode.
-        const auto r=execute({0x041E,{13}});
-        if(!r.executed){thread.diagnostic="Native mission radio control failed";return StepResult::unsupported;}
+        // Without the LCS radio, keep real native music off during the
+        // original mission/cutscene speech, matching the working opening
+        // profile. With it, SET_RADIO_CHANNEL tunes the SA slot playing that
+        // LCS station (10 = off) and seeks it; music mode leaves the radio as is.
+        if(!lcs_radio || opcode==COMMAND_SET_RADIO_CHANNEL) {
+            const auto station=lcs_radio ? sa_station_for_lcs(value) : 13;
+            const auto r=execute({0x041E,{station}});
+            if(!r.executed){thread.diagnostic="Native mission radio control failed";return StepResult::unsupported;}
+            if(lcs_radio && lcs_radio_position)lcs_radio_position(value,seek);
+        }
         if(opcode==COMMAND_SET_RADIO_CHANNEL){original_radio_channel_=value;original_radio_seek_=seek;}
         else {
             if(change_music_mode) {
@@ -3429,7 +3435,8 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         static constexpr int32_t stations[]={-1,8,4,0,8,3,8,0,4,2,7,9,10,10};
         const auto id=int64_t(result.values[0])+1;
         if(id<0 || size_t(id)>=std::size(stations)){thread.diagnostic="Unknown native radio channel: "+std::to_string(result.values[0]);return StepResult::unsupported;}
-        vm.store(thread,stations[id]);return StepResult::continued;
+        // With the LCS radio the active SA slot plays a known LCS station.
+        vm.store(thread,lcs_radio ? lcs_radio_channel_for_sa(int32_t(id)) : stations[id]);return StepResult::continued;
     }
     if(opcode==COMMAND_GET_CAR_MODEL) {
         const auto saved=original_vehicle_models_.find(call.inputs[0]);

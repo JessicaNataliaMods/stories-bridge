@@ -383,6 +383,11 @@ def prepare(base, output, version, notes, refresh, original_data):
         campaign['navigation84'] = dict(source=str(navigation), pathsImgSha256=graph['PathsImgSha256'],
                                         linkStorage='area of link position (native SA rule)', gameExecuted=False)
     if version >= 90:
+        if version >= 92:
+            campaign['originalRadio92'] = dict(stations=10, setting='LcsRadio', default=1,
+                saState='CAERadioTrackManager 0x8CB6F8 (IsRadioOn, active station +0xE9)',
+                silencedNativeStream='music master CAEAudioHardware+0x410 while an LCS station plays',
+                volume='menu radio volume 0xBA6798 times fader +0x418; 25 during mission speech', gameExecuted=False)
         campaign['originalAudio90'] = dict(packagedAudio=False, folder='AUDIO next to LcsSaBridge.asi', banks=67, sampleRecords=5661,
             refusedHeaderlessEngineRecords=27, streams=['NEWS', 'CUTSCENE', 'MUSIC/CITY.VB', 'MUSIC/FINALE.VB'],
             gameExecuted=False)
@@ -391,7 +396,9 @@ def prepare(base, output, version, notes, refresh, original_data):
         ini_path = output/'LcsSaBridge.ini'
         ini = ini_path.read_bytes().decode('utf-16')
         kept = [line for line in ini.splitlines() if line.split('=', 1)[0] not in PATH_KEYS]
-        if len(kept) != len(ini.splitlines()):
+        if version >= 92 and not any(line.startswith('LcsRadio=') for line in kept):
+            kept.append('LcsRadio=1')  # docs/audio.md: 0 keeps SA's radio
+        if kept != ini.splitlines():
             if ini_path.stat().st_nlink != 1:
                 raise ValueError('Mutable INI must not share an inode with a rollback')
             ini_path.write_bytes(('\r\n'.join(kept)+'\r\n').encode('utf-16'))
