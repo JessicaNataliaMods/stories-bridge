@@ -53,7 +53,7 @@ int main(){try {
     check(run(c,t)==StepResult::unsupported && t.ip==64,"A weapon/object cannot masquerade as an unmatched vehicle model");
     vehicle_model=547;
     c.clear();op(c,COMMAND_SET_CURRENT_CHAR_WEAPON);arg(c,42);arg(c,32);
-    check(run(c,t)==StepResult::continued && weapon==31,"LCS M60 uses existing native M4 weapon type");
+    check(run(c,t)==StepResult::continued && weapon==33,"LCS M60 has its own native weapon type (country rifle) since v94");
     c.clear();op(c,COMMAND_HAS_CHAR_BEEN_DAMAGED_BY_WEAPON);arg(c,70);arg(c,46);
     check(run(c,t)==StepResult::continued && calls.back().opcode==0x031D && calls.back().inputs==std::vector<int32_t>{70,56},"Original ANYMELEE damage sentinel translates to the independent native sentinel, never an equipable weapon");
     c.clear();op(c,COMMAND_HAS_CAR_BEEN_DAMAGED_BY_WEAPON);arg(c,43);arg(c,41);
@@ -68,6 +68,14 @@ int main(){try {
     check(run(c,t)==StepResult::continued && calls.back().opcode==0x05CB && calls.back().inputs==std::vector<int32_t>{70,43,-1},"Driver objective retains actual actor and vehicle handles without a forced warp");
     c.clear();op(c,COMMAND_GET_CURRENT_CHAR_WEAPON);arg(c,42);c.push_back(12);
     check(run(c,t)==StepResult::continued && t.locals[0]==32,"Donor weapon returns original alias last equipped by this actor");
+    std::string weapon_event;native.diagnostic_event=[&](const std::string& m){weapon_event=m;};
+    weapon=46;
+    c.clear();op(c,COMMAND_GET_CURRENT_CHAR_WEAPON);arg(c,77);c.push_back(12);
+    check(run(c,t)==StepResult::continued && t.locals[0]==0 && weapon_event.find("weapon 46 ")!=std::string::npos,"SA-only native weapon (parachute) is reported to the original script as unarmed and logged");
+    weapon=-1;
+    c.clear();op(c,COMMAND_GET_CURRENT_CHAR_WEAPON);arg(c,77);c.push_back(12);
+    check(run(c,t)==StepResult::unsupported,"An invalid native weapon query result still blocks explicitly");
+    weapon=32;native.diagnostic_event=nullptr;
     c.clear();op(c,COMMAND_CLEAR_THREAT_FOR_PED_TYPE);arg(c,7);arg(c,1|32768);
     check(run(c,t)==StepResult::continued && calls[calls.size()-2].opcode==0x0747 && calls.back().inputs==std::vector<int32_t>{4,7,15},"Threat flags update real native relationships");
     c.clear();op(c,COMMAND_CLEAR_CHAR_THREAT_SEARCH);arg(c,42);

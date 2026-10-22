@@ -3472,8 +3472,14 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
             }
         }
         const auto counterpart=std::find(std::begin(weapon_counterparts),std::end(weapon_counterparts),result.values[0]);
-        if(result.values[0]<0 || counterpart==std::end(weapon_counterparts)) {
+        if(result.values[0]<0) {
             thread.diagnostic="Current native weapon has no original LCS counterpart";return StepResult::unsupported;
+        }
+        if(counterpart==std::end(weapon_counterparts)) {
+            // SA-only item (parachute, spray can, ...): the original has no such
+            // weapon, so scripts see the character as unarmed.
+            if(diagnostic_event)diagnostic_event("Current native weapon "+std::to_string(result.values[0])+" has no LCS counterpart; reported as unarmed");
+            vm.store(thread,0);return StepResult::continued;
         }
         vm.store(thread,int32_t(counterpart-std::begin(weapon_counterparts)));return StepResult::continued;
     }
