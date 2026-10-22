@@ -20,6 +20,13 @@ public:
     AudioSample next_block();
     size_t encoded_position()const;
 };
+// One mono SPU2 voice from key-on: zero predictor history, saturating
+// integer recurrence (same arithmetic as the CITY stream decoder).
+std::vector<uint8_t> decode_spu2_voice(const uint8_t* frames,size_t frame_count);
+// Canonical RIFF PCM bytes exactly as write_pcm_wave stores them.
+std::vector<uint8_t> pcm_wave_bytes(const AudioSample& sample);
 void write_pcm_wave(const std::filesystem::path& path,const AudioSample& sample);
 AudioSample read_pcm_wave(const std::filesystem::path& path);
+// Reads and decodes an original 32 kHz stereo PS2 .VB stream (cutscene/news).
+AudioSample read_ps2_stream(const std::filesystem::path& path);
 }

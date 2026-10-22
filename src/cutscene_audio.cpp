@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <sstream>
 #include <cstring>
 #include <stdexcept>
 
@@ -138,17 +139,38 @@ AudioSample decode_cutscene_vb(const std::vector<uint8_t>& bytes) {
     }
     return sample;
 }
-void write_pcm_wave(const std::filesystem::path& path,const AudioSample& sample) {
+std::vector<uint8_t> decode_spu2_voice(const uint8_t* frames,size_t frame_count) {
+    MusicPredictor predictor;std::vector<uint8_t> pcm;pcm.reserve(frame_count*samples_per_frame*2);
+    for(size_t frame=0;frame<frame_count;++frame)
+        for(const auto value:predictor.decode(frames+frame*frame_size)){pcm.push_back(uint8_t(value));pcm.push_back(uint8_t(uint16_t(value)>>8));}
+    return pcm;
+}
+std::vector<uint8_t> pcm_wave_bytes(const AudioSample& sample) {
     if(!sample.frequency || sample.frequency>192000 || sample.channels<1 || sample.channels>2 ||
        sample.pcm.empty() || sample.pcm.size()%(sample.channels*2) || sample.pcm.size()>UINT32_MAX-36)
         throw std::runtime_error("Invalid PCM wave format or size");
-    if(std::filesystem::exists(path))throw std::runtime_error("Refusing to overwrite a prepared audio stream");
-    std::ofstream out(path,std::ios::binary);if(!out)throw std::runtime_error("Cannot create cutscene wave");
+    std::ostringstream out(std::ios::binary);
     out.write("RIFF",4);u32(out,uint32_t(sample.pcm.size()+36));out.write("WAVEfmt ",8);u32(out,16);
     u16(out,1);u16(out,sample.channels);u32(out,sample.frequency);u32(out,sample.frequency*sample.channels*2);
     u16(out,sample.channels*2);u16(out,16);out.write("data",4);u32(out,uint32_t(sample.pcm.size()));
     out.write(reinterpret_cast<const char*>(sample.pcm.data()),std::streamsize(sample.pcm.size()));
+    const auto text=out.str();return std::vector<uint8_t>(text.begin(),text.end());
+}
+void write_pcm_wave(const std::filesystem::path& path,const AudioSample& sample) {
+    const auto bytes=pcm_wave_bytes(sample);
+    if(std::filesystem::exists(path))throw std::runtime_error("Refusing to overwrite a prepared audio stream");
+    std::ofstream out(path,std::ios::binary);if(!out)throw std::runtime_error("Cannot create cutscene wave");
+    out.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size()));
     if(!out)throw std::runtime_error("Cannot write complete cutscene wave");
+}
+AudioSample read_ps2_stream(const std::filesystem::path& path) {
+    std::ifstream in(path,std::ios::binary|std::ios::ate);
+    if(!in)throw std::runtime_error("Cannot read original PS2 stream: "+path.string());
+    const auto length=uint64_t(in.tellg());
+    if(!length || length>32*1024*1024)throw std::runtime_error("Invalid original PS2 stream size: "+path.string());
+    std::vector<uint8_t> bytes(static_cast<size_t>(length));in.seekg(0);
+    if(!in.read(reinterpret_cast<char*>(bytes.data()),std::streamsize(length)))throw std::runtime_error("Truncated original PS2 stream");
+    return decode_cutscene_vb(bytes);
 }
 AudioSample read_pcm_wave(const std::filesystem::path& path) {
     std::ifstream in(path,std::ios::binary|std::ios::ate);

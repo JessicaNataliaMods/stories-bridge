@@ -311,7 +311,7 @@ int main(){try {
     }
     {
         lcs::NativeCityMusic city;
-        const auto source=std::filesystem::path(__FILE__).parent_path().parent_path().parent_path()/"lcs-ps2/AUDIO/MUSIC/CITY.VB";
+        const auto source=std::filesystem::path(__FILE__).parent_path().parent_path()/"local/originals/lcs-ps2/AUDIO/MUSIC/CITY.VB";
         lcs::ContinuousSourceRandom shared(180371);
         const auto table=shared.audio_table();
         std::array<uint32_t,10> lengths;lengths.fill(600320);

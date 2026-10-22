@@ -11,7 +11,7 @@ namespace lcs {
 // verified timer flags and calls waveOut under MissionSpeech's mutex.
 class NativeCutscenes {
     struct Scene {std::string alias,hash;};
-    std::filesystem::path directory_;
+    std::filesystem::path directory_,audio_directory_;
     std::map<std::string,Scene> scenes_;
     MissionSpeech voice_;
     AudioSample sample_;
@@ -19,7 +19,9 @@ class NativeCutscenes {
     std::atomic<bool> exiting_{false};
     std::thread pause_observer_;
 public:
-    NativeCutscenes(const std::filesystem::path& game,const std::filesystem::path& directory,NativeAdapter& adapter);
+    // audio_directory: the original PS2 AUDIO/CUTSCENE folder. Each decoded
+    // stream must hash to the canonical wave recorded in the scene index.
+    NativeCutscenes(const std::filesystem::path& game,const std::filesystem::path& directory,const std::filesystem::path& audio_directory,NativeAdapter& adapter);
     ~NativeCutscenes();
     void service();
     void clear();

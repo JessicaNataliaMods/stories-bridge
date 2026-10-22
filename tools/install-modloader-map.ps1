@@ -82,6 +82,8 @@ if(Test-Path -LiteralPath $taskTarget){
     foreach($taskFile in Get-ChildItem -LiteralPath $taskTarget -Recurse -File){
         # Keep the bridge's own runtime diagnostic log across an update.
         if($taskFile.FullName -eq (Join-Path $taskTarget 'LcsSaBridge.log')){continue}
+        # The user's own PS2 AUDIO folder is read at runtime and never packaged.
+        if($taskFile.FullName.StartsWith((Join-Path $taskTarget 'AUDIO')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){continue}
         if(!$taskExpected.Contains($taskFile.FullName)){
             if(!$taskPreviousFiles.ContainsKey($taskFile.FullName)){throw "Existing untracked file in package folder: $($taskFile.FullName)"}
             $taskPrevious=$taskPreviousFiles[$taskFile.FullName]

@@ -129,6 +129,9 @@ std::filesystem::path module_directory();
 std::filesystem::path resource_directory();
 std::string source_suffix();
 std::filesystem::path source_file(const std::filesystem::path&,const std::filesystem::path&);
+std::filesystem::path original_audio_directory();
+std::filesystem::path world_directory();
+std::filesystem::path original_data_directory();
 bool write_game_word(uintptr_t address,uint32_t value);
 bool read_game_word(uintptr_t address,uint32_t* value);
 void log(const std::string& text);
@@ -459,13 +462,13 @@ struct Campaign {
         if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(0xBA67CC),&language,1,&actual) || actual!=1 || language>=credit_text.size())return nullptr;
         return &credit_text[language];
     }
-    Campaign(const std::filesystem::path& directory,bool first=false,bool restoring=false):image(lcs::ScmImage::load(source_file(directory,L"DATA/MAIN.SCM"))),adapter(image),runtime(image),audio_archive(directory/L"audio",source_suffix()),audio(audio_archive),continuous_runtime(audio_archive) {
+    Campaign(const std::filesystem::path& directory,bool first=false,bool restoring=false):image(lcs::ScmImage::load(source_file(directory,L"DATA/MAIN.SCM"))),adapter(image),runtime(image),audio_archive(lcs::AudioArchive::Ps2Audio{},original_audio_directory()),audio(audio_archive),continuous_runtime(audio_archive) {
         if(setting(L"VehicleColours")==L"1")
             adapter.bind_vehicle_colours(lcs::sa_load_vehicle_colours(resource_directory()/L"data/lcs/vehicle-colours.dat"));
         continuous_sounds.available=[this](){return !halted && continuous_runtime.available();};
         continuous_sounds.create=[this](const lcs::ContinuousSoundObjects::Snapshot& source){return continuous_runtime.create(source);};
         continuous_sounds.release=[this](const lcs::ContinuousSoundObjects::Snapshot& source){return continuous_runtime.release(source);};
-        city_music_path=source_file(directory,L"AUDIO/MUSIC/CITY.VB");
+        city_music_path=original_audio_directory()/L"MUSIC"/L"CITY.VB";
         continuous_sounds.music_available=[this](){return ensure_city_music();};
         continuous_runtime.music_available=[this](){return ensure_city_music();};
         continuous_runtime.configure_music=[this](uint8_t selector){
@@ -523,10 +526,10 @@ struct Campaign {
             auto text=lcs::TextArchive::load(path,false);text.require_campaign(original_text);
             credit_text[language_index++]=std::move(text);
         }
-        const auto primary_path=std::filesystem::path(setting(L"WorldDirectory"))/L"campaign-model-bindings.tsv";
+        const auto primary_path=world_directory()/L"campaign-model-bindings.tsv";
         if(std::filesystem::exists(primary_path)) {
             std::set<int32_t> physical_carriers;
-            std::ifstream carrier_file(std::filesystem::path(setting(L"WorldDirectory"))/L"campaign-anchor-bindings.tsv");
+            std::ifstream carrier_file(world_directory()/L"campaign-anchor-bindings.tsv");
             int32_t carrier_original=0,carrier_target=0;std::string carrier_name,carrier_native;
             while(carrier_file>>carrier_original>>carrier_target>>carrier_name>>carrier_native)physical_carriers.insert(carrier_original);
             std::ifstream primary(primary_path);int32_t original=0,target=0;std::string name,runtime_name;size_t count=0;
@@ -542,7 +545,7 @@ struct Campaign {
         } else for(const auto& b:bindings)adapter.bind_model(b.lcs_id,b.sa_id,b.name);
         if(!equivalent_bindings.empty())lcs::bind_equivalents(adapter,equivalent_bindings);
         if(setting(L"GameplaySkins")==L"1") {
-            std::ifstream peds(std::filesystem::path(setting(L"WorldDirectory"))/L"peds"/L"canonical-model-bindings.tsv");
+            std::ifstream peds(world_directory()/L"peds"/L"canonical-model-bindings.tsv");
             std::string source_id,name,native_name,asset;int32_t native_id=0;size_t count=0;
             if(!peds)throw std::runtime_error("Canonical mission character bindings missing");
             while(peds>>source_id>>native_id>>name>>native_name>>asset) {
@@ -571,8 +574,8 @@ struct Campaign {
         };
         std::vector<lcs::SaWorldSectorModelBinding> sector_bindings;
         for(const auto& b:bindings)if(b.sa_id>=10000 && b.sa_id<20000)sector_bindings.push_back({b.name,uint16_t(b.sa_id)});
-        auto sector_engine=lcs::make_sa_world_sector_engine(std::filesystem::path(setting(L"WorldDirectory")));
-        world_sectors=std::make_unique<lcs::SaWorldSectors>(std::filesystem::path(setting(L"WorldDirectory")),sector_bindings,sector_engine);
+        auto sector_engine=lcs::make_sa_world_sector_engine(world_directory());
+        world_sectors=std::make_unique<lcs::SaWorldSectors>(world_directory(),sector_bindings,sector_engine);
         adapter.world_swap_state=[this](int32_t group,int32_t state){return world_sectors->set(group,state);};
         adapter.request_world_swaps=[this](){return world_sectors->request();};
         adapter.world_streaming_complete=[this](){return world_sectors->complete();};
@@ -612,7 +615,7 @@ struct Campaign {
             // conversion produces the CObject that registers itself with the
             // native garage controller. Collector callbacks use the same exact
             // placements, never an arbitrary nearby building of the same model.
-            std::ifstream door_file(std::filesystem::path(setting(L"WorldDirectory"))/L"door-bindings.tsv");
+            std::ifstream door_file(world_directory()/L"door-bindings.tsv");
             if(!door_file)throw std::runtime_error("Mounted garage door bindings missing");
             size_t door_count=0;std::string door_line;
             while(std::getline(door_file,door_line)) {
@@ -631,7 +634,7 @@ struct Campaign {
             if(!door_count)throw std::runtime_error("Mounted garage door inventory is empty");
             log("Original garage door placements registered="+std::to_string(door_count)+"; native SA dynamic-object/garage consumer");
             for(const auto* name:{L"world0.ipl",L"world1.ipl",L"world2.ipl"}) {
-                std::ifstream placements(std::filesystem::path(setting(L"WorldDirectory"))/name);
+                std::ifstream placements(world_directory()/name);
                 if(!placements)throw std::runtime_error("Mounted LCS phone placements missing");
                 adapter.load_phone_placements(placements,phone->sa_id);
                 const auto crusher=std::find_if(bindings.begin(),bindings.end(),[](const Binding& b){return b.name=="crusher_crane";});
@@ -652,7 +655,7 @@ struct Campaign {
                 if(track && !adapter.ferry_service.load_path(0,track))throw std::runtime_error("Original ferry track is unreadable");
                 if(!track)log("Original ferry track missing; ferry commands stay unsupported");
                 int32_t ferry_model=-1;
-                std::ifstream manifest(std::filesystem::path(setting(L"ResourceDirectory"))/L"metadata"/L"ferry-boat.json");
+                std::ifstream manifest(resource_directory()/L"metadata"/L"ferry-boat.json");
                 std::string text((std::istreambuf_iterator<char>(manifest)),std::istreambuf_iterator<char>());
                 const auto key=text.find("\"nativeModel\"");
                 if(key!=std::string::npos) {
@@ -664,7 +667,7 @@ struct Campaign {
                 // data leaves only the collision switch refused.
                 std::vector<uint8_t> docked_col;
                 {
-                    std::ifstream docked_file(std::filesystem::path(setting(L"ResourceDirectory"))/L"models"/L"lcs"/L"ferry-docked.col",std::ios::binary);
+                    std::ifstream docked_file(resource_directory()/L"models"/L"lcs"/L"ferry-docked.col",std::ios::binary);
                     docked_col.assign((std::istreambuf_iterator<char>(docked_file)),std::istreambuf_iterator<char>());
                 }
                 if(track && ferry_model>0 && !lcs::sa_ferry_configure(ferry_model,lcs::execute_sa,std::move(docked_col)))
@@ -705,7 +708,7 @@ struct Campaign {
         adapter.stop_credits=[this](){lcs::NativeResult result;credits.stop();result.executed=true;return result;};
         adapter.original_credits_finished=[this](){return credits.finished();};
         if(!first) {
-            finale.load(source_file(directory,L"AUDIO/MUSIC/FINALE.VB"));
+            finale.load(original_audio_directory()/L"MUSIC"/L"FINALE.VB");
             adapter.change_music_mode=[this](int32_t mode){
                 lcs::NativeResult result;
                 if(!original_audio_main || !original_audio_menu || !finale.ready()) {result.diagnostic="Finale audio phase/resource unavailable";return result;}
@@ -981,7 +984,7 @@ struct Campaign {
         adapter.fx.callbacks.camera=[]()->std::optional<lcs::FxVec3>{return lcs::sa_camera_placeable_position();};
         adapter.fx.diagnostic=[](const std::string& message){log(message);};
         if(!first) {
-            gameplay_animations=std::make_unique<lcs::NativeGameplayAnimations>(std::filesystem::path(setting(L"WorldDirectory"))/L"animations");
+            gameplay_animations=std::make_unique<lcs::NativeGameplayAnimations>(world_directory()/L"animations");
             adapter.request_wait_animation=[this](int32_t state,bool load){
                 const bool accepted=gameplay_animations->request(state,load);
                 if(!accepted)log("Original gesture block request refused: state="+std::to_string(state)+" load="+std::to_string(load)+" "+lcs::gameplay_animation_load_diagnostic());
@@ -994,9 +997,13 @@ struct Campaign {
             log("Original mission gestures validated: 71 states, 25 original blocks; native loading on demand");
         }
         runtime.vm().message_skip=[this](){return skip_pressed;};
-        const auto cutscene_directory=setting(L"CutsceneDirectory");
+        // Campaign packages keep scenes in data/lcs/cutscenes; the legacy
+        // first-mission installer names its folder explicitly.
+        const auto configured_cutscenes=setting(L"CutsceneDirectory");
+        const auto cutscene_directory=!configured_cutscenes.empty()?std::filesystem::path(configured_cutscenes):
+            setting(L"Mode")==L"Campaign"?module_directory()/L"data"/L"lcs"/L"cutscenes":std::filesystem::path();
         if(!cutscene_directory.empty()) {
-            cutscenes=std::make_unique<lcs::NativeCutscenes>(resource_directory(),std::filesystem::path(cutscene_directory),adapter);
+            cutscenes=std::make_unique<lcs::NativeCutscenes>(resource_directory(),cutscene_directory,original_audio_directory()/L"CUTSCENE",adapter);
             log("Original cutscene archives/audio verified and native aliases registered");
         }
         if(first) {
@@ -1371,9 +1378,21 @@ std::filesystem::path module_directory() {
     if (!n || n==path.size()) throw std::runtime_error("Cannot resolve ASI directory");
     return std::filesystem::path(path.data()).parent_path();
 }
+// Campaign packages are self-contained: every folder is a fixed subfolder of
+// the .asi. A path key in the .ini is honoured only for the legacy test and
+// preview installers that still write one.
 std::filesystem::path resource_directory() {
     const auto configured=setting(L"ResourceDirectory");
-    return configured.empty() ? module_directory().parent_path() : std::filesystem::path(configured);
+    if(!configured.empty())return configured;
+    return setting(L"Mode")==L"Campaign" ? module_directory() : module_directory().parent_path();
+}
+std::filesystem::path world_directory() {
+    const auto configured=setting(L"WorldDirectory");
+    return configured.empty() ? module_directory()/L"data"/L"lcs" : std::filesystem::path(configured);
+}
+std::filesystem::path original_data_directory() {
+    const auto configured=setting(L"DataDirectory");
+    return configured.empty() ? module_directory()/L"metadata"/L"lcs-source" : std::filesystem::path(configured);
 }
 std::string source_suffix() {
     const auto suffix=setting(L"SourceFileSuffix");
@@ -1384,6 +1403,8 @@ std::string source_suffix() {
 std::filesystem::path source_file(const std::filesystem::path& directory,const std::filesystem::path& relative) {
     auto path=directory/relative;path+=source_suffix();return path;
 }
+// The user's own LCS PS2 AUDIO folder, copied next to the .asi; no audio is packaged.
+std::filesystem::path original_audio_directory() {return module_directory()/L"AUDIO";}
 void log(const std::string& text) {
     std::ofstream f(module_directory()/L"LcsSaBridge.log",std::ios::app);
     SYSTEMTIME time{}; GetLocalTime(&time);
@@ -1494,8 +1515,7 @@ void observe_world() {
         inspected_world=true;
         try {
             if(!lcs::sa_executor_profile_matches())throw std::runtime_error("Native command dispatcher profile mismatch");
-            const auto directory=setting(L"WorldDirectory");
-            if(directory.empty())throw std::runtime_error("WorldDirectory is not configured");
+            const auto directory=world_directory().wstring();
             std::ifstream file(std::filesystem::path(directory)/L"model-bindings.tsv");
             if(!file)throw std::runtime_error("Cannot open native model bindings");
             bindings.clear();std::string line;
@@ -1559,8 +1579,7 @@ void observe_world() {
                 log("Original island/atomic LOD ranges active; source physical buildings use normal collision sectors; CULLNONE at converted atomic draw callbacks (including road pass)");
             }
             if(setting(L"Mode")==L"Campaign" || setting(L"Mode")==L"FirstMission") {
-                const auto data=setting(L"DataDirectory");if(data.empty())throw std::runtime_error("DataDirectory is not configured");
-                campaign=std::make_unique<Campaign>(std::filesystem::path(data),setting(L"Mode")==L"FirstMission",campaign_load_requires_restore);
+                campaign=std::make_unique<Campaign>(original_data_directory(),setting(L"Mode")==L"FirstMission",campaign_load_requires_restore);
                 if(campaign_load_requires_restore) {
                     uint32_t now=0;if(!read_game_word(0xB7CB84,&now))throw std::runtime_error("Cannot read loaded game timer");
                     campaign->restore_save(*pending_campaign_load,now);pending_campaign_load.reset();campaign_load_requires_restore=false;

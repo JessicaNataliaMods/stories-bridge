@@ -1,6 +1,8 @@
 """Record bounded offline campaign checks; never execute GTA or claim playability."""
 import argparse,hashlib,json,pathlib,subprocess,sys
 ROOT=pathlib.Path(__file__).resolve().parents[1]
+# v90+: audio is read at runtime from the user's own PS2 AUDIO folder.
+ORIGINAL_AUDIO=ROOT/'local/originals/lcs-ps2/AUDIO'
 def digest(path):
     with path.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
 def validate(package,source,validation_build=None):
@@ -54,7 +56,8 @@ def validate(package,source,validation_build=None):
     if campaign.get('version',0)>=57:
         commands.extend([(validation_build/'Release/lcs-ending-tune-transport-tests.exe',[]),
                          (validation_build/'Release/lcs-owned-audio-output-tests.exe',[]),
-                         (validation_build/'Release/lcs-ending-tune-source-tests.exe',[package/'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin']),
+                         (validation_build/'Release/lcs-ending-tune-source-tests.exe',
+                          [ORIGINAL_AUDIO/'MUSIC/FINALE.VB' if campaign.get('version',0)>=90 else package/'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_ending_tune_contracts.py',
                           pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
     if campaign.get('version',0)>=58:
@@ -85,6 +88,9 @@ def validate(package,source,validation_build=None):
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_marker_contracts.py',
                           pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tools/validate-script-marker-resources.py',package])])
+    if campaign.get('version',0)>=90:
+        commands.append((validation_build/'Release/lcs-ps2-audio-source-tests.exe',
+                         [ORIGINAL_AUDIO,source/'audio',package/'data/lcs/cutscenes/index.tsv']))
     checks=[]
     for exe,args in commands:
         result=subprocess.run([str(exe),*(str(p) for p in args)],capture_output=True,text=True,timeout=60)
@@ -118,8 +124,8 @@ def validate(package,source,validation_build=None):
            'data/lcs/animations/LG00.ifp.bin','data/lcs/animations/named/LN00.ifp.bin']
     if campaign.get('version',0)>=27:paths.append('metadata/lcs-source/DATA/WEAPON.DAT.bin')
     if campaign.get('version',0)>=32:paths.append('data/script/main.scm')
-    if campaign.get('version',0)>=57:paths.append('metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin')
-    if campaign.get('version',0)>=64:paths.append('metadata/lcs-source/AUDIO/MUSIC/CITY.VB.bin')
+    if 57<=campaign.get('version',0)<90:paths.append('metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin')
+    if 64<=campaign.get('version',0)<90:paths.append('metadata/lcs-source/AUDIO/MUSIC/CITY.VB.bin')
     if campaign.get('version',0)>=66:
         paths+=['metadata/lcs-source/DATA/DEFAULT.IDE.bin','metadata/lcs-source/DATA/HANDLING.CFG.bin']
     if campaign.get('version',0)>=82:paths+=['data/lcs/info.zon','data/lcs/map.zon','metadata/lcs-source/DATA/GTA3.ZON.bin']

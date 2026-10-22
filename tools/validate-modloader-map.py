@@ -55,15 +55,26 @@ def validate_campaign(package, map_report):
             rows=[row for row in campaign['originalResources']if row['relative']==relative]
             if len(rows)!=1 or not (original/'DATA'/(name+'.bin')).is_file():
                 raise ValueError('Missing original vehicle catalogue consumed by ASI: '+name)
+    if campaign.get('version',0)>=90:
+        audio=campaign.get('originalAudio90',{})
+        if audio.get('packagedAudio') is not False or audio.get('sampleRecords')!=5661 or audio.get('gameExecuted') is not False:
+            raise ValueError('Runtime PS2 audio metadata missing')
+        for folder in ('metadata/lcs-source/audio','metadata/lcs-source/AUDIO','data/lcs/cutscenes/audio','AUDIO'):
+            if (package/folder).exists():raise ValueError('Package must not contain audio: '+folder)
+        if any(row['relative'].lower().startswith(('metadata/lcs-source/audio/','data/lcs/cutscenes/audio/')) for row in campaign['originalResources']):
+            raise ValueError('Packaged audio still listed as an original resource')
+        if any(line.split('=',1)[0].endswith('Directory') for line in (package/'LcsSaBridge.ini').read_text(encoding='utf-16').splitlines()):
+            raise ValueError('Self-contained campaign INI must not carry paths')
     if campaign.get('version',0)>=57:
         expected='0490cd090214c4ef44bd8f419a5923484c24fb0b005761b9c535734cd526413c'
-        relative='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin'
+        user_audio=campaign.get('version',0)>=90
+        relative='AUDIO/MUSIC/FINALE.VB' if user_audio else 'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin'
         tune=campaign.get('endingTune',{})
         if tune!=dict(track=63,source=relative,sha256=expected,sourceBytes=3440640,
             decodedFrequency=32000,decodedChannels=2,decodedPcmBytes=12042240,
             frontendMode=0,stopMode=1,gameExecuted=False) or \
-            (package/relative).stat().st_size!=3440640 or digest(package/relative)!=expected or \
-            not any(row['relative']==relative and row['sha256']==expected for row in campaign['originalResources']):
+            (not user_audio and ((package/relative).stat().st_size!=3440640 or digest(package/relative)!=expected or
+            not any(row['relative']==relative and row['sha256']==expected for row in campaign['originalResources']))):
             raise ValueError('Original finale stream or mode metadata differs')
     if campaign.get('version',0)>=27:
         relative='metadata/lcs-source/DATA/WEAPON.DAT.bin'
@@ -84,6 +95,7 @@ def validate_campaign(package, map_report):
         if ini.get(key)!=value:raise ValueError('Invalid campaign configuration: '+key)
     live=pathlib.Path(map_report['gameDirectory'])/'modloader/stories_bridge'
     for key,relative in (('WorldDirectory','data/lcs'),('DataDirectory','metadata/lcs-source'),('ResourceDirectory',''),('CutsceneDirectory','data/lcs/cutscenes')):
+        if campaign.get('version',0)>=90:break  # paths derived from the ASI location
         if pathlib.Path(ini[key])!=live/relative:raise ValueError('Campaign resource path leaves installed package: '+key)
     # Exactly one native bootstrap and one mounted file per language. Original
     # PS2 files are opaque .bin resources, never second Modloader replacements.
@@ -118,7 +130,9 @@ def validate_campaign(package, map_report):
     names={}
     for line in scenes[1:]:
         name,alias,audio=line.split('\t')
-        if name in names or digest(package/'data/lcs/cutscenes/audio'/f'{name}.wav').upper()!=audio:
+        # v90+: lcs-ps2-audio-source-tests checks each decoded original stream
+        # against this hash in the startup proof.
+        if name in names or (campaign.get('version',0)<90 and digest(package/'data/lcs/cutscenes/audio'/f'{name}.wav').upper()!=audio):
             raise ValueError('Cutscene identity/audio differs')
         names[name]=alias
     if not {'intro','homswet'}.issubset(names) or len(names)!=campaign['preparedCutscenes']:
@@ -196,8 +210,12 @@ def validate_campaign(package, map_report):
             expected_checks+=4
             required={'lcs-ending-tune-transport-tests.exe','lcs-owned-audio-output-tests.exe','lcs-ending-tune-source-tests.exe'}
             if not required.issubset({row['executable'] for row in proof['checks'] if row['passed']}) or \
-                not any(row['relative']=='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin' for row in proof['inputs']):
+                (campaign.get('version',0)<90 and not any(row['relative']=='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin' for row in proof['inputs'])):
                 raise ValueError('Finale startup checks or authenticated input missing')
+        if campaign.get('version',0)>=90:
+            expected_checks+=1
+            if 'lcs-ps2-audio-source-tests.exe' not in {row['executable'] for row in proof['checks'] if row['passed']}:
+                raise ValueError('Runtime PS2 audio source check missing')
         if not proof['valid'] or not proof['engineMocked'] or proof['gameExecuted'] or proof['campaignPlayable'] or len(proof['checks'])!=expected_checks:raise ValueError('Campaign offline startup proof has invalid scope')
         if campaign.get('version',0)>=30:
             if campaign.get('version',0)>=50 and not all(campaign.get('runtimeSafeguards',{}).get(key) is True for key in
@@ -262,6 +280,7 @@ def validate_campaign(package, map_report):
             if campaign.get('version',0)>=63:required_outputs.update(('lcs-script-markers-tests.log',
                 'lcs-script-marker-pool-tests.log','lcs-script-marker-render-tests.log',
                 'original-marker-contracts.log','validate-script-marker-resources.log'))
+            if campaign.get('version',0)>=90:required_outputs.add('lcs-ps2-audio-source-tests.log')
             if {row['output'] for row in proof['checks']}!=required_outputs:raise ValueError('Campaign regression proof outputs do not match required checks')
         for row in proof['inputs']:
             if digest(package/row['relative'])!=row['sha256']:raise ValueError('Campaign startup input changed: '+row['relative'])

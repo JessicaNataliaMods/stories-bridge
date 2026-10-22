@@ -63,6 +63,78 @@ AudioArchive::AudioArchive(const std::filesystem::path& directory,const std::str
     if(!index.read(reinterpret_cast<char*>(bytes.data()),length))throw std::runtime_error("Truncated audio index");
     records_=parse_index(bytes,std::filesystem::file_size(raw_));
 }
+AudioArchive::AudioArchive(Ps2Audio,const std::filesystem::path& directory):news_(directory/"NEWS"),layout_mutex_(std::make_shared<std::mutex>()),ps2_mode_(true) {
+    // The original sample enum lists bank 0, then banks 1 and 3..66 (the
+    // per-area sets), then the large bank 2.
+    std::vector<int> order{0,1};for(int bank=3;bank<=66;++bank)order.push_back(bank);order.push_back(2);
+    for(const auto bank:order) {
+        const auto set=directory/("SET"+std::to_string(bank<10?0:bank/10));
+        const auto stem="SFX"+std::to_string(bank)+"_PS";
+        std::ifstream index(set/(stem+".SDT"),std::ios::binary|std::ios::ate);
+        if(!index)throw std::runtime_error("Original PS2 sample bank index is missing: "+(set/(stem+".SDT")).string());
+        const auto length=uint64_t(index.tellg());
+        if(!length || length%12 || length>12ull*TOTAL_AUDIO_SAMPLES)throw std::runtime_error("Invalid original PS2 sample bank index: "+stem);
+        std::vector<uint8_t> bytes(static_cast<size_t>(length));index.seekg(0);
+        if(!index.read(reinterpret_cast<char*>(bytes.data()),std::streamsize(length)))throw std::runtime_error("Truncated original PS2 sample bank index");
+        const auto raw=set/(stem+".RAW");
+        std::error_code error;const auto raw_size=std::filesystem::file_size(raw,error);
+        if(error)throw std::runtime_error("Original PS2 sample bank data is missing: "+raw.string());
+        for(size_t at=0;at<bytes.size();at+=12) {
+            const Ps2Record record{uint16_t(banks_.size()),read32(bytes,at),read32(bytes,at+4),read32(bytes,at+8)};
+            if(record.offset>raw_size || record.size>raw_size-record.offset || record.size%16)
+                throw std::runtime_error("Invalid original PS2 sample record in "+stem);
+            ps2_.push_back(record);
+        }
+        banks_.push_back(raw);
+    }
+    if(ps2_.size()!=TOTAL_AUDIO_SAMPLES)throw std::runtime_error("PS2 AUDIO banks do not match the original LCS sample enum (expected SLUS-21423)");
+    layouts_.resize(ps2_.size());
+    for(int index=0;index<14;++index) {
+        const auto news=news_/(std::string("NEWS_")+char('A'+index)+".VB");
+        if(!std::filesystem::is_regular_file(news))throw std::runtime_error("Original PS2 news stream is missing: "+news.string());
+    }
+}
+std::vector<uint8_t> AudioArchive::ps2_bytes(uint32_t index) const {
+    if(index>=ps2_.size())throw std::runtime_error("Invalid original audio sample index");
+    const auto& record=ps2_[index];
+    if(record.size>16*1024*1024)throw std::runtime_error("Oversized original PS2 sample");
+    std::vector<uint8_t> bytes(record.size);
+    std::ifstream raw(banks_[record.bank],std::ios::binary);raw.seekg(record.offset);
+    if(!raw.read(reinterpret_cast<char*>(bytes.data()),std::streamsize(bytes.size())))throw std::runtime_error("Truncated original PS2 sample");
+    return bytes;
+}
+AudioArchive::Ps2Layout AudioArchive::ps2_layout(uint32_t index,const std::vector<uint8_t>& bytes) const {
+    // VAG samples: 48-byte big-endian header, then one omitted lead frame.
+    // Headerless samples begin at their loop-start frame. Playback ends after
+    // the first end-flag frame (bit 0); a repeat flag (bit 1) on it loops from
+    // the loop-start frame (bit 2), as the SPU2 voice does.
+    const auto& source=ps2_[index];
+    const bool vag=bytes.size()>=64 && !std::memcmp(bytes.data(),"VAGp",4);
+    const size_t data=vag?48:0;
+    if(bytes.size()<data+16 || (bytes.size()-data)%16)throw std::runtime_error("Invalid original PS2 sample frame size");
+    const auto frames=uint32_t((bytes.size()-data)/16);
+    auto flags=[&](uint32_t frame){return bytes[data+16*size_t(frame)+1];};
+    if(vag) {
+        const auto big=[&](size_t at){return uint32_t(bytes[at])<<24|uint32_t(bytes[at+1])<<16|uint32_t(bytes[at+2])<<8|bytes[at+3];};
+        if(big(12)!=bytes.size()-48 || big(16)!=source.frequency)throw std::runtime_error("Original VAG header differs from its bank index");
+    }
+    if(!source.frequency || source.frequency>192000)
+        throw std::runtime_error("Original PS2 sample "+std::to_string(index)+" has no source frequency (headerless engine bank)");
+    uint32_t first=vag?1:frames;
+    if(!vag)for(uint32_t frame=0;frame<frames;++frame)if(flags(frame)&4){first=frame;break;}
+    uint32_t terminal=frames;
+    for(uint32_t frame=first;frame<frames;++frame)if(flags(frame)&1){terminal=frame;break;}
+    if(first>=frames || terminal>=frames)throw std::runtime_error("Original PS2 sample has no playable frame range");
+    Ps2Layout layout{first,terminal-first+1,{}};
+    layout.record.size=layout.frames*56;layout.record.frequency=source.frequency;
+    if(flags(terminal)&2) {
+        uint32_t start=terminal+1;
+        for(uint32_t frame=first;frame<=terminal;++frame)if(flags(frame)&4){start=frame;break;}
+        if(start>terminal)throw std::runtime_error("Original looping PS2 sample has no loop start");
+        layout.record.loop_start=(start-first)*56;layout.record.loop_end=int32_t(layout.record.size)-2;
+    }
+    return layout;
+}
 AudioSample AudioArchive::sample(const std::string& name) const {
     const auto key=upper(name);
     const auto entry=std::find_if(std::begin(names),std::end(names),[&](const NamedSample& value){return upper(value.name)==key;});
@@ -70,6 +142,13 @@ AudioSample AudioArchive::sample(const std::string& name) const {
     return sample(entry->index);
 }
 AudioSample AudioArchive::sample(uint32_t index) const {
+    if(ps2_mode_) {
+        const auto bytes=ps2_bytes(index);const auto layout=ps2_layout(index,bytes);
+        const size_t data=bytes.size()>=64 && !std::memcmp(bytes.data(),"VAGp",4)?48:0;
+        AudioSample result;result.frequency=layout.record.frequency;
+        result.pcm=decode_spu2_voice(bytes.data()+data+16*size_t(layout.first),layout.frames);
+        return result;
+    }
     const auto& record=this->record(index);
     if(!record.size || record.size>16*1024*1024)throw std::runtime_error("Empty or oversized mission audio sample");
     AudioSample result;result.frequency=record.frequency;result.pcm.resize(record.size);
@@ -78,12 +157,19 @@ AudioSample AudioArchive::sample(uint32_t index) const {
     return result;
 }
 const AudioRecord& AudioArchive::record(uint32_t index) const {
+    if(ps2_mode_) {
+        if(index>=ps2_.size())throw std::runtime_error("Invalid original audio sample index");
+        std::lock_guard lock(*layout_mutex_);
+        if(!layouts_[index])layouts_[index]=ps2_layout(index,ps2_bytes(index)).record;
+        return *layouts_[index];
+    }
     if(index>=records_.size())throw std::runtime_error("Invalid original audio sample index");
     return records_[index];
 }
 AudioSample AudioArchive::announcement(int32_t index) const {
     if(index<0 || index>=14)throw std::runtime_error("Invalid original radio announcement");
-    const auto sample=read_pcm_wave(news_/(std::string("NEWS_")+char('A'+index)+".wav"+suffix_));
+    const auto sample=ps2_mode_ ? read_ps2_stream(news_/(std::string("NEWS_")+char('A'+index)+".VB"))
+                                : read_pcm_wave(news_/(std::string("NEWS_")+char('A'+index)+".wav"+suffix_));
     if(sample.frequency!=32000 || sample.channels!=2)throw std::runtime_error("Original news stream format differs");
     return sample;
 }

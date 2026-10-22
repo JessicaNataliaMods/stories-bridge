@@ -3,6 +3,8 @@
 #include "continuous_sound.hpp"
 #include "source_audio_random.hpp"
 #include <optional>
+#include <memory>
+#include <mutex>
 
 namespace lcs {
 struct AudioSample {uint32_t frequency=0;std::vector<uint8_t> pcm;uint16_t channels=1;};
@@ -15,8 +17,22 @@ class AudioArchive {
     std::filesystem::path news_;
     std::string suffix_;
     std::vector<AudioRecord> records_;
+    // Original PS2 AUDIO folder: 67 SFXn_PS banks of 12-byte SDT records
+    // (offset, size, frequency) over SPU2 ADPCM; decoded on demand.
+    struct Ps2Record {uint16_t bank;uint32_t offset,size,frequency;};
+    struct Ps2Layout {uint32_t first,frames;AudioRecord record;};
+    std::vector<std::filesystem::path> banks_;
+    std::vector<Ps2Record> ps2_;
+    std::shared_ptr<std::mutex> layout_mutex_;
+    mutable std::vector<std::optional<AudioRecord>> layouts_;
+    bool ps2_mode_=false;
+    std::vector<uint8_t> ps2_bytes(uint32_t index) const;
+    Ps2Layout ps2_layout(uint32_t index,const std::vector<uint8_t>& bytes) const;
 public:
+    struct Ps2Audio {};
     explicit AudioArchive(const std::filesystem::path& directory,const std::string& suffix="");
+    // Reads the user's original LCS PS2 AUDIO folder (SET0..SET6, NEWS).
+    AudioArchive(Ps2Audio,const std::filesystem::path& audio_directory);
     static std::vector<AudioRecord> parse_index(const std::vector<uint8_t>& bytes,uint64_t raw_size);
     static std::vector<std::string> mission_names();
     AudioSample sample(const std::string& name) const;
@@ -25,7 +41,7 @@ public:
     AudioSample announcement(int32_t index) const;
     AudioSample frontend_effect(int32_t script_sound) const;
     AudioSample phone_ring_sample() const; // retail event76 maps to raw sample236
-    size_t sample_count()const {return records_.size();}
+    size_t sample_count()const {return ps2_mode_?ps2_.size():records_.size();}
 };
 // Mission speech is sampled PCM in LCS. SA's same-named opcode takes a numeric
 // SA sound ID, so it cannot be used for these original labels.

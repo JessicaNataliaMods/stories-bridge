@@ -23,14 +23,20 @@ int main(int argc,char** argv){try {
         const auto source=TextArchive::load(mounted/"TEXT"/(std::string(language)+".gxt.bin"),true);
         TextArchive::load(package/"text"/(std::string(language)+".gxt"),false).require_campaign(source);
     }
-    AudioArchive source_audio(original/"audio"),mounted_audio(mounted/"audio",".bin");size_t speech=0;
-    for(const auto& name:AudioArchive::mission_names()) {
-        const auto x=source_audio.sample(name),y=mounted_audio.sample(name);
-        check(x.frequency==y.frequency && x.channels==y.channels && x.pcm==y.pcm,"Packaged original mission speech differs");++speech;
+    size_t speech=0;
+    // From v90 the package carries no audio; the ASI reads the user's PS2 AUDIO
+    // folder (checked by lcs-ps2-audio-source-tests).
+    if(std::filesystem::exists(mounted/"audio")) {
+        AudioArchive source_audio(original/"audio"),mounted_audio(mounted/"audio",".bin");
+        for(const auto& name:AudioArchive::mission_names()) {
+            const auto x=source_audio.sample(name),y=mounted_audio.sample(name);
+            check(x.frequency==y.frequency && x.channels==y.channels && x.pcm==y.pcm,"Packaged original mission speech differs");++speech;
+        }
+        for(int i=0;i<14;++i) {
+            const auto x=source_audio.announcement(i),y=mounted_audio.announcement(i);
+            check(x.frequency==y.frequency && x.channels==y.channels && x.pcm==y.pcm,"Packaged original radio news differs");
+        }
     }
-    for(int i=0;i<14;++i) {
-        const auto x=source_audio.announcement(i),y=mounted_audio.announcement(i);
-        check(x.frequency==y.frequency && x.channels==y.channels && x.pcm==y.pcm,"Packaged original radio news differs");
-    }
-    std::cout<<"PASS: unchanged original SCM, "<<b.mission_offsets.size()<<" mission entries, five native language banks, "<<speech<<" original speech labels, 14 news streams; opaque source .bin files; gameExecuted=false\n";return 0;
+    std::cout<<"PASS: unchanged original SCM, "<<b.mission_offsets.size()<<" mission entries, five native language banks, "
+             <<(speech?std::to_string(speech)+" original speech labels, 14 news streams":std::string("no packaged audio"))<<"; opaque source .bin files; gameExecuted=false\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

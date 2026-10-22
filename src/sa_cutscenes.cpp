@@ -11,7 +11,7 @@
 #include <stdexcept>
 namespace lcs {
 namespace {
-std::string sha256(const std::filesystem::path& path) {
+std::string sha256(const std::filesystem::path* path,const std::vector<uint8_t>* bytes) {
     BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
     const auto cleanup=[&](){if(hash)BCryptDestroyHash(hash);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);};
     try {
@@ -20,14 +20,24 @@ std::string sha256(const std::filesystem::path& path) {
         if(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&length),sizeof(length),&written,0)<0 || !length || length>1048576)throw std::runtime_error("Invalid hash provider size");
         std::vector<uint8_t> object(length);
         if(BCryptCreateHash(algorithm,&hash,object.data(),length,nullptr,0,0)<0)throw std::runtime_error("Cannot create resource hash");
-        std::ifstream in(path,std::ios::binary);if(!in)throw std::runtime_error("Missing mounted cutscene resource: "+path.string());
-        std::array<uint8_t,65536> buffer{};
-        while(in){in.read(reinterpret_cast<char*>(buffer.data()),buffer.size());if(in.gcount() && BCryptHashData(hash,buffer.data(),ULONG(in.gcount()),0)<0)throw std::runtime_error("Resource hashing failed");}
-        if(!in.eof())throw std::runtime_error("Mounted resource read failed");
+        if(bytes) {
+            if(BCryptHashData(hash,const_cast<PUCHAR>(bytes->data()),ULONG(bytes->size()),0)<0)throw std::runtime_error("Resource hashing failed");
+        } else {
+            std::ifstream in(*path,std::ios::binary);if(!in)throw std::runtime_error("Missing mounted cutscene resource: "+path->string());
+            std::array<uint8_t,65536> buffer{};
+            while(in){in.read(reinterpret_cast<char*>(buffer.data()),buffer.size());if(in.gcount() && BCryptHashData(hash,buffer.data(),ULONG(in.gcount()),0)<0)throw std::runtime_error("Resource hashing failed");}
+            if(!in.eof())throw std::runtime_error("Mounted resource read failed");
+        }
         std::array<uint8_t,32> digest{};if(BCryptFinishHash(hash,digest.data(),digest.size(),0)<0)throw std::runtime_error("Resource hash completion failed");
         cleanup();hash=nullptr;algorithm=nullptr;
         std::ostringstream out;out<<std::uppercase<<std::hex<<std::setfill('0');for(auto c:digest)out<<std::setw(2)<<int(c);return out.str();
     }catch(...){cleanup();throw;}
+}
+std::string sha256(const std::filesystem::path& path){return sha256(&path,nullptr);}
+std::string sha256(const std::vector<uint8_t>& bytes){return sha256(nullptr,&bytes);}
+std::filesystem::path source_stream(const std::filesystem::path& directory,std::string name) {
+    for(auto& c:name)if(c>='a' && c<='z')c=char(c-32);
+    return directory/(name+".VB");
 }
 bool read(uintptr_t address,void* out,size_t size) {
     SIZE_T actual=0;return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(address),out,size,&actual) && actual==size;
@@ -39,7 +49,7 @@ std::array<std::string,3> row(const std::string& line) {
     if(!values[2].empty() && values[2].back()=='\r')values[2].pop_back();return values;
 }
 }
-NativeCutscenes::NativeCutscenes(const std::filesystem::path& game,const std::filesystem::path& directory,NativeAdapter& adapter):directory_(directory) {
+NativeCutscenes::NativeCutscenes(const std::filesystem::path& game,const std::filesystem::path& directory,const std::filesystem::path& audio_directory,NativeAdapter& adapter):directory_(directory),audio_directory_(audio_directory) {
     std::ifstream index(directory_/"index.tsv");std::string line;
     if(!index || !std::getline(index,line))throw std::runtime_error("Missing mounted cutscene index");
     const auto header=row(line);
@@ -48,16 +58,18 @@ NativeCutscenes::NativeCutscenes(const std::filesystem::path& game,const std::fi
         const auto entry=row(line);
         if(entry[0].empty() || entry[0].size()>8 || !std::all_of(entry[0].begin(),entry[0].end(),[](char c){return (c>='a' && c<='z') || (c>='0' && c<='9') || c=='_';}) || !valid_hash(entry[2]))throw std::runtime_error("Invalid original cutscene identity/hash");
         if(!scenes_.emplace(entry[0],Scene{entry[1],entry[2]}).second)throw std::runtime_error("Duplicate original cutscene index entry");
-        const auto audio=directory_/"audio"/(entry[0]+".wav");
-        if(sha256(audio)!=entry[2])throw std::runtime_error("Original cutscene audio hash mismatch");
+        // Decoding every stream here would delay startup; the hash is checked
+        // when the scene's voice is prepared.
+        if(!std::filesystem::is_regular_file(source_stream(audio_directory_,entry[0])))
+            throw std::runtime_error("Original PS2 cutscene audio is missing: "+source_stream(audio_directory_,entry[0]).string());
     }
     if(scenes_.empty())throw std::runtime_error("Mounted cutscene index is empty");
     for(const auto& entry:scenes_)adapter.bind_cutscene(entry.first,entry.second.alias);
     adapter.prepare_cutscene_audio=[this](const std::string& name){
         const auto found=scenes_.find(name);if(found==scenes_.end())return false;
-        clear();const auto path=directory_/"audio"/(name+".wav");
-        if(sha256(path)!=found->second.hash)return false;
-        sample_=read_pcm_wave(path);return true;
+        clear();auto decoded=read_ps2_stream(source_stream(audio_directory_,name));
+        if(sha256(pcm_wave_bytes(decoded))!=found->second.hash)return false;
+        sample_=std::move(decoded);return true;
     };
     adapter.arm_cutscene_audio=[this](){if(sample_.pcm.empty())throw std::runtime_error("Cutscene voice is not prepared");armed_=true;};
     adapter.clear_cutscene_audio=[this](){clear();};

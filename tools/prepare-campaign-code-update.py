@@ -33,6 +33,15 @@ def mutable_profile(relative, version):
            (version >= 84 and relative.as_posix() == 'models/lcs/paths.img')
 
 
+PATH_KEYS = ('WorldDirectory', 'DataDirectory', 'ResourceDirectory', 'CutsceneDirectory', 'AudioDirectory')
+
+
+def packaged_audio(relative):
+    # From v90 the ASI reads the user's own PS2 AUDIO folder; no audio ships.
+    parts = tuple(part.lower() for part in relative.parts)
+    return parts[:3] == ('metadata', 'lcs-source', 'audio') or parts[:4] == ('data', 'lcs', 'cutscenes', 'audio')
+
+
 def replace_mutable(target, data):
     # A file copied from the base may be a hardlink shared with the rollback:
     # write a new inode instead of modifying the shared one.
@@ -66,10 +75,14 @@ def prepare(base, output, version, notes, refresh, original_data):
             if source.is_symlink() or source.is_junction():
                 raise ValueError('Links in the source package need a separate audit')
             relative = source.relative_to(base)
+            if version >= 90 and packaged_audio(relative):
+                continue
             if source.is_dir():
                 (output/relative).mkdir(exist_ok=True)
                 continue
             if relative.parts[0] == 'metadata' and source.name.endswith('-notes.md'):
+                continue
+            if version >= 90 and packaged_audio(relative):
                 continue
             target = output/relative
             if immutable(relative) and not mutable_profile(relative, version):
@@ -215,18 +228,22 @@ def prepare(base, output, version, notes, refresh, original_data):
     if version >= 53:
         campaign['runtimeSafeguards'].update(typedRemoteVehicleExplosion=True,guardedFocusedRemoteVehicle=True,
             nativeRemoteExplosionEnteredFailureReceipt=True)
+    if version >= 90:
+        campaign['originalResources']=[row for row in campaign['originalResources']
+                                       if not packaged_audio(pathlib.PurePosixPath(row['relative']))]
     if version >= 57:
         source_finale=ROOT / 'local/originals/lcs-ps2/AUDIO/MUSIC/FINALE.VB'
         expected='0490cd090214c4ef44bd8f419a5923484c24fb0b005761b9c535734cd526413c'
         if source_finale.stat().st_size!=3440640 or digest(source_finale)!=expected:
             raise ValueError('Original FINALE.VB profile differs')
-        relative='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin'
-        target=output/relative;target.parent.mkdir(parents=True,exist_ok=True)
-        if target.exists():
-            if digest(target)!=expected:raise ValueError('Staged original FINALE.VB differs')
-        else:shutil.copy2(source_finale,target)
-        if not any(row['relative']==relative for row in campaign['originalResources']):
-            campaign['originalResources'].append(dict(relative=relative,source=str(source_finale),sha256=expected))
+        relative='AUDIO/MUSIC/FINALE.VB' if version >= 90 else 'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin'
+        if version < 90:
+            target=output/relative;target.parent.mkdir(parents=True,exist_ok=True)
+            if target.exists():
+                if digest(target)!=expected:raise ValueError('Staged original FINALE.VB differs')
+            else:shutil.copy2(source_finale,target)
+            if not any(row['relative']==relative for row in campaign['originalResources']):
+                campaign['originalResources'].append(dict(relative=relative,source=str(source_finale),sha256=expected))
         campaign['endingTune']=dict(track=63,source=relative,sha256=expected,sourceBytes=3440640,
             decodedFrequency=32000,decodedChannels=2,decodedPcmBytes=12042240,
             frontendMode=0,stopMode=1,gameExecuted=False)
@@ -237,13 +254,14 @@ def prepare(base, output, version, notes, refresh, original_data):
         expected_city='eae0705d9e10fa59c8f6c552c7e4731f7a0c7718ab2b9b469848fb0e4025e93b'
         if source_city.stat().st_size!=21954560 or digest(source_city)!=expected_city:
             raise ValueError('Original CITY.VB profile differs')
-        relative_city='metadata/lcs-source/AUDIO/MUSIC/CITY.VB.bin'
-        target_city=output/relative_city;target_city.parent.mkdir(parents=True,exist_ok=True)
-        if target_city.exists():
-            if digest(target_city)!=expected_city:raise ValueError('Staged original CITY.VB differs')
-        else:shutil.copy2(source_city,target_city)
-        if not any(row['relative']==relative_city for row in campaign['originalResources']):
-            campaign['originalResources'].append(dict(relative=relative_city,source=str(source_city),sha256=expected_city))
+        relative_city='AUDIO/MUSIC/CITY.VB' if version >= 90 else 'metadata/lcs-source/AUDIO/MUSIC/CITY.VB.bin'
+        if version < 90:
+            target_city=output/relative_city;target_city.parent.mkdir(parents=True,exist_ok=True)
+            if target_city.exists():
+                if digest(target_city)!=expected_city:raise ValueError('Staged original CITY.VB differs')
+            else:shutil.copy2(source_city,target_city)
+            if not any(row['relative']==relative_city for row in campaign['originalResources']):
+                campaign['originalResources'].append(dict(relative=relative_city,source=str(source_city),sha256=expected_city))
         campaign['cityMusic']=dict(source=relative_city,sha256=expected_city,sourceBytes=21954560,
             retailAreaTracks={'5':17,'17':18},selectors=list(range(40,46)),gameExecuted=False)
     if version >= 66:
@@ -364,6 +382,27 @@ def prepare(base, output, version, notes, refresh, original_data):
         (output/'metadata/navigation.json').write_text(json.dumps(dict(conversion=conversion, nativeValidation=graph), indent=2), encoding='utf-8')
         campaign['navigation84'] = dict(source=str(navigation), pathsImgSha256=graph['PathsImgSha256'],
                                         linkStorage='area of link position (native SA rule)', gameExecuted=False)
+    if version >= 90:
+        campaign['originalAudio90'] = dict(packagedAudio=False, folder='AUDIO next to LcsSaBridge.asi', banks=67, sampleRecords=5661,
+            refusedHeaderlessEngineRecords=27, streams=['NEWS', 'CUTSCENE', 'MUSIC/CITY.VB', 'MUSIC/FINALE.VB'],
+            gameExecuted=False)
+        # Self-contained package: the ASI derives every folder from its own
+        # location, so the INI carries no paths.
+        ini_path = output/'LcsSaBridge.ini'
+        ini = ini_path.read_bytes().decode('utf-16')
+        kept = [line for line in ini.splitlines() if line.split('=', 1)[0] not in PATH_KEYS]
+        if len(kept) != len(ini.splitlines()):
+            if ini_path.stat().st_nlink != 1:
+                raise ValueError('Mutable INI must not share an inode with a rollback')
+            ini_path.write_bytes(('\r\n'.join(kept)+'\r\n').encode('utf-16'))
+        readme = output/'LEIA.txt'
+        notice = ('Audio: copie a pasta AUDIO do seu LCS de PS2 (SLUS-21423) para esta pasta, ao lado do '
+                  'LcsSaBridge.asi. Nenhum audio vem neste pacote.\n')
+        text = readme.read_text(encoding='utf-8')
+        if notice not in text:
+            if readme.stat().st_nlink != 1:
+                raise ValueError('Mutable readme must not share an inode with a rollback')
+            readme.write_text(text.rstrip('\n')+'\n'+notice, encoding='utf-8')
     (output/'metadata/campaign.json').write_text(json.dumps(campaign, indent=2))
     preview = json.loads((output/'metadata/map-preview.json').read_text())
     preview['version'] = str(version)
@@ -372,6 +411,8 @@ def prepare(base, output, version, notes, refresh, original_data):
     preserved = 0
     for source in base.rglob('*'):
         relative = source.relative_to(base)
+        if version >= 90 and packaged_audio(relative):
+            continue
         if source.is_file() and immutable(relative) and not mutable_profile(relative, version):
             if digest(source) != digest(output/relative):
                 raise ValueError('Original immutable resource changed: '+str(relative))
