@@ -12,6 +12,9 @@
 #include <cstring>
 #include "convert_vehicle.hpp"
 #include "convert_vehicle_classes.hpp"
+#include "convert_vehicle_aircraft.hpp"
+#include "convert_vehicle_special.hpp"
+#include "convert_vehicle_ambient.hpp"
 #include "convert_ped.hpp"
 #include "sa_map_lighting.hpp"
 
@@ -21,10 +24,12 @@ bool white_map=false;
 fs::path map_lighting;
 fs::path vehicle_wheel;
 fs::path vehicle_car_collision;
+bool vehicle_dodo_plane=false;
 bool vehicle_boat=false;
 std::filesystem::path vehicle_boat_collision;
 std::string vehicle_class;
 fs::path vehicle_class_collision;
+float vehicle_class_wheel_size=0.0f;
 fs::path ped_reference;
 float vehicle_wheel_scale=0;
 std::string selected_atomic;
@@ -324,10 +329,15 @@ void convert_dff(rw::StreamFile& in,rw::StreamFile& out) {
         gta::setPipelineID(a,0);
         if(white_map)SaMapLighting(map_lighting).apply(a);
     }
-    if(!vehicle_wheel.empty())adapt_sa_car(clump,vehicle_wheel,vehicle_wheel_scale,vehicle_car_collision);
+    if(!vehicle_wheel.empty()) {
+        if(vehicle_dodo_plane)adapt_sa_dodo_plane(clump,vehicle_wheel,vehicle_wheel_scale,vehicle_car_collision);
+        else adapt_sa_car(clump,vehicle_wheel,vehicle_wheel_scale,vehicle_car_collision);
+    }
     if(vehicle_boat)adapt_sa_boat(clump, vehicle_boat_collision);
     if(vehicle_class=="bike")adapt_sa_bike(clump,vehicle_class_collision);
     if(vehicle_class=="generic-boat")adapt_sa_generic_boat(clump,vehicle_class_collision);
+    if(vehicle_class=="heli")adapt_sa_heli(clump,vehicle_class_collision,vehicle_class_wheel_size);
+    if(vehicle_class=="train")adapt_sa_train(clump,vehicle_class_collision);
     if(!ped_reference.empty())clump=adapt_sa_ped(clump,ped_reference);
     rw::platform=rw::PLATFORM_D3D9;
     rw::switchPipes(clump,rw::platform);
@@ -387,21 +397,26 @@ int main(int argc,char** argv) {
     try {
         if(argc==4 && std::string(argv[2])=="--map-col"){validate_col(argv[1],argv[3]);return 0;}
         const bool car=(argc==6 || argc==7) && std::string(argv[3])=="--sa-car";
+        const bool dodo_plane=(argc==6 || argc==7) && std::string(argv[3])=="--sa-dodo-plane";
         const bool boat=argc==5 && std::string(argv[3])=="--sa-boat";
-        const bool class_vehicle=argc==5 && (std::string(argv[3])=="--sa-bike" || std::string(argv[3])=="--sa-generic-boat");
+        const bool heli=argc==6 && std::string(argv[3])=="--sa-heli";
+        const bool class_vehicle=heli || (argc==5 && (std::string(argv[3])=="--sa-bike" || std::string(argv[3])=="--sa-generic-boat" || std::string(argv[3])=="--sa-train"));
         const bool ped=argc==5 && std::string(argv[3])=="--sa-ped";
         const bool merge=argc==5 && std::string(argv[2])=="--merge-txd";
         const bool named=argc==5 && std::string(argv[3])=="--atomic-name";
         const bool lit_map=argc==5 && std::string(argv[3])=="--atomic-white";
-        if(argc!=3 && !(argc==4 && (std::string(argv[3])=="--atomic"||std::string(argv[3])=="--atomic-white")) && !car && !boat && !class_vehicle && !ped && !merge && !named && !lit_map) throw std::runtime_error("Usage: lcs-convert-rw INPUT OUTPUT [--atomic | --atomic-white [LIGHTING.psl] | --atomic-name NAME | --sa-boat COLLISION.col | --sa-bike COLLISION.col | --sa-generic-boat COLLISION.col | --sa-car WHEEL.dff SCALE [COLLISION.col] | --sa-ped NATIVE_PED.dff]; OWN.txd --merge-txd SHARED.txd OUTPUT.txd");
+        if(argc!=3 && !(argc==4 && (std::string(argv[3])=="--atomic"||std::string(argv[3])=="--atomic-white")) && !car && !dodo_plane && !boat && !class_vehicle && !ped && !merge && !named && !lit_map) throw std::runtime_error("Usage: lcs-convert-rw INPUT OUTPUT [--atomic | --atomic-white [LIGHTING.psl] | --atomic-name NAME | --sa-boat COLLISION.col | --sa-bike COLLISION.col | --sa-generic-boat COLLISION.col | --sa-heli COLLISION.col | --sa-car WHEEL.dff SCALE [COLLISION.col] | --sa-dodo-plane WHEEL.dff SCALE COLLISION.col | --sa-ped NATIVE_PED.dff]; OWN.txd --merge-txd SHARED.txd OUTPUT.txd");
+        vehicle_dodo_plane=dodo_plane;
         if(class_vehicle){vehicle_class=std::string(argv[3]).substr(5);vehicle_class_collision=argv[4];}
+        if(heli)vehicle_class_wheel_size=std::stof(argv[5]);
         if(ped)ped_reference=argv[4];
         white_map=(argc==4||lit_map)&&std::string(argv[3])=="--atomic-white";
         vehicle_boat=boat;
         if(boat)vehicle_boat_collision=argv[4];
-        atomic_only=(argc==4 && (std::string(argv[3])=="--atomic" || std::string(argv[3])=="--atomic-white"))||lit_map;if(lit_map)map_lighting=argv[4];if(named)selected_atomic=argv[4];if(car){vehicle_wheel=argv[4];vehicle_wheel_scale=std::stof(argv[5]);if(argc==7)vehicle_car_collision=argv[6];}
+        atomic_only=(argc==4 && (std::string(argv[3])=="--atomic" || std::string(argv[3])=="--atomic-white"))||lit_map;if(lit_map)map_lighting=argv[4];if(named)selected_atomic=argv[4];if(car||dodo_plane){vehicle_wheel=argv[4];vehicle_wheel_scale=std::stof(argv[5]);if(argc==7)vehicle_car_collision=argv[6];}
         fs::path input=argv[1],output=argv[2];
-        bool info=std::string(argv[2])=="--info" || std::string(argv[2])=="--texture-index" || std::string(argv[2])=="--validate" || std::string(argv[2])=="--validate-actors" || std::string(argv[2])=="--validate-col" || std::string(argv[2])=="--validate-sa-car" || std::string(argv[2])=="--validate-sa-boat" || std::string(argv[2])=="--validate-sa-bike" || std::string(argv[2])=="--validate-sa-generic-boat" || std::string(argv[2])=="--map-inventory";
+        bool info=std::string(argv[2])=="--info" || std::string(argv[2])=="--texture-index" || std::string(argv[2])=="--validate" || std::string(argv[2])=="--validate-actors" || std::string(argv[2])=="--validate-col" || std::string(argv[2])=="--validate-sa-car" || std::string(argv[2])=="--validate-sa-boat" || std::string(argv[2])=="--validate-sa-bike" || std::string(argv[2])=="--validate-sa-generic-boat" || std::string(argv[2])=="--validate-sa-heli" || std::string(argv[2])=="--map-inventory";
+        info=info || std::string(argv[2])=="--validate-sa-dodo-plane" || std::string(argv[2])=="--validate-sa-train";
         if(!info && fs::exists(output)) throw std::runtime_error("Output already exists");
         rw::Engine::init(); gta::attachPlugins(); rw::Engine::open(nullptr); rw::Engine::start();
         rw::Texture::setLoadTextures(false);
@@ -420,6 +435,9 @@ int main(int argc,char** argv) {
             else if(std::string(argv[2])=="--validate-sa-boat")validate_sa_boat(input);
             else if(std::string(argv[2])=="--validate-sa-bike")validate_sa_bike(input);
             else if(std::string(argv[2])=="--validate-sa-generic-boat")validate_sa_generic_boat(input);
+            else if(std::string(argv[2])=="--validate-sa-heli")validate_sa_heli(input);
+            else if(std::string(argv[2])=="--validate-sa-dodo-plane")validate_sa_dodo_plane(input);
+            else if(std::string(argv[2])=="--validate-sa-train")validate_sa_train(input);
             else inspect_dff(input);
             rw::Engine::stop();rw::Engine::close();rw::Engine::term();return 0;
         }

@@ -33,6 +33,7 @@ with zipfile.ZipFile(resources/'python/python312.zip','w',compression=zipfile.ZI
 for name in ('msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','vcruntime140.dll','msvcp140_atomic_wait.dll'):
     copy(args.crt/name,out/name);copy(args.crt/name,resources/'build/Release'/name)
 scripts=('convert-ps2-map.py','ps2_world.py','ps2_export.py','ps2_input.py','ps2_water.py','ps2_names.py','ps2_visibility.py','ps2_layout.py','ps2_lighting.py','ps2_geometry_audit.py','ps2_paths.py','ps2_player.py','ps2_peds.py','ps2_weapons.py','prepare-weapon-models.py','prepare-campaign-vehicles.py','vehicle_config_fields.py','vehicle_config.py','mount-campaign-vehicles.py','validate-sa-paths.py','validate-ps2-map.py','validate-ps2-texture-pixels.py','validate-ps2-layout.py','validate-ps2-player.py')
+scripts += ('vehicle_source_collision.py',)
 for name in scripts:copy(root/'tools'/name,resources/'tools'/name)
 copy(root/'tools/ped_rig_audit.py',resources/'tools/ped_rig_audit.py')
 copy(root/'local/metadata/ps2-source-revision.json',resources/'local/metadata/ps2-source-revision.json')
@@ -56,9 +57,11 @@ for name in ('vehicle-fleet-conversion.md','vehicle-class-conversion.md','weapon
     copy(root/'docs'/name,source/'docs'/name)
 copy(root/'docs/native-object-collisions.md',out/'docs/native-object-collisions.md')
 copy(root/'docs/native-object-collisions.md',source/'docs/native-object-collisions.md')
-for name in ('converter_launcher.cpp','ps2_asset_writer.cpp','convert_rw.cpp','convert_vehicle.cpp','convert_vehicle.hpp','convert_vehicle_classes.cpp','convert_vehicle_classes.hpp','convert_ped.cpp','convert_ped.hpp','sa_map_lighting.hpp'):
+for name in ('converter_launcher.cpp','ps2_asset_writer.cpp','convert_rw.cpp','convert_vehicle.cpp','convert_vehicle.hpp','convert_vehicle_classes.cpp','convert_vehicle_classes.hpp','convert_vehicle_aircraft.cpp','convert_vehicle_aircraft.hpp','convert_vehicle_special.cpp','convert_vehicle_special.hpp','convert_ped.cpp','convert_ped.hpp','sa_map_lighting.hpp'):
     copy(root/'src'/name,source/'src'/name)
 source_extensions={'.c','.cpp','.h','.hpp','.inc','.in','.cmake','.txt','.md','.lua','.rc','.def','.idl','.err'}
+for name in ('convert_vehicle_ambient.cpp','convert_vehicle_ambient.hpp'):
+    copy(root/'src'/name,source/'src'/name)
 for vendor in ('librw/librw-master','librwgta/librwgta-master'):
     for path in (root/'vendor'/vendor).rglob('*'):
         if not path.is_file() or '.git' in path.parts:continue

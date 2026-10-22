@@ -259,11 +259,21 @@ def load_fleet(fleet):
         required = ("LcsId", "Name", "NativeId", "NativeName", "NativeHandling")
         if any(row.get(key) in (None, "") for key in required):
             raise ValueError("Prepared fleet vehicle lacks a native binding")
+        kind = row.get("PhysicalClass", "car")
+        expected_special = {"bike": ("!", 17), "boat": ("%", 16), "heli": ("$", 23), "plane": ("$", 23)}.get(kind)
+        if expected_special:
+            special = row.get("SpecialHandling", [])
+            fields = special[0].split() if len(special) == 1 else []
+            if len(fields) != expected_special[1] or fields[:2] != [expected_special[0], row["NativeHandling"]]:
+                raise ValueError("Prepared class vehicle lacks its complete specialized physics: " + row["Name"])
+            if kind in {"heli", "plane"} and not 186 <= row.get("NativeHandlingId", -1) <= 209:
+                raise ValueError("Prepared aircraft has no native flying-pointer identity: " + row["Name"])
         mappings.append({"LcsId": int(row["LcsId"]), "Name": str(row["Name"]).lower(),
                          "NativeId": int(row["NativeId"]), "NativeName": str(row["NativeName"]),
                          "NativeHandling": str(row["NativeHandling"]).upper(),
                          "PhysicalClass": row.get("PhysicalClass", "car"),
-                         "SpecialHandling": row.get("SpecialHandling", [])})
+                         "SpecialHandling": row.get("SpecialHandling", []),
+                         "NativeHandlingId": row.get("NativeHandlingId")})
     for key in ("LcsId", "NativeId", "NativeName"):
         values = [str(item[key]).casefold() for item in mappings]
         if len(set(values)) != len(values):

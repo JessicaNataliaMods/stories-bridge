@@ -11,9 +11,11 @@ from pathlib import Path
 import re
 import struct
 import subprocess
+import shutil
 from ps2_world import Game
 from vehicle_config_fields import convert_handling as adapt_handling, convert_ide as adapt_ide, convert_special_handling
 from vehicle_config import convert_carcols, parse_carcols
+from vehicle_source_collision import read_vehicle_collision
 
 ROOT = Path(__file__).resolve().parents[1]
 TYPE_FLAGS = {0x10000: "bike", 0x20000: "heli", 0x40000: "plane", 0x80000: "boat"}
@@ -24,9 +26,10 @@ CLASS_BLOCKERS = {
 }
 # Dedicated engine behavior depends on these SA IDs. Name matches are reserved
 # first; ordinary unmatched cars use ordinary car slots, never special classes.
-ALIASES = {"hotrod": "hotknife", "kuruma": "primo", "police": "copcarla", "fbicar": "fbiranch"}
+ALIASES = {"hotrod": "hotknife", "kuruma": "primo", "police": "copcarla", "fbicar": "fbiranch", "chopper": "sparrow", "train": "streak"}
 RESERVED = set("firetruk trash ambulan rhino towtruck combine forklift vortex kart tractor caddy rcbandit rctiger securica bus coach mrwhoop barracks packer tanker cement sweeper dumper dozer utility flatbed firela hotknife copcarla copcarsf copcarvg copcarru swatvan fbiranch fbitruck enforcer".split())
 RESERVED.add("tropic")  # The separately converted mission ferry owns this slot.
+RESERVED.update({"leviathn", "seaspar", "cargobob", "raindanc"})
 
 
 def sha(path):
@@ -72,6 +75,42 @@ def handling_rows(path, expected):
     return rows
 
 
+def native_handling_ids(executable):
+    """Read the supported SA PE's handling-name interface without executing it.
+
+    Config file order is not the engine's handling ID. In particular `$` rows
+    outside GetFlyingPointer's range would alias the first aircraft's physics.
+    The names remain user input, never a bundled extracted name table.
+    """
+    data = Path(executable).read_bytes()
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError("Native handling identities require the supported SA PE reference")
+    nt = struct.unpack_from("<I", data, 60)[0]
+    if nt + 88 > len(data) or data[nt:nt + 4] != b"PE\0\0":
+        raise ValueError("Invalid native PE header")
+    if struct.unpack_from("<H", data, nt + 4)[0] != 0x14C or struct.unpack_from("<H", data, nt + 24)[0] != 0x10B or struct.unpack_from("<I", data, nt + 52)[0] != 0x400000:
+        raise ValueError("Unsupported native PE handling profile")
+    sections = nt + 24 + struct.unpack_from("<H", data, nt + 20)[0]
+    count = struct.unpack_from("<H", data, nt + 6)[0]
+    if not count or sections + 40 * count > len(data):
+        raise ValueError("Invalid native PE section table")
+    table_rva, table_size = 0x8D3978 - 0x400000, 210 * 14
+    for index in range(count):
+        _, start, size, raw = struct.unpack_from("<IIII", data, sections + index * 40 + 8)
+        if start <= table_rva and table_rva + table_size <= start + size:
+            offset = raw + table_rva - start
+            if raw + size > len(data) or offset + table_size > len(data):
+                raise ValueError("Native handling table exceeds the reference file")
+            names = [data[offset + 14 * i:offset + 14 * (i + 1)].split(b"\0", 1)[0].decode("ascii") for i in range(210)]
+            if len(set(names)) != 210 or any(not re.fullmatch(r"[A-Z0-9_]+", name) for name in names):
+                raise ValueError("Invalid native handling identity table")
+            ids = {name: i for i, name in enumerate(names)}
+            if ids.get("DODO") != 197 or ids.get("MAVERICK") != 200 or ids.get("RCGOBLIN") != 208:
+                raise ValueError("Native handling identities do not match the supported profile")
+            return ids
+    raise ValueError("Native handling identity table is unavailable in this PE")
+
+
 def convert_handling(fields, native_name, ide_fields):
     result = adapt_handling(fields, native_name, ide_fields)
     return result["fields"], result["unmapped_flags"]
@@ -93,6 +132,23 @@ def collision_models(path):
         models[name] = data[pos:end]
         pos = end
     return models
+
+
+def collision_has_volumes(chunk):
+    position = 72  # COLL record header/name and legacy bounds
+    counts = []
+    for stride in (20, 24, 28, 12, 16):
+        if position + 4 > len(chunk):
+            raise ValueError("Truncated original vehicle collision count")
+        count = struct.unpack_from("<I", chunk, position)[0]
+        position += 4
+        if count > (len(chunk) - position) // stride:
+            raise ValueError("Original vehicle collision array exceeds its record")
+        counts.append(count)
+        position += count * stride
+    if position != len(chunk):
+        raise ValueError("Original vehicle collision has trailing data")
+    return bool(counts[0] or counts[2] or counts[4])
 
 
 def alias_collision(chunk, name):
@@ -145,7 +201,8 @@ def validate(output, converter):
             name = record["NativeName"]
             kind = record.get("PhysicalClass", "car")
             validator = {"car": "--validate-sa-car", "bike": "--validate-sa-bike",
-                         "boat": "--validate-sa-generic-boat"}[kind]
+                         "boat": "--validate-sa-generic-boat", "heli": "--validate-sa-heli",
+                         "plane": "--validate-sa-dodo-plane", "train": "--validate-sa-train"}[kind]
             run(converter, output / "models" / (name + ".dff"), validator)
     run(converter, output / "models", "--validate-actors")
     run(converter, output / "vehicles.col", "--validate-col")
@@ -157,24 +214,70 @@ def prepare(args):
     entities = args.entities.resolve()
     game = args.game.resolve()
     out = args.output.resolve()
-    if out.exists():
+    previous = None
+    if out.exists() and args.extend_existing:
+        previous = json.loads((out / "manifest.json").read_text(encoding="utf-8-sig"))
+        if not previous.get("Prepared") or previous.get("Installed") or previous.get("GameExecuted"):
+            raise ValueError("Only an offline prepared fleet can be extended")
+        for item in previous["OutputFiles"]:
+            path = (out / item["RelativePath"]).resolve()
+            if not path.is_relative_to(out) or sha(path) != item["Sha256"].upper():
+                raise ValueError("Existing fleet output changed: " + item["RelativePath"])
+        # Verify the inputs used to plan bindings/configuration. The original
+        # large source archives are not consumed again when shared TXDs are reused.
+        planning_inputs = {source / "DATA/DEFAULT.IDE", source / "DATA/HANDLING.CFG",
+            source / "DATA/CARCOLS.DAT", source / "models/coll/vehicles.col", entities / "manifest.json",
+            game / "data/vehicles.ide", game / "data/handling.cfg", game / "data/carcols.dat"}
+        for item in previous["SourceFiles"]:
+            if Path(item["Path"]) in planning_inputs and sha(item["Path"]) != item["Sha256"].upper():
+                raise ValueError("Existing fleet planning input changed: " + item["Path"])
+    elif out.exists():
         raise ValueError("Fleet staging already exists; validate it or select a new directory")
+    elif args.extend_existing:
+        raise ValueError("There is no prepared fleet to extend")
     original = read_ide(source / "DATA/DEFAULT.IDE")
     native = read_ide(game / "data/vehicles.ide")
     lcs_handling = handling_rows(source / "DATA/HANDLING.CFG", 34)
     sa_handling = handling_rows(game / "data/handling.cfg", 36)
     collisions = collision_models(source / "models/coll/vehicles.col")
+    collision_game = None
+    def source_collision(model_id, name):
+        nonlocal collision_game
+        if collision_game is None:
+            if previous:
+                dtz = args.ps2_source / "CHK/PS2/GAME.DTZ"
+                expected = next((r["Sha256"] for r in previous["SourceFiles"] if Path(r["Path"]) == dtz), None)
+                if expected and sha(dtz) != expected.upper():
+                    raise ValueError("Original PS2 collision source changed")
+            collision_game = Game(args.ps2_source, ROOT / "vendor/librwgta/librwgta-master/tools/storiesconv/hashes.inc")
+        return read_vehicle_collision(collision_game, model_id, name)
     entity_manifest = json.loads((entities / "manifest.json").read_text(encoding="utf-8-sig"))
     if entity_manifest["Schema"] != 2 or entity_manifest["FailedConversionCount"]:
         raise ValueError("Original entity geometry stage is incomplete")
     resources = {r["Name"]: r for r in entity_manifest["Resources"]}
     wheel_names = {250: "wheel_sport", 251: "wheel_saloon", 252: "wheel_lightvan", 253: "wheel_classic", 254: "wheel_alloy", 255: "wheel_lighttruck", 256: "wheel_smallcar"}
     native_names = {r[1].lower(): r for r in native}
+    native_ids = {int(r[0]): r for r in native}
+    retained = {r["LcsId"]: r for r in previous["Vehicles"] if r["Prepared"]} if previous else {}
     slots = {}
     used = set()
     vehicles = []
     for row in original:
         name = row[1].lower()
+        if int(row[0]) in retained:
+            record = retained[int(row[0])]
+            slot = native_ids[record["NativeId"]]
+            if record["OriginalFields"] != row or slot[1] != record["NativeName"] or slot[4] != record["NativeHandling"]:
+                raise ValueError("Existing fleet binding or original definition changed: " + name)
+            vehicles.append(record)
+            slots[name] = slot
+            used.add(int(slot[0]))
+            if record.get("CollisionSource") == "PS2 GAME.DTZ":
+                collision = source_collision(record["LcsId"], name)
+                if collision is None:
+                    raise ValueError("Prepared vehicle lost its source collision: " + name)
+                collisions[name] = collision
+            continue
         fields = lcs_handling.get(row[4])
         kind = row[3]
         if fields:
@@ -189,19 +292,24 @@ def prepare(args):
             record["Reason"] = "No handling row in the original retail library"
         elif name == "ferry":
             record["Reason"] = "Already handled by the dedicated mission ferry package (TROPIC); preserve its doors and ramps"
-        elif kind not in {"car", "bike", "boat"}:
+        elif kind not in {"car", "bike", "boat", "heli", "train"} and not (kind == "plane" and name == "dodo"):
             record["Reason"] = CLASS_BLOCKERS.get(kind, "Requires its original " + kind + " component/physics adapter")
         else:
             _, unknown = convert_handling(fields, row[4], row)
             if unknown:
                 record["Reason"] = f"LCS handling flags still need an adapter: 0x{unknown:X}"
-            elif kind == "car" and int(row[11]) not in wheel_names:
+            elif (kind == "car" or name == "dodo") and int(row[11]) not in wheel_names:
                 record["Reason"] = "Original wheel model is not in the seven-wheel library"
-            elif name not in collisions:
-                record["Reason"] = "Original named vehicle collision missing"
             elif name not in resources or not resources[name]["GeometryValidated"]:
                 record["Reason"] = "Original full vehicle geometry missing"
             else:
+                if name not in collisions or not collision_has_volumes(collisions[name]):
+                    collision = source_collision(record["LcsId"], name)
+                    if collision is None:
+                        record["Reason"] = "Original vehicle has no named collision and GAME.DTZ model info has a null collision pointer"
+                        continue
+                    collisions[name] = collision
+                    record["CollisionSource"] = "PS2 GAME.DTZ"
                 desired = native_names.get(ALIASES.get(name, name))
                 if desired and desired[3] == kind:
                     if int(desired[0]) in used:
@@ -220,9 +328,24 @@ def prepare(args):
             raise ValueError("SA's bounded native slots are exhausted for " + record["PhysicalClass"])
         slots[record["Name"]] = available[0]
         used.add(int(available[0][0]))
-    (out / "models").mkdir(parents=True)
-    (out / "wheels").mkdir()
-    (out / "checks").mkdir()
+    new_records = [r for r in vehicles if not r["Prepared"] and not r["Reason"]]
+    if previous and not new_records:
+        raise ValueError("No newly supported vehicles to extend; existing fleet is unchanged")
+    flying_ids = native_handling_ids(game / "gta_sa.exe") if any(r["PhysicalClass"] in {"heli", "plane"} for r in new_records) else {}
+    (out / "models").mkdir(parents=True, exist_ok=True)
+    (out / "checks").mkdir(exist_ok=True)
+    if previous:
+        rollback = out / "checks/extension-rollback"
+        if rollback.exists():
+            saved = json.loads((rollback / "manifest.json").read_text(encoding="utf-8-sig"))
+            identity = lambda manifest: {(r["LcsId"], r["NativeId"], r["NativeName"]) for r in manifest["Vehicles"] if r["Prepared"]}
+            if not identity(saved).issubset(identity(previous)):
+                raise ValueError("The saved extension rollback is not an ancestor of this fleet")
+        else:
+            rollback.mkdir()
+            for relative in ("manifest.json", "vehicles.ide", "handling.cfg", "vehicle-bindings.tsv",
+                             "vehicle-colours.dat", "carcols.dat", "vehicles.col"):
+                shutil.copyfile(out / relative, rollback / relative)
     # SA's CVehicleModelInfo::FindTextureCB resolves vehicle.txd before the
     # individual model dictionary. Keep its native textures intact and append
     # the original LCS generic dictionary once, instead of 60 private copies.
@@ -231,29 +354,41 @@ def prepare(args):
     # The chrome environment map is stored with the original shotgun rather
     # than in generic. Export only that named raster through the existing PS2
     # writer, preserving its pixels instead of using a dummy white texture.
-    game_source = Game(args.ps2_source, ROOT / "vendor/librwgta/librwgta-master/tools/storiesconv/hashes.inc")
-    chrome = [t for t in game_source.named_textures()
-              if t["dictionary"] == "chromegun" and t["name"] == "xv_chromenv"]
-    if len(chrome) != 1:
-        raise ValueError("Original chrome environment raster must occur exactly once")
-    width, height, pixels = chrome[0]["image"]
-    effect_inputs = out / "checks/shared-input"
-    effect_inputs.mkdir()
-    (effect_inputs / "effects.pst").write_bytes(struct.pack("<4sI32sII", b"PST1", 1,
-        b"xv_chromenv", width, height) + pixels)
-    run(args.writer, effect_inputs, out / "checks/shared-native")
-    shared_with_effects = out / "checks/shared-with-effects.txd"
-    run(args.converter, original_shared, "--merge-txd", out / "checks/shared-native/effects.txd", shared_with_effects)
-    run(args.converter, native_shared, "--merge-txd", shared_with_effects, out / "models/vehicle.txd")
+    if previous:
+        chrome_hash = previous["SharedTextures"]["OriginalChromeRasterSha256"]
+    else:
+        game_source = Game(args.ps2_source, ROOT / "vendor/librwgta/librwgta-master/tools/storiesconv/hashes.inc")
+        chrome = [t for t in game_source.named_textures()
+                  if t["dictionary"] == "chromegun" and t["name"] == "xv_chromenv"]
+        if len(chrome) != 1:
+            raise ValueError("Original chrome environment raster must occur exactly once")
+        width, height, pixels = chrome[0]["image"]
+        chrome_hash = hashlib.sha256(pixels).hexdigest()
+        effect_inputs = out / "checks/shared-input"
+        effect_inputs.mkdir()
+        (effect_inputs / "effects.pst").write_bytes(struct.pack("<4sI32sII", b"PST1", 1,
+            b"xv_chromenv", width, height) + pixels)
+        run(args.writer, effect_inputs, out / "checks/shared-native")
+        shared_with_effects = out / "checks/shared-with-effects.txd"
+        run(args.converter, original_shared, "--merge-txd", out / "checks/shared-native/effects.txd", shared_with_effects)
+        run(args.converter, native_shared, "--merge-txd", shared_with_effects, out / "models/vehicle.txd")
     sources = set()
+    if flying_ids:
+        sources.add(game / "gta_sa.exe")
+    if previous:
+        sources.update(Path(r["Path"]) for r in previous["SourceFiles"])
     for p in [source / "DATA/DEFAULT.IDE", source / "DATA/HANDLING.CFG", source / "models/coll/vehicles.col",
               source / "models/generic/wheels.DFF", source / "DATA/MAIN.SCM", game / "data/vehicles.ide", game / "data/handling.cfg",
               entities / "manifest.json", original_shared, native_shared,
               args.ps2_source / "CHK/PS2/GAME.DTZ", args.ps2_source / "MODELS/GTA3PS2.IMG",
               source / "DATA/CARCOLS.DAT", game / "data/carcols.dat"]:
         sources.add(p)
-    for wheel in wheel_names.values():
-        run(args.converter, source / "models/generic/wheels.DFF", out / "wheels" / (wheel + ".dff"), "--atomic-name", wheel + "_l0")
+    needed_wheels = {wheel_names[int(r["OriginalFields"][11])] for r in vehicles
+                     if not r["Prepared"] and not r["Reason"] and (r["PhysicalClass"] == "car" or r["Name"] == "dodo")}
+    if needed_wheels:
+        (out / "wheels").mkdir(exist_ok=True)
+        for wheel in sorted(needed_wheels):
+            run(args.converter, source / "models/generic/wheels.DFF", out / "wheels" / (wheel + ".dff"), "--atomic-name", wheel + "_l0")
     native_updates = {}
     handling_updates = {}
     special_updates = {}
@@ -273,36 +408,58 @@ def prepare(args):
         sources.update([original_dff, original_txd])
         kind = record["PhysicalClass"]
         record.update(NativeId=int(slot[0]), NativeName=alias, NativeHandling=slot[4],
-                      OriginalWheel=wheel_names[int(row[11])] if kind == "car" else "embedded-original", WheelScale=float(row[12]))
+                      OriginalWheel=wheel_names[int(row[11])] if kind == "car" or name == "dodo" else "embedded-original", WheelScale=float(row[12]))
         record["SharedNativeHandlingModels"] = [dict(NativeId=int(other[0]),NativeName=other[1])
             for other in native if other[4] == slot[4] and other[0] != slot[0]]
-        try:
-            definition = adapt_ide(row, model_id=int(slot[0]), model_name=alias,
-                texture_dictionary=slot[2], handling_name=slot[4], wheel_model_asset=record["OriginalWheel"], physical_class=kind)
-            physics = adapt_handling(lcs_handling[row[4]], slot[4], row, physical_class=kind)
-            # Vehicle clumps must carry their own native COLModel. An external
-            # COL registration alone is insufficient for a standalone DFF override.
-            legacy_col = out / "checks" / (name + "-source.col")
-            mapped_col = out / "checks" / (name + "-native.col")
-            legacy_col.write_bytes(alias_collision(collisions[name], alias))
-            log = run(args.converter, legacy_col, "--map-col", mapped_col)
-            if kind == "car":
-                conversion = ["--sa-car", out / "wheels" / (record["OriginalWheel"] + ".dff"), row[12], mapped_col]
-                validator = "--validate-sa-car"
-            else:
-                conversion = ["--sa-bike" if kind == "bike" else "--sa-generic-boat", mapped_col]
-                validator = "--validate-sa-bike" if kind == "bike" else "--validate-sa-generic-boat"
-            special = convert_special_handling(source_handling_text, row[4], slot[4], kind)
-            log += "\n" + run(args.converter, original_dff, out / "models" / (alias + ".dff"), *conversion)
-            log += "\n" + run(args.converter, original_txd, out / "models" / (slot[2] + ".txd"))
-            log += "\n" + run(args.converter, out / "models" / (alias + ".dff"), validator)
-            (out / "checks" / (name + ".txt")).write_text(log + "\n", encoding="utf-8")
-            (out / "checks" / (name + "-hierarchy.txt")).write_text(run(args.converter, out / "models" / (alias + ".dff"), "--info") + "\n", encoding="utf-8")
-        except ValueError as e:
-            record["Reason"] = str(e)
-            record["NativeId"] = None
-            record["NativeName"] = None
-            continue
+        if record["Prepared"]:
+            definition = record["Configuration"]["Definition"]
+            physics = record["Configuration"]["Handling"]
+            special = record.get("SpecialHandling", [])
+        else:
+            try:
+                definition = adapt_ide(row, model_id=int(slot[0]), model_name=alias,
+                    texture_dictionary=slot[2], handling_name=slot[4], wheel_model_asset=record["OriginalWheel"], physical_class=kind,
+                    lcs_handling_flags=int(lcs_handling[row[4]][31], 16))
+                physics = adapt_handling(lcs_handling[row[4]], slot[4], row, physical_class=kind)
+                # Vehicle clumps must carry their own native COLModel.
+                legacy_col = out / "checks" / (name + "-source.col")
+                mapped_col = out / "checks" / (name + "-native.col")
+                collision_bytes = alias_collision(collisions[name], alias)
+                if mapped_col.exists():
+                    if not legacy_col.exists() or legacy_col.read_bytes() != collision_bytes:
+                        raise ValueError("Collision input changed in the unfinished extension: " + name)
+                    log = run(args.converter, mapped_col, "--validate-col")
+                else:
+                    legacy_col.write_bytes(collision_bytes)
+                    log = run(args.converter, legacy_col, "--map-col", mapped_col)
+                if kind == "car" or name == "dodo":
+                    mode = "dodo-plane" if name == "dodo" else "car"
+                    conversion = ["--sa-" + mode, out / "wheels" / (record["OriginalWheel"] + ".dff"), row[12], mapped_col]
+                    validator = "--validate-sa-" + mode
+                else:
+                    mode = {"bike": "bike", "boat": "generic-boat", "heli": "heli", "train": "train"}[kind]
+                    conversion = ["--sa-" + mode, mapped_col]
+                    validator = "--validate-sa-" + mode
+                    if kind == "heli":
+                        conversion.append(definition["fields"][12])
+                special = convert_special_handling(source_handling_text, row[4], slot[4], kind,
+                                                  native_handling_id=flying_ids.get(slot[4]))
+                if kind in {"heli", "plane"}:
+                    record["NativeHandlingId"] = flying_ids[slot[4]]
+                if name == "dodo":
+                    record["ClassAdaptations"] = ["Use native SA CPlane flight and four wheel nodes; retain original wing/boot/windscreen damage meshes without SA plane damage slots; native renderer hides the damaged alternatives"]
+                if kind == "train":
+                    record["ClassAdaptations"] = ["Use native SA CTrain motion and track consumers; retain the original static wheel geometry, bind side door pivots and map source door low LOD to native VLO"]
+                log += "\n" + run(args.converter, original_dff, out / "models" / (alias + ".dff"), *conversion)
+                log += "\n" + run(args.converter, original_txd, out / "models" / (slot[2] + ".txd"))
+                log += "\n" + run(args.converter, out / "models" / (alias + ".dff"), validator)
+                (out / "checks" / (name + ".txt")).write_text(log + "\n", encoding="utf-8")
+                (out / "checks" / (name + "-hierarchy.txt")).write_text(run(args.converter, out / "models" / (alias + ".dff"), "--info") + "\n", encoding="utf-8")
+            except ValueError as e:
+                record["Reason"] = str(e)
+                record["NativeId"] = None
+                record["NativeName"] = None
+                continue
         native_updates[int(slot[0])] = definition["fields"]
         handling, unknown = physics["fields"], physics["unmapped_flags"]
         record["Configuration"] = {"Definition": definition, "Handling": physics}
@@ -323,7 +480,10 @@ def prepare(args):
         record["Prepared"] = True
     col_source = out / "original-renamed-vehicles.col"
     col_source.write_bytes(b"".join(col_chunks))
-    run(args.converter, col_source, "--map-col", out / "vehicles.col")
+    collision_output = out / "checks/extension-vehicles.col" if previous else out / "vehicles.col"
+    run(args.converter, col_source, "--map-col", collision_output)
+    if previous:
+        collision_output.replace(out / "vehicles.col")
     original_native_ide = (game / "data/vehicles.ide").read_text(encoding="ascii")
     def replace_ide(m):
         fields = native_updates.get(int(m.group(1)))
@@ -368,8 +528,11 @@ def prepare(args):
                 (selected_names[colour_row.model]["NativeId"], len(indices)//2, *indices))))
     (out / "vehicle-colours.dat").write_text("\n".join(colour_lines) + "\n", encoding="ascii")
     colour_loader = prepare_colour_loader(game, out)
-    run(args.converter, out / "models", "--validate-actors")
-    files = sorted(p for p in out.rglob("*") if p.is_file())
+    if not previous:
+        run(args.converter, out / "models", "--validate-actors")
+    files = sorted(p for p in out.rglob("*") if p.is_file() and p.name != "manifest.json"
+                   and "extension-rollback" not in p.relative_to(out).parts)
+    previous_sources = {r["Path"]: r["Sha256"] for r in previous["SourceFiles"]} if previous else {}
     manifest = {"Schema": 1, "Prepared": True, "Installed": False, "GameExecuted": False, "CampaignPlayable": False,
                 "NativeBindingsVerifiedInGame": False, "StreamingInstallVerified": False, "SaModCompatibilityVerified": False,
                 "VehicleDefinitions": len(original), "NativeModelCount": len(native), "AdditionalArchiveSlots": 0,
@@ -380,14 +543,14 @@ def prepare(args):
                 "NativeColourLoader": colour_loader,
                 "SharedTextures": {"SourceDictionary": "generic", "TargetPath": "models/generic/vehicle.txd",
                     "PreparedPath": "models/vehicle.txd", "NativeTexturesPreserved": True,
-                    "OriginalChromeRasterSha256": hashlib.sha256(pixels).hexdigest(),
+                    "OriginalChromeRasterSha256": chrome_hash,
                     "EnvironmentAdapter": {"xv_vehicleenv128": "xvehicleenv128",
                         "reason": "Use the native SA vehicle environment map; the original named LCS raster is absent"},
                     "EnvironmentShininess": {"Source": "Original MatFX ENVMAP coefficient", "ClampInput": [0, 1], "Scale": 0.5,
                         "Reason": "Preserve the LCS vehicle shader coefficient scaling in SA's normalized EnvMat field",
                         "SpecularInferred": False},
                     "Resolution": "SA CVehicleModelInfo::FindTextureCB common vehicle dictionary"},
-                "SourceFiles": [{"Path": str(p), "Sha256": sha(p)} for p in sorted(sources)],
+                "SourceFiles": [{"Path": str(p), "Sha256": previous_sources.get(str(p)) or sha(p)} for p in sorted(sources)],
                 "OutputFiles": [{"RelativePath": str(p.relative_to(out)), "Sha256": sha(p)} for p in files]}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"Prepared {manifest['PreparedCount']}/{len(original)} original vehicles in {out}; gameExecuted=false installed=false")
@@ -406,6 +569,7 @@ if __name__ == "__main__":
     parser.add_argument("--writer", type=Path, default=ROOT / "build/Release/lcs-ps2-write.exe")
     parser.add_argument("--ps2-source", type=Path, default=ROOT / "local/originals/lcs-ps2", help="user's extracted original PS2 files")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--extend-existing", action="store_true", help="reuse verified prepared vehicles and shared TXD; convert only newly supported vehicles")
     args = parser.parse_args()
     if args.validate_only:
         validate(args.output, args.converter)

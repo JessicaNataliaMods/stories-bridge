@@ -110,7 +110,7 @@ def texture_file(level, ids, output):
             stream.write(struct.pack('<2I', w,h));stream.write(rgba)
 
 
-def collision(game, model, version=2):
+def collision(game, model, version=2, *, map_surfaces=True):
     chunk, offset = game.collisions[model]
     ns, nb, nt = chunk.read('<3h', offset+48)
     nl = chunk.span(offset+54, 1)[0]
@@ -127,8 +127,8 @@ def collision(game, model, version=2):
         if value >= len(SURFACES):
             if value != 255:
                 raise ValueError(f'Unknown original collision surface {value}')
-            return 0
-        return SURFACES[value]
+            return 0 if map_surfaces else value
+        return SURFACES[value] if map_surfaces else value
     for i in range(ns):
         x,y,z,r = chunk.read('<4f', ps+32*i)
         mat, piece = chunk.read('<2B', ps+32*i+16)

@@ -65,6 +65,12 @@ INERT_LCS_FLAGS = {
     0x00400000: "HANDBRAKE_TYRE: the only LCS behavior is commented out in Automobile.cpp",
 }
 
+# HANDLING_UNKNOWN (0x08000000) has an active LCS Renderer.cpp consumer: it
+# culls first-person vehicles while the camera looks behind. SA exposes the
+# matching VEHICLE_HANDLING_MODEL_NO1FPS_LOOK_BEHIND model flag (0x4000). Map
+# only when an explicit LCS heli/plane class bit is also present; otherwise
+# preserve the bit as unmapped. The target bit differs in both value and word.
+
 LCS_HANDLING_FIELD_NAMES = (
     "handling_name", "mass", "turn_mass", "drag_multiplier", "center_of_mass_x",
     "center_of_mass_y", "center_of_mass_z", "percent_submerged", "traction_multiplier",
@@ -127,6 +133,7 @@ SA_BIKE_ANIMATION_GROUP_ADAPTERS = {
     "biked": (7, "DIRTBIKE"),
 }
 SA_STANDARD_ANIMATION_GROUP = (0, "ANIM_GROUP_STDCARAMIMS", "standard car")
+SA_TRAIN_ANIMATION_GROUP = (0, "ANIM_GROUP_STDCARAMIMS")
 
 LCS_PHYSICAL_CLASS_FLAGS = {
     0x00010000: "bike",
@@ -142,6 +149,9 @@ LCS_BOAT_HANDLING_NAMES = ("PREDATOR", "SPEEDER", "REEFER")
 LCS_FLYING_HANDLING_NAMES = (
     "MAVERICK", "COASTMAV", "POLMAV", "HUNTER", "RCGOBLIN", "RCCOPTER",
 )
+# vendor/sa-reference/source_game_sa_cHandlingDataMgr.cpp:
+# GetFlyingPointer accepts only native handling IDs 186..209.
+SA_FLYING_HANDLING_ID_RANGE = (186, 209)
 
 
 def _field_record(index: int, name: str, value: str, source_index: Optional[int],
@@ -190,6 +200,26 @@ def _adapt_flags(flags: int) -> Tuple[int, int, int, List[Dict[str, object]], Li
             mapped_input |= source_bit
             ignored.append({"source_bit": "0x%08X" % source_bit, "reason": reason})
 
+    unknown_aircraft_view = 0x08000000
+    aircraft_class_bits = 0x00020000 | 0x00040000
+    if flags & unknown_aircraft_view and flags & aircraft_class_bits:
+        sa_no_1fps_look_behind = 0x00004000
+        model_flags |= sa_no_1fps_look_behind
+        mapped_input |= unknown_aircraft_view
+        trace.append({
+            "source_bit": "0x%08X" % unknown_aircraft_view,
+            "target_word": "model_flags",
+            "target_bit": "0x%08X" % sa_no_1fps_look_behind,
+            "meaning": "first-person look-back aircraft culling",
+            "adaptation": "native-system adaptation",
+            "rule": (
+                "map to SA VEHICLE_HANDLING_MODEL_NO1FPS_LOOK_BEHIND (0x4000), "
+                "the native model flag for the same first-person look-back behavior. "
+                "Apply only with a proven LCS heli/plane class bit; LCS Renderer.cpp "
+                "checks this only for aircraft."
+            ),
+        })
+
     unmapped = flags & ~mapped_input
     return model_flags, handling_flags, unmapped, trace, ignored
 
@@ -229,6 +259,23 @@ def derive_sa_animation_group(ide_fields: Sequence[str],
             "source_meaning": "source ferry with scripted boarding markers",
             "target_group": "standard",
             "target_group_id": 0,
+        }
+    if vehicle_type == "train":
+        if ide_fields[3].strip().lower() != "train":
+            raise ValueError("LCS train animation group requires an original train IDE type")
+        group_id, group_name = SA_TRAIN_ANIMATION_GROUP
+        return str(group_id), (
+            "adapt the LCS native train path to SA's native train vehicle type; "
+            "SA handling.cfg still requires common animation_group ID 0, and no "
+            "LCS car door-path group applies"
+        ), {
+            "source_bit": None,
+            "source_meaning": "LCS vehicles.ide type train selects the native train path",
+            "source_index": 3,
+            "source_field": LCS_IDE_FIELD_NAMES[3],
+            "target_group": group_name,
+            "target_group_id": group_id,
+            "adaptation": "native-system adaptation",
         }
     if vehicle_type != "car":
         if vehicle_type not in SA_VEHICLE_TYPES - {"car"}:
@@ -432,8 +479,9 @@ def convert_handling(lcs_fields: Sequence[str], native_name: str,
             "source_index": animation_adapter.get("source_index", 31),
             "source_field": animation_adapter.get("source_field", LCS_HANDLING_FIELD_NAMES[31]),
             "source_value": (
-                ide_fields[6].strip()
-                if animation_adapter.get("source_index") == 6
+                ide_fields[animation_adapter["source_index"]].strip()
+                if animation_adapter.get("source_index") is not None
+                and animation_adapter["source_index"] < len(ide_fields)
                 else fields[31]
             ),
             "animation_group_adapter": animation_adapter,
@@ -496,6 +544,19 @@ def _effective_flying_values(source_text: str, source_handling: str) -> List[str
     the selected slot is effective.
     """
     wanted = source_handling.upper()
+    source_common_keys = {
+        fields[0].upper()
+        for raw_line in source_text.splitlines()
+        for line in [raw_line.strip()]
+        if line and not line.startswith((";", "!", "$", "%", "^"))
+        for fields in [line.split()]
+        if fields
+    }
+    if wanted not in source_common_keys:
+        raise ValueError(
+            "Original LCS common handling row is missing for flying source key %s"
+            % source_handling
+        )
     if wanted in LCS_FLYING_HANDLING_NAMES:
         target_slot = LCS_FLYING_HANDLING_NAMES.index(wanted)
     else:
@@ -529,7 +590,8 @@ def _validate_special_numbers(values: Sequence[str], label: str) -> None:
 
 def convert_special_handling(source_text: str, source_handling: str,
                              native_handling: str,
-                             physical_class: str) -> List[str]:
+                             physical_class: str, *,
+                             native_handling_id: Optional[int] = None) -> List[str]:
     """Convert class-specific LCS rows consumed by SA's handling loader.
 
     Returns ready-to-write SA ``handling.cfg`` lines. Bike fields have the same
@@ -537,7 +599,9 @@ def convert_special_handling(source_text: str, source_handling: str,
     LCS flying rows omit three SA-consumed values (gear-up ratio, gear-down
     lean, and wind multiplier); zero disables these SA-only influences because
     LCS has no gear-lean or weather-wind handling consumer. Cars and trains have
-    no class-specific row and return an empty list.
+    no class-specific row and return an empty list. Aircraft output requires
+    the target common handling ID so an out-of-range name cannot silently write
+    SA's shared flying-slot-0 fallback.
     """
     vehicle_class = physical_class.strip().lower()
     if not source_handling or any(ch.isspace() for ch in source_handling):
@@ -572,6 +636,15 @@ def convert_special_handling(source_text: str, source_handling: str,
         sa_values = fields[1:8] + fields[9:15] + fields[8:9]
         return ["% " + native_handling + " " + " ".join(sa_values)]
     if vehicle_class in {"heli", "plane"}:
+        if native_handling_id is None:
+            raise ValueError(
+                "SA flying special handling requires the target common handling ID "
+                "to prove it is inside the native flying-pointer range"
+            )
+        if not SA_FLYING_HANDLING_ID_RANGE[0] <= native_handling_id <= SA_FLYING_HANDLING_ID_RANGE[1]:
+            raise ValueError(
+                "SA target handling ID is outside GetFlyingPointer's native range 186..209"
+            )
         fields = _effective_flying_values(source_text, source_handling)
         if len(fields) != 19:
             raise ValueError("LCS flying handling row must contain a key and 18 values")
@@ -587,15 +660,23 @@ def convert_special_handling(source_text: str, source_handling: str,
 def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
                 texture_dictionary: str, handling_name: str,
                 wheel_model_asset: Optional[str] = None,
-                physical_class: Optional[str] = None) -> Dict[str, object]:
-    """Adapt an LCS vehicle row to SA's 15-field vehicles.ide layout.
+                physical_class: Optional[str] = None,
+                lcs_handling_flags: Optional[int] = None) -> Dict[str, object]:
+    """Adapt an LCS vehicle row to SA's native vehicles.ide layout.
 
-    The optional physical_class controls the target SA loader type, while the
-    source IDE type controls the meaning of the original LCS misc and wheel
-    fields. This distinction matters for LCS Dodo models: their IDE type is
-    car even though their handling physical class is plane. Car wheel geometry
-    is embedded and receives SA misc -1; bikes preserve their steering angle
-    and scale. Source plane LOD IDs cannot be put in SA's wheel-model field.
+    The optional physical_class selects the native SA vehicle type, while the
+    source IDE type controls the meaning of original LCS misc/wheel fields.
+    This distinction matters for LCS Dodo and aircraft whose IDE type is car:
+    their misc is a wheel ID even though the matching plane/helicopter handling
+    flag selects SA's physical type. Cross-type car adaptation therefore
+    requires the original handling flags and accepts only the matching plane
+    or helicopter class bit.
+    Converted car wheel geometry is embedded and receives misc -1; bikes
+    preserve steering angle and scale. Positive source plane LOD model IDs
+    are rejected because SA consumes the corresponding misc token as a wheel
+    model ID, with no proven equivalent for the original LOD reference. SA's
+    native train type accepts the common vehicle row and ignores wheel-only
+    values.
     """
     source = [str(value).strip() for value in lcs_fields]
     if len(source) < len(LCS_IDE_FIELD_NAMES):
@@ -606,8 +687,27 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
         raise ValueError("Unsupported LCS vehicles.ide source type: " + source_type)
     if vehicle_class not in SA_VEHICLE_TYPES:
         raise ValueError("Unsupported LCS vehicle class for SA vehicles.ide: " + vehicle_class)
-    if source_type != vehicle_class and not (source_type == "car" and vehicle_class == "plane"):
-        raise ValueError("LCS IDE type %s does not match requested physical class %s" % (source_type, vehicle_class))
+    if source_type != vehicle_class:
+        if source_type != "car" or vehicle_class not in {"plane", "heli"}:
+            raise ValueError(
+                "LCS IDE type %s does not match requested physical class %s"
+                % (source_type, vehicle_class)
+            )
+        if lcs_handling_flags is None:
+            raise ValueError(
+                "LCS car IDE to %s adaptation requires original handling flags"
+                % vehicle_class
+            )
+        if not isinstance(lcs_handling_flags, int) or not 0 <= lcs_handling_flags <= 0xFFFFFFFF:
+            raise ValueError("LCS handling flags are outside uint32 range")
+        flagged_classes = [
+            source_class for bit, source_class in LCS_PHYSICAL_CLASS_FLAGS.items()
+            if lcs_handling_flags & bit
+        ]
+        if len(flagged_classes) != 1 or flagged_classes[0] != vehicle_class:
+            raise ValueError(
+                "LCS car IDE physical class does not match its handling flags"
+            )
     if source[7].lower() not in SA_VEHICLE_CLASSES:
         raise ValueError("LCS vehicle class is not accepted by the SA FileLoader: " + source[7])
     if not model_name or not texture_dictionary or not handling_name:
@@ -639,6 +739,7 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
     misc_value = "-1"
     front_wheel_size = rear_wheel_size = "0.7"
     misc_field = "wheel_model_id"
+    misc_source_field = LCS_IDE_FIELD_NAMES[11]
     misc_rule = "LCS does not consume misc for this type; use the no-wheel-model default"
     wheel_rule = "use the SA FileLoader's explicit 0.7 wheel-size defaults for a source type with no wheel-scale consumer"
     if source_type == "car":
@@ -663,24 +764,43 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
             plane_lod_id = int(source[11], 10)
         except ValueError as error:
             raise ValueError("Invalid LCS plane LOD model ID") from error
+        if plane_lod_id < -1:
+            raise ValueError("LCS plane LOD model ID must be -1 or nonnegative")
         if plane_lod_id >= 0:
             raise ValueError(
-                "LCS plane LOD model ID has no proven equivalent in SA's "
-                "vehicles.ide misc field (which the SA loader consumes as a wheel model ID)"
+                "LCS plane LOD model ID has no proven equivalent in SA's vehicles.ide misc field, "
+                "which SA consumes as a wheel model ID"
             )
+        misc_source_field = "plane_lod_model_id"
+        misc_rule = (
+            "LCS -1 means no external plane LOD; retain SA wheel_model_id -1 "
+            "instead of binding an unrelated wheel model"
+        )
         front_wheel_size = rear_wheel_size = "1.0"
         wheel_rule = "LCS FileLoader fixes plane wheel scale at 1.0; it does not consume the source scale token"
+    elif source_type == "train":
+        misc_field = "unused_optional_misc"
+        misc_rule = (
+            "LCS train loader does not consume misc; SA's native train branch "
+            "accepts the optional token but does not assign it as a wheel model"
+        )
 
     output = [
         str(int(model_id)), model_name, texture_dictionary, vehicle_class, handling_name,
         source[5], source[6], source[7], source[8], "0", source[10], misc_value,
         front_wheel_size, rear_wheel_size, "-1",
     ]
+    vehicle_type_rule = (
+        "retain the original LCS train class as SA's native VEHICLE_TYPE_TRAIN; "
+        "the SA loader accepts the common vehicle row and selects its native train renderer"
+        if vehicle_class == "train" else
+        "select the native SA vehicle type from the physical class; retain source IDE type separately when interpreting original misc/wheel fields"
+    )
     provenance: List[Dict[str, object]] = [
         _field_record(0, "model_id", output[0], None, "binding", "assigned unique native SA model slot"),
         _field_record(1, "model_name", model_name, None, "converted_model", "name of converted original LCS DFF"),
         _field_record(2, "texture_dictionary", texture_dictionary, None, "converted_texture_dictionary", "name of merged original LCS TXD"),
-        _field_record(3, "vehicle_type", vehicle_class, 3, LCS_IDE_FIELD_NAMES[3], "use the requested physical class for the target SA loader; retain source IDE type separately when interpreting LCS fields"),
+        _field_record(3, "vehicle_type", vehicle_class, 3, LCS_IDE_FIELD_NAMES[3], vehicle_type_rule),
         _field_record(4, "handling_name", handling_name, 4, LCS_IDE_FIELD_NAMES[4], "use the explicitly assigned target handling key for this native model binding"),
         _field_record(5, "game_name", source[5], 5, LCS_IDE_FIELD_NAMES[5], "retain the original LCS display label"),
         _field_record(6, "animation_file", source[6], 6, LCS_IDE_FIELD_NAMES[6], "retain the original LCS animation-file token"),
@@ -694,19 +814,24 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
         _field_record(10, "component_rules", source[10], 10, LCS_IDE_FIELD_NAMES[10], "retain original LCS component-rule bitfield"),
         {
             "target_index": 11, "target_field": misc_field, "value": misc_value,
-            "source_index": 11, "source_field": LCS_IDE_FIELD_NAMES[11],
+            "source_index": 11, "source_field": misc_source_field,
             "source_value": source[11], "derived_asset": wheel_model_asset,
             "rule": misc_rule,
         },
-        _field_record(12, "wheel_size_front", front_wheel_size, 12 if source_type in {"car", "bike"} else None, LCS_IDE_FIELD_NAMES[12] if source_type in {"car", "bike"} else "SA FileLoader default", wheel_rule),
-        _field_record(13, "wheel_size_rear", rear_wheel_size, 12 if source_type in {"car", "bike"} else None, LCS_IDE_FIELD_NAMES[12] if source_type in {"car", "bike"} else "SA FileLoader default", wheel_rule),
+        _field_record(12, "wheel_size_front", front_wheel_size, 12 if source_type in {"car", "bike"} else None, LCS_IDE_FIELD_NAMES[12] if source_type in {"car", "bike"} else "SA FileLoader default", (
+            "parsed as an optional token but ignored by SA's native train branch"
+            if source_type == "train" else wheel_rule
+        )),
+        _field_record(13, "wheel_size_rear", rear_wheel_size, 12 if source_type in {"car", "bike"} else None, LCS_IDE_FIELD_NAMES[12] if source_type in {"car", "bike"} else "SA FileLoader default", (
+            "parsed as an optional token but ignored by SA's native train branch"
+            if source_type == "train" else wheel_rule
+        )),
         {
             "target_index": 14, "target_field": "wheel_upgrade_class", "value": "-1",
             "source_index": None, "source_field": None,
             "rule": "LCS has no SA wheel-upgrade class; -1 disables SA-only wheel-mod lookup for this converted fleet model",
         },
     ]
-
     # Fields without a target counterpart remain explicit for the caller.
     unmapped = [
         {
@@ -726,7 +851,11 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
     if source_type not in {"car", "bike", "plane"}:
         unmapped.append({
             "source_index": 11, "source_field": "misc", "value": source[11],
-            "reason": "The LCS loader does not consume misc for this type; SA receives -1 so it cannot attach a donor wheel model.",
+            "reason": (
+                "The LCS train loader does not consume misc; SA's native train path does not use the optional wheel-model fields."
+                if source_type == "train" else
+                "The LCS loader does not consume misc for this type; SA receives -1 so it cannot attach a donor wheel model."
+            ),
         })
     return {
         "fields": output,

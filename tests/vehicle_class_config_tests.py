@@ -51,16 +51,21 @@ class VehicleClassConfigTests(unittest.TestCase):
     def test_nonflight_key_uses_effective_lcs_flying_slot_zero(self):
         maverick = [str(index) for index in range(1, 19)]
         dodo = [str(index) for index in range(21, 39)]
-        source = "$ MAVERICK " + " ".join(maverick) + "\n$ DODO " + " ".join(dodo)
+        source = (
+            "DODO 1\n$ MAVERICK " + " ".join(maverick)
+            + "\n$ DODO " + " ".join(dodo)
+        )
 
-        line = convert_special_handling(source, "DODO", "NATIVE_PLANE", "plane")[0]
+        line = convert_special_handling(
+            source, "DODO", "NATIVE_PLANE", "plane", native_handling_id=186
+        )[0]
         fields = line.split()
         self.assertEqual(fields[:2], ["$", "NATIVE_PLANE"])
         self.assertEqual(fields[2:13], dodo[:11])
         self.assertEqual(fields[13:16], ["0.0", "0.0", "0.0"])
         self.assertEqual(fields[16:], dodo[11:])
 
-    def test_dodo_source_car_misc_remains_a_wheel_id_for_plane_target(self):
+    def test_dodo_source_car_misc_remains_a_wheel_id_for_flagged_plane_target(self):
         row = ide_row("car", "DODO", "256", "1.0")
         converted = convert_ide(
             row,
@@ -70,11 +75,88 @@ class VehicleClassConfigTests(unittest.TestCase):
             handling_name="NATIVE_PLANE",
             wheel_model_asset="embedded-original",
             physical_class="plane",
+            lcs_handling_flags=0x00040000,
         )
         self.assertEqual(converted["fields"][3], "plane")
         self.assertEqual(converted["fields"][11], "-1")
         self.assertEqual(converted["fields"][12:14], ["1.0", "1.0"])
         self.assertEqual(converted["provenance"][11]["target_field"], "wheel_model_id")
+
+    def test_source_car_heli_requires_matching_handling_class_flag(self):
+        row = ide_row("car", "MAVERICK", "256", "1.0")
+        with self.assertRaisesRegex(ValueError, "requires original handling flags"):
+            convert_ide(
+                row,
+                model_id=902,
+                model_name="NATIVE_MAVERICK",
+                texture_dictionary="NATIVE_MAVERICK",
+                handling_name="NATIVE_HELI",
+                wheel_model_asset="embedded-original",
+                physical_class="heli",
+            )
+        with self.assertRaisesRegex(ValueError, "does not match its handling flags"):
+            convert_ide(
+                row,
+                model_id=902,
+                model_name="NATIVE_MAVERICK",
+                texture_dictionary="NATIVE_MAVERICK",
+                handling_name="NATIVE_HELI",
+                wheel_model_asset="embedded-original",
+                physical_class="heli",
+                lcs_handling_flags=0x00040000,
+            )
+
+        converted = convert_ide(
+            row,
+            model_id=902,
+            model_name="NATIVE_MAVERICK",
+            texture_dictionary="NATIVE_MAVERICK",
+            handling_name="NATIVE_HELI",
+            wheel_model_asset="embedded-original",
+            physical_class="heli",
+            lcs_handling_flags=0x00020000,
+        )
+        self.assertEqual(converted["fields"][3], "heli")
+        self.assertEqual(converted["fields"][11], "-1")
+        self.assertEqual(converted["provenance"][11]["target_field"], "wheel_model_id")
+
+    def test_unknown_aircraft_render_flag_uses_sa_native_camera_path(self):
+        handling_values = ["1.0"] * 30
+        handling_values[14] = "F"
+        handling_values[15] = "P"
+        row = ["MAVERICK"] + handling_values + ["8020000", "1", "1"]
+        converted = convert_handling(
+            row, "NATIVE_HELI", ide_row("car", "MAVERICK"), physical_class="heli"
+        )
+        self.assertEqual(converted["unmapped_flags"], 0)
+        self.assertEqual(converted["fields"][31], "2004000")
+        adaptation = next(
+            item for item in converted["flag_adapters"]
+            if item.get("source_bit") == "0x08000000"
+        )
+        self.assertEqual(adaptation["target_word"], "model_flags")
+        self.assertEqual(adaptation["target_bit"], "0x00004000")
+        self.assertEqual(adaptation["adaptation"], "native-system adaptation")
+
+    def test_unknown_aircraft_render_flag_without_aircraft_class_stays_unmapped(self):
+        handling_values = ["1.0"] * 30
+        handling_values[14] = "F"
+        handling_values[15] = "P"
+        row = ["MAVERICK"] + handling_values + ["8000000", "1", "1"]
+        converted = convert_handling(
+            row, "NATIVE_CAR", ide_row("car", "MAVERICK"), physical_class="car"
+        )
+        self.assertEqual(converted["unmapped_flags"], 0x08000000)
+
+    def test_flying_special_row_requires_a_native_flying_pointer_slot(self):
+        values = " ".join(str(index) for index in range(1, 19))
+        source = "DODO 1\n$ MAVERICK " + values
+        with self.assertRaisesRegex(ValueError, "target common handling ID"):
+            convert_special_handling(source, "DODO", "NATIVE_PLANE", "plane")
+        with self.assertRaisesRegex(ValueError, "outside GetFlyingPointer"):
+            convert_special_handling(
+                source, "DODO", "NATIVE_PLANE", "plane", native_handling_id=185
+            )
 
     def test_plane_lod_cannot_be_reused_as_sa_wheel_model(self):
         row = ide_row("plane", "DODO", "256", "1.0")
@@ -86,6 +168,38 @@ class VehicleClassConfigTests(unittest.TestCase):
                 texture_dictionary="NATIVE_PLANE",
                 handling_name="NATIVE_PLANE",
             )
+
+    def test_train_keeps_native_type_and_explicit_common_group_zero(self):
+        ide = ide_row("train", "TRAIN", "17", "3.0")
+        ide[7] = "ignore"
+        converted_ide = convert_ide(
+            ide,
+            model_id=904,
+            model_name="NATIVE_TRAIN",
+            texture_dictionary="NATIVE_TRAIN",
+            handling_name="NATIVE_TRAIN",
+            physical_class="train",
+        )
+        self.assertEqual(converted_ide["fields"][3], "train")
+        self.assertEqual(len(converted_ide["fields"]), 15)
+        self.assertEqual(converted_ide["provenance"][3]["source_value"], "train")
+        self.assertEqual(converted_ide["provenance"][11]["target_field"], "unused_optional_misc")
+
+        handling_values = ["1.0"] * 30
+        handling_values[14] = "F"
+        handling_values[15] = "P"
+        handling = ["TRAIN"] + handling_values + ["0", "1", "1"]
+        converted_handling = convert_handling(
+            handling, "NATIVE_TRAIN", ide, physical_class="train"
+        )
+        self.assertEqual(converted_handling["fields"][35], "0")
+        self.assertEqual(
+            converted_handling["animation_group_adapter"]["adaptation"],
+            "native-system adaptation",
+        )
+        self.assertEqual(
+            converted_handling["provenance"][35]["source_value"], "train"
+        )
 
 
 if __name__ == "__main__":
