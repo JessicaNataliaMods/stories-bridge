@@ -134,6 +134,9 @@ SA_BIKE_ANIMATION_GROUP_ADAPTERS = {
 }
 SA_STANDARD_ANIMATION_GROUP = (0, "ANIM_GROUP_STDCARAMIMS", "standard car")
 SA_TRAIN_ANIMATION_GROUP = (0, "ANIM_GROUP_STDCARAMIMS")
+# The native vehicle model must request these streamed animation banks before
+# door offsets can query their associations. LCS's null token is not enough.
+SA_VEHICLE_ANIMATION_BANKS = {2: "truck", 13: "van", 15: "coach", 16: "bus"}
 
 LCS_PHYSICAL_CLASS_FLAGS = {
     0x00010000: "bike",
@@ -811,6 +814,16 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
         source[5], source[6], source[7], source[8], "0", source[10], misc_value,
         front_wheel_size, rear_wheel_size, "-1",
     ]
+    animation_rule = "retain the original LCS animation-file token"
+    if vehicle_class == "car" and lcs_handling_flags is not None:
+        group, _reason, _adapter = derive_sa_animation_group(source, lcs_handling_flags, vehicle_class)
+        required_bank = SA_VEHICLE_ANIMATION_BANKS.get(int(group))
+        if required_bank:
+            output[6] = required_bank
+            animation_rule = (
+                "request native SA %s bank for converted vehicle animation group %s; "
+                "LCS null does not load SA door-offset associations" % (required_bank, group)
+            )
     vehicle_type_rule = (
         "retain the original LCS train class as SA's native VEHICLE_TYPE_TRAIN; "
         "the SA loader accepts the common vehicle row and selects its native train renderer"
@@ -826,7 +839,7 @@ def convert_ide(lcs_fields: Sequence[str], *, model_id: int, model_name: str,
         _field_record(3, "vehicle_type", vehicle_class, 3, LCS_IDE_FIELD_NAMES[3], vehicle_type_rule),
         _field_record(4, "handling_name", handling_name, 4, LCS_IDE_FIELD_NAMES[4], "use the explicitly assigned target handling key for this native model binding"),
         _field_record(5, "game_name", source[5], 5, LCS_IDE_FIELD_NAMES[5], "retain the original LCS display label"),
-        _field_record(6, "animation_file", source[6], 6, LCS_IDE_FIELD_NAMES[6], "retain the original LCS animation-file token"),
+        _field_record(6, "animation_file", output[6], 6, LCS_IDE_FIELD_NAMES[6], animation_rule),
         _field_record(7, "vehicle_class", source[7], 7, LCS_IDE_FIELD_NAMES[7], "retain the LCS population class accepted by SA FileLoader"),
         _field_record(8, "frequency", source[8], 8, LCS_IDE_FIELD_NAMES[8], "retain original LCS spawn frequency"),
         {

@@ -81,6 +81,12 @@ dispensa a suspensão de automóvel. O adaptador conserva as rodas estáticas
 originais e associa os pivôs das portas laterais e seus corpos de baixa
 resolução aos nomes do SA; não inventa bogies.
 
+O campo `animation_file` do IDE também acompanha o grupo de entrada do veículo:
+os grupos SA 2, 13, 15 e 16 precisam dos bancos `truck`, `van`, `coach` e `bus`.
+Conservar o token `null` do LCS nesses casos impede que o streaming prepare as
+associações consultadas por `ComputeAnimDoorOffsets`. O preparador declara o
+banco correspondente e o montador recusa grupos sem a dependência correta.
+
 O handling de aeronaves usa a seção `$` e o índice da tabela do executável
 fornecido, validado dentro da faixa do consumidor nativo. Campos exclusivos
 de trem de pouso e vento recebem adaptação explícita, registrada na proveniência.

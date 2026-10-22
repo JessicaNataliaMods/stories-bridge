@@ -260,6 +260,12 @@ def load_fleet(fleet):
         if any(row.get(key) in (None, "") for key in required):
             raise ValueError("Prepared fleet vehicle lacks a native binding")
         kind = row.get("PhysicalClass", "car")
+        if kind == "car" and row.get("Configuration"):
+            definition = row["Configuration"]["Definition"]["fields"]
+            group = int(row["Configuration"]["Handling"]["fields"][35])
+            bank = {2: "truck", 13: "van", 15: "coach", 16: "bus"}.get(group)
+            if bank and definition[6].lower() != bank:
+                raise ValueError("Vehicle door animation group lacks its streamed bank: " + row["Name"])
         expected_special = {"bike": ("!", 17), "boat": ("%", 16), "heli": ("$", 23), "plane": ("$", 23)}.get(kind)
         if expected_special:
             special = row.get("SpecialHandling", [])

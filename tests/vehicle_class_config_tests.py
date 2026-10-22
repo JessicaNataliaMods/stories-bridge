@@ -23,6 +23,15 @@ def ide_row(vehicle_type="bike", handling="MOPED", misc="10", wheel_scale="1.0")
 
 
 class VehicleClassConfigTests(unittest.TestCase):
+    def test_heavy_car_door_group_requests_its_streamed_animation_bank(self):
+        row = ide_row('car', 'HEAVY', '255', '1.0')
+        row[7] = 'ignore'
+        for flags, bank in [(0x20, 'truck'), (0x40, 'bus')]:
+            result = convert_ide(row, model_id=900, model_name='heavy', texture_dictionary='heavy',
+                                 handling_name='HEAVY', wheel_model_asset='authored-wheel', physical_class='car', lcs_handling_flags=flags)
+            self.assertEqual(result['fields'][6], bank)
+            self.assertIn('door-offset', result['provenance'][6]['rule'])
+
     def test_ferry_boat_physics_requires_dedicated_binding_and_reorders_camera(self):
         text = '% FERRY ' + ' '.join(str(i) for i in range(1, 15)) + '\n'
         with self.assertRaises(ValueError):
