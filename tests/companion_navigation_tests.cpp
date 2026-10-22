@@ -6,11 +6,49 @@
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
+#include <set>
+#include <map>
 using namespace lcs;
 static void check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 static void integer(std::vector<uint8_t>& code,int32_t value){code.push_back(6);for(int i=0;i<4;++i)code.push_back(uint8_t(uint32_t(value)>>(i*8)));}
+static void simultaneous_companions(const ScmImage& image) {
+    NativeAdapter adapter(image);adapter.world_ready=true;
+    std::set<int32_t> members,live_tasks;std::map<int32_t,int32_t> requests;
+    uint32_t now=0;size_t entries=0;
+    adapter.live_ped_identity=[](int32_t actor)->std::optional<ObjectiveActor>{return ObjectiveActor{actor,uintptr_t(0x100000+actor*256)};};
+    adapter.char_in_control=[](int32_t)->std::optional<bool>{return true;};
+    adapter.char_entering_as_passenger=[&](int32_t actor)->std::optional<bool>{return live_tasks.count(actor)!=0;};
+    adapter.execute=[&](const NativeCall& call){NativeResult r;r.executed=true;
+        switch(call.opcode) {
+        case 0x01F5:r.values[0]=100;break;case 0x07AF:r.values[0]=50;break;
+        case 0x07FD:case 0x056D:r.condition=true;break;
+        case 0x0631:members.insert(call.inputs[1]);break;
+        case 0x06C9:members.erase(call.inputs[0]);break;
+        case 0x06EE:r.condition=members.count(call.inputs[0])!=0;break;
+        case 0x00DF:r.condition=call.inputs[0]==100;break;
+        case 0x03C0:r.values[0]=600;break;case 0x046C:r.values[0]=100;break;
+        case 0x01EA:r.values[0]=3;break;
+        case 0x0431:r.condition=true;break; // No occupant yet, including queued requests.
+        case 0x05CA:requests[call.inputs[0]]=call.inputs[3];++entries;break;
+        case 0x01BD:r.values[0]=int32_t(now);break;
+        }return r;
+    };
+    auto group=[&](uint16_t op,int32_t actor){std::vector<uint8_t> code(64);code.push_back(uint8_t(op));code.push_back(uint8_t(op>>8));integer(code,actor);if(op==COMMAND_SET_PLAYER_AS_LEADER)integer(code,0);
+        Vm vm(std::move(code),64,64);Thread t;t.ip=66;return adapter.dispatch(vm,t,op);};
+    for(int32_t actor:{777,778,779})check(group(COMMAND_SET_PLAYER_AS_LEADER,actor)==StepResult::continued,"Three mission survivors join native group");
+    std::string error;check(adapter.tick_scripted_peds(error) && entries==3,"All survivors receive native passenger tasks");
+    std::set<int32_t> seats;for(const auto& request:requests)seats.insert(request.second);
+    check(seats==std::set<int32_t>({0,1,2}),"Concurrent approaches reserve distinct passenger seats before occupancy");
+    now=1000;check(adapter.tick_scripted_peds(error) && entries==3,"Pending script requests keep their seat during task handoff");
+    live_tasks={777,778,779};now=5000;
+    check(adapter.tick_scripted_peds(error) && entries==3,"Live approaches keep reservations beyond initial handoff");
+    const auto released=requests[777];
+    check(group(COMMAND_LEAVE_GROUP,777)==StepResult::continued && group(COMMAND_SET_PLAYER_AS_LEADER,780)==StepResult::continued,"Departed survivor releases transport ownership");
+    check(adapter.tick_scripted_peds(error) && entries==4 && requests[780]==released,"New follower may use a released seat without retasking other approaches");
+}
 int main(int argc,char** argv){try {
     check(argc==2,"Original SCM required");const auto image=ScmImage::load(argv[1]);NativeAdapter adapter(image);adapter.world_ready=true;
+    simultaneous_companions(image);
     bool exists=true,alive=true,member=false,frozen=false,in_car=false,leader_driving=true,full=false,backend=true,entering=false;
     int32_t leader_vehicle=600,status=4,capacity=3,free_seat=2;size_t entries=0,policies=0;bool use_nodes=true;NativeCall boarding;
     uint16_t failed_opcode=0;bool entry_query_available=true,control_query_available=true,partial_entry_on_failure=false;

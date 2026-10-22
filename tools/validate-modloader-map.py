@@ -363,7 +363,12 @@ def validate_campaign(package, map_report):
             if original_rows.get(row['LcsId'])!=row or not row.get('EmbeddedCollision'):
                 raise ValueError('Unverified fleet vehicle or missing embedded collision')
             model=row['NativeId'];name=row['NativeName'];group=row['NativeHandling']
-            if model in fleet_ids or group in fleet_handling:raise ValueError('Shared fleet model/handling slot')
+            # A handling group may be shared only as SA itself does (pizzaboy/faggio
+            # MOPED), declared by both rows (tools/prepare-campaign-vehicles.py).
+            declared={(other['NativeId'],other['NativeName']) for other in row.get('SharedNativeHandlingModels') or []}
+            sharers={(other['NativeId'],other['NativeName']) for other in mounted['VehicleMappings']
+                     if other is not row and other['NativeHandling']==group}
+            if model in fleet_ids or (group in fleet_handling and sharers!=declared):raise ValueError('Shared fleet model/handling slot')
             fleet_ids.add(model);fleet_handling.add(group)
             if mounted_ide.get(model)!=expected_ide[model] or actual_handling[group]!=expected_handling[group]:
                 raise ValueError('Fleet configuration differs from converted original')
@@ -393,8 +398,9 @@ def validate_campaign(package, map_report):
             if wanted.get(row['relative'])!=row['sha256'].lower() or digest(package/row['relative'])!=row['sha256'].lower():
                 raise ValueError('Mounted fleet geometry/textures differ')
         for row in mounted['Configs']:
-            if row['relative']=='data/lcs/native-equivalents.tsv' and campaign.get('weaponEquivalents94'):
-                # v94 re-targets only the weapon object rows (tools/weapon_slots.py).
+            if row['relative']=='data/lcs/native-equivalents.tsv' and campaign.get('weaponEquivalents94') and                digest(package/row['relative'])!=row['afterSha256'].lower():
+                # v94 re-targets only the weapon object rows (tools/weapon_slots.py);
+                # a fleet mounted after that step pins the current file directly.
                 weapons_step=campaign['weaponEquivalents94']
                 entity_rows=[line for line in (package/row['relative']).read_text(encoding='ascii').splitlines() if not line.endswith('\tobject')]
                 if row['afterSha256'].lower()!=weapons_step['beforeSha256'] or digest(package/row['relative'])!=campaign['equivalentSha256'] or \
@@ -488,7 +494,12 @@ def validate_campaign(package, map_report):
             raise ValueError('Ferry model provenance changed')
         manifest=json.loads(manifest_file.read_text())
         prepared_manifest=json.loads((prepared/'manifest.json').read_text())
-        if {k:v for k,v in manifest.items() if k!='files'}!={k:v for k,v in prepared_manifest.items() if k!='files'}:
+        # The ferry may link the complete fleet record it was mounted with.
+        links={'completeFleetManifest','fleetVehicleCount'}
+        if any(key in manifest for key in links) and (manifest.get('completeFleetManifest')!=campaign.get('vehicleFleet',{}).get('manifest') or
+                manifest.get('fleetVehicleCount')!=campaign.get('vehicleFleet',{}).get('count')):
+            raise ValueError('Ferry fleet link differs from the mounted fleet')
+        if {k:v for k,v in manifest.items() if k!='files' and k not in links}!={k:v for k,v in prepared_manifest.items() if k!='files'}:
             raise ValueError('Ferry preparation metadata changed')
         prepared_files={row['relative']:row for row in prepared_manifest['files']}
         if len(prepared_files)!=len(prepared_manifest['files']):
@@ -502,7 +513,18 @@ def validate_campaign(package, map_report):
         required={'vehicles/tropic.dff','vehicles/tropic.txd','models/lcs/ferry.col','data/vehicles.ide','data/handling.cfg'}
         if {row['relative']for row in manifest['files']}!=required:
             raise ValueError('Ferry file inventory changed')
+        # A fleet that converts the ferry itself (LCS 192 -> tropic) owns the
+        # tropic model files; the ferry record then pins the fleet's copies.
+        fleet_owned={}
+        if campaign.get('vehicleFleet'):
+            fleet_record=json.loads((package/campaign['vehicleFleet']['manifest']).read_text(encoding='utf-8'))
+            if any(row['LcsId']==192 and row['NativeName']=='tropic' for row in fleet_record['VehicleMappings']):
+                fleet_owned={row['relative']:row['sha256'].lower() for row in fleet_record['Files'] if row['relative'].startswith('vehicles/tropic.')}
         for row in manifest['files']:
+            if row['relative'] in fleet_owned:
+                if row['sha256'].lower()!=fleet_owned[row['relative']] or digest(package/row['relative'])!=fleet_owned[row['relative']]:
+                    raise ValueError('Fleet-owned ferry model differs from the fleet record')
+                continue
             composite=bool(fleet_ids) and row['relative'] in ('data/vehicles.ide','data/handling.cfg')
             original=prepared_files.get(row['relative'])
             if not original:
@@ -534,7 +556,9 @@ def validate_campaign(package, map_report):
         ide_mask=r'^(?:'+ '|'.join(map(str,sorted(fleet_ids|{454})))+r')\s*,[^\r\n]+'
         if len(rows)!=1 or re.sub(ide_mask,'<vehicle>',native_ide,flags=re.M)!=re.sub(ide_mask,'<vehicle>',mounted_ide,flags=re.M):
             raise ValueError('Unrelated native vehicle definitions changed')
-        if rows!=re.findall(pattern,(prepared/'overlay/data/vehicles.ide').read_text(),re.M):
+        # A fleet converting the ferry owns its definition (its source vehicles.ide).
+        approved_ide=(pathlib.Path(fleet_record['sourceManifest']).parent/'vehicles.ide') if fleet_owned else prepared/'overlay/data/vehicles.ide'
+        if rows!=re.findall(pattern,approved_ide.read_text(),re.M):
             raise ValueError('Fleet overwrote the approved ferry definition')
         fields=[v.strip()for v in rows[0].split(',')]
         if fields[:5]!=['454','tropic','tropic','boat','TROPIC']:
@@ -542,11 +566,13 @@ def validate_campaign(package, map_report):
         native_handling=pathlib.Path(manifest['nativeInputs'][1]['path']).read_text()
         mounted_handling=(package/'data/handling.cfg').read_text()
         pattern=r'^(?:TROPIC|%[ \t]+TROPIC)[ \t]+[^\r\n]+'
-        handling_mask=r'^(?:'+ '|'.join(re.escape(name) for name in sorted(fleet_handling|{'TROPIC'}))+r'|%[ \t]+TROPIC)[ \t]+[^\r\n]+'
+        # Fleet boats/bikes/aircraft also own their %/!/$ class lines.
+        handling_mask=r'^(?:[%!$][ \t]+)?(?:'+ '|'.join(re.escape(name) for name in sorted(fleet_handling|{'TROPIC'}))+r')[ \t]+[^\r\n]+'
         if len(re.findall(pattern,mounted_handling,re.M))!=2 or \
            re.sub(handling_mask,'<vehicle>',native_handling,flags=re.M)!=re.sub(handling_mask,'<vehicle>',mounted_handling,flags=re.M):
             raise ValueError('Unrelated native handling changed')
-        if re.findall(pattern,mounted_handling,re.M)!=re.findall(pattern,(prepared/'overlay/data/handling.cfg').read_text(),re.M):
+        approved_handling=(pathlib.Path(fleet_record['sourceManifest']).parent/'handling.cfg') if fleet_owned else prepared/'overlay/data/handling.cfg'
+        if [line.split() for line in re.findall(pattern,mounted_handling,re.M)]!=[line.split() for line in re.findall(pattern,approved_handling.read_text(),re.M)]:
             raise ValueError('Fleet overwrote the approved ferry handling')
         if 'sa_boat_hierarchy_validated=true' not in (prepared/'logs/boat-validation.log').read_text():
             raise ValueError('Native boat hierarchy validation missing')

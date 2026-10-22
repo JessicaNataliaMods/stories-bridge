@@ -134,6 +134,7 @@ class NativeAdapter {
     struct Companion {
         int32_t player,group,vehicle=-1;
         bool mission=false;
+        int32_t seat=-1;
         uint32_t requested_at=0,deferred_at=0,diagnostic_at=0;
         std::string deferred_reason;
     };

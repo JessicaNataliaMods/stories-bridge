@@ -194,6 +194,56 @@ def mount_weapon_animations(output, campaign, game):
                 meleeAnimations='SA combo sets kept', gameExecuted=False)
 
 
+def resync_fleet_rows(output, campaign):
+    """Refresh the mounted fleet's vehicle rows from its hash-verified source
+    manifest when the source was regenerated after an in-place mount. Only
+    allowed when every mounted vehicle file already equals the source output,
+    so no vehicle data changes; returns the refreshed vehicle ids."""
+    fleet = campaign.get('vehicleFleet')
+    if not fleet:
+        return []
+    metadata = output/fleet['manifest']
+    mounted = json.loads(metadata.read_text(encoding='utf-8'))
+    source = Path(mounted['sourceManifest'])
+    if digest(source) != mounted['sourceManifestSha256']:
+        raise ValueError('Vehicle fleet provenance changed')
+    original = json.loads(source.read_text(encoding='utf-8'))
+    outputs = {Path(row['RelativePath'].replace('\\', '/')).name.lower(): row['Sha256'].lower() for row in original['OutputFiles']}
+    for row in mounted['Files']:
+        name = Path(row['relative']).name.lower()
+        if name in outputs and (digest(output/row['relative']) != outputs[name] or row['sha256'].lower() != outputs[name]):
+            raise ValueError('Mounted fleet file differs from its source output: ' + row['relative'])
+    rows = {row['LcsId']: row for row in original['Vehicles'] if row['Prepared']}
+    refreshed = [row['LcsId'] for row in mounted['VehicleMappings'] if rows.get(row['LcsId']) not in (None, row)]
+    # The ferry pins the fleet-shared config files it was merged into; follow
+    # the fleet record when the package file is exactly what the fleet pins.
+    ferry = campaign.get('ferryBoat')
+    if ferry:
+        ferry_path = output/ferry['manifest']
+        ferry_manifest = json.loads(ferry_path.read_text(encoding='utf-8'))
+        fleet_pins = {row['relative']: row['afterSha256'].lower() for row in mounted.get('Configs', [])}
+        changed = False
+        for row in ferry_manifest['files']:
+            relative = row['relative']
+            if relative in ('data/vehicles.ide', 'data/handling.cfg') and 'preparedSha256' in row and \
+               fleet_pins.get(relative) == digest(output/relative) != row['sha256']:
+                row['sha256'], row['bytes'] = digest(output/relative), (output/relative).stat().st_size
+                changed = True
+        if changed:
+            ferry_path.write_text(json.dumps(ferry_manifest, indent=2) + '\n', encoding='utf-8')
+            ferry['sha256'] = digest(ferry_path)
+            refreshed.append('ferry')
+    if not refreshed or refreshed == ['ferry']:
+        return refreshed
+    mounted['VehicleMappings'] = [rows.get(row['LcsId'], row) for row in mounted['VehicleMappings']]
+    metadata.write_text(json.dumps(mounted, indent=2) + '\n', encoding='utf-8')
+    fleet['sha256'] = digest(metadata)
+    for row in campaign['originalResources']:
+        if row['relative'] == fleet['manifest']:
+            row['sha256'] = fleet['sha256']
+    return refreshed
+
+
 def tool_module(name):
     spec = importlib.util.spec_from_file_location(name.replace('-', '_'), ROOT/'tools'/(name+'.py'))
     module = importlib.util.module_from_spec(spec)
@@ -379,6 +429,10 @@ def prepare(base, output, version, notes, refresh, original_data):
             separatedOriginals=['chisel','hockeystick','handaxe','cleaver','machete','ingramsl','m60'],
             minigunBarrel='frame minigun2', sharedTargets={'sniper': ['laser'], 'brassknuckle': ['fingers']},
             animationsConverted=False, gameExecuted=False)
+    if version >= 96:
+        refreshed = resync_fleet_rows(output, campaign)
+        if refreshed:
+            campaign['fleetRowsRefreshed96'] = dict(vehicles=refreshed, filesUnchanged=True, gameExecuted=False)
     if version >= 95 and not campaign.get('weaponAnimations95'):
         game_directory = Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])
         campaign['weaponAnimations95'] = mount_weapon_animations(output, campaign, game_directory)

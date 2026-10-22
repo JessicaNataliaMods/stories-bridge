@@ -3528,6 +3528,7 @@ bool NativeAdapter::update_companion_boarding(int32_t actor,Companion& companion
         if(actor_car.condition && companion.vehicle>=0 && diagnostic_event)
             diagnostic_event("Companion vehicle occupancy observed: actor="+std::to_string(actor));
         companion.vehicle=-1;
+        companion.seat=-1;
         return true;
     }
     if(!char_in_control)return defer("Native companion control query unavailable");
@@ -3556,6 +3557,7 @@ bool NativeAdapter::update_companion_boarding(int32_t actor,Companion& companion
     // script status cannot prove that a task is live; do not query 062E here.
     if(*entering && (companion.vehicle<0 || companion.vehicle==car.values[0]))return true;
     if(companion.vehicle==car.values[0] && now-companion.requested_at<2000)return true;
+    companion.seat=-1;
     const auto capacity=execute({0x01EA,{car.values[0]},{},0,1});
     if(!capacity.executed)return defer("Cannot query native passenger capacity",capacity);
     if(capacity.values[0]<0 || capacity.values[0]>8)return defer("Invalid native passenger capacity="+std::to_string(capacity.values[0]));
@@ -3568,6 +3570,19 @@ bool NativeAdapter::update_companion_boarding(int32_t actor,Companion& companion
     const int32_t first=!front && rear_only && capacity.values[0]>1?1:0;
     int32_t seat=-1;
     for(int32_t candidate=first;candidate<capacity.values[0] && (!front || candidate==0);++candidate) {
+        // 0431 reports occupants, not tasks walking towards an empty seat.
+        // Keep each accepted companion request exclusive until occupancy or
+        // actual task completion; otherwise all three rescuers pick seat 0.
+        bool reserved=false;
+        for(auto& other:companions_) {
+            auto& pending=other.second;
+            if(other.first==actor || pending.vehicle!=car.values[0] || pending.seat!=candidate)continue;
+            if(now-pending.requested_at<2000){reserved=true;break;}
+            const auto live=char_entering_as_passenger(other.first);
+            if(!live || *live){reserved=true;break;}
+            pending.seat=-1;
+        }
+        if(reserved)continue;
         const auto free=execute({0x0431,{car.values[0],candidate},{},0,0,true});
         if(!free.executed)return defer("Cannot query actual passenger seat availability",free);
         if(free.condition){seat=candidate;break;}
@@ -3576,7 +3591,7 @@ bool NativeAdapter::update_companion_boarding(int32_t actor,Companion& companion
     const bool retry=companion.vehicle==car.values[0];
     // Record the attempt even on executor rejection: the engine might have
     // accepted a task before a plugin fault. Observe actual state before retry.
-    companion.vehicle=car.values[0];companion.requested_at=now;
+    companion.vehicle=car.values[0];companion.seat=seat;companion.requested_at=now;
     NativeCall enter{0x05CA,{actor,car.values[0],-1,seat}};enter.mission_context=companion.mission;
     const auto assigned=execute(enter);
     if(!assigned.executed)return defer("Cannot assign native companion passenger entry",assigned);

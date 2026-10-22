@@ -1,4 +1,5 @@
 #include "lcs/runtime.hpp"
+#include "lcs/script_cadence.hpp"
 #include "lcs/update_supervisor.hpp"
 #include "lcs/native.hpp"
 #include "ScriptCommands.h"
@@ -517,6 +518,29 @@ void actual_frame_time_step() {
     rejects([&](){invalid.tick(100,20);},"missing native timestep cannot silently become a simulated frame");
     check(global(invalid,2)==0 && invalid.script(id).thread.ip==0,"missing timestep cannot run or write any mission instruction");
 }
+void original_script_cadence() {
+    // Authored frame-count deadline, like mission resistance counters: WAIT 0
+    // must not spend twice as many iterations at 60 FPS as at 30 FPS.
+    for(uint32_t fps:{30u,60u,144u}) {
+        Code code;const auto loop=code.label();
+        code.op(COMMAND_ADD_VAL_TO_INT_VAR);code.global(2);code.integer(1);
+        code.wait(0);code.op(COMMAND_GOTO);code.integer(loop);
+        lcs::Runtime runtime(image(code));runtime.start_main();lcs::ScriptCadence cadence;
+        uint32_t before=0;float step=0;
+        runtime.frame_time_step=[&](){return std::optional<float>(step);};
+        for(uint32_t frame=1;frame<=fps*10;++frame) {
+            const uint32_t now=frame*1000/fps,elapsed=now-before;before=now;
+            if(const auto slice=cadence.advance(elapsed,float(elapsed)/20.0f)) {
+                step=slice->step;runtime.tick(now,slice->elapsed);
+            }
+        }
+        check(global(runtime,2)==300,"Frame-count deadline has identical 30 Hz duration at 30/60/144 render FPS");
+        check(runtime.script(1).thread.locals[104]==10000,"Cadence preserves accumulated game time for WAIT and timers");
+    }
+    lcs::ScriptCadence stalled;
+    check(stalled.advance(1000,3).has_value() && !stalled.advance(1,0.05f),
+          "A slow native frame does not replay catch-up script cycles against one world snapshot");
+}
 void native_effects_cannot_replay_after_entry() {
     Code code;const auto loop=code.label();code.op(COMMAND_ADD_VAL_TO_INT_VAR);code.global(2);code.integer(1);code.wait(0);code.op(COMMAND_GOTO);code.integer(loop);
     const auto worker=code.label();code.name("FACTORY");code.op(COMMAND_SET_LVAR_INT);code.local(0);code.integer(42);code.op(COMMAND_CREATE_OBJECT);code.integer(7);for(int i=0;i<3;++i)code.integer(0);code.local(0);code.set_global(3,77);code.end();
@@ -552,6 +576,7 @@ int main(int argc,char** argv) {
         mission_state_and_recovery();recovery_rejects_unsafe_state_without_partial_cleanup();
         function_frame_recovery_validation();bounded_initializers_keep_original_order();
         actual_frame_time_step();
+        original_script_cadence();
         native_effects_cannot_replay_after_entry();
         isolate_export_service_failure();
         structural_fault_domains();

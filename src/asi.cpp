@@ -10,6 +10,7 @@
 namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include <windows.h>
 #include "lcs/runtime.hpp"
+#include "lcs/script_cadence.hpp"
 #include "lcs/engine_dispatch.hpp"
 #include "lcs/update_supervisor.hpp"
 #include "lcs/sa_executor.hpp"
@@ -455,6 +456,8 @@ struct Campaign {
     uint32_t last_scoped_notice=0;
     std::set<lcs::ScriptId> notified_faults;
     lcs::UpdateSupervisor frame_updates;
+    lcs::ScriptCadence script_cadence;
+    float script_time_step=1.0f;
     bool hud_write_pending=false;
     std::string failure_notice="~r~LCS INTERROMPIDO~w~~n~Erro de execucao. Objetivos inativos. Consulte LcsSaBridge.log.";
     uint32_t last_failure_notice=0;
@@ -755,7 +758,7 @@ struct Campaign {
             adapter.current_outfit=[](int32_t actor){return player_skins->wearing(actor);};
         }
         hud.update=lcs::sa_hud_update;hud.read_cell=lcs::sa_hud_read;hud.write_cell=lcs::sa_hud_write;
-        runtime.frame_time_step=lcs::sa_frame_time_step;
+        runtime.frame_time_step=[this](){return std::optional<float>(script_time_step);};
         adapter.mission_script=[this](const lcs::Thread& t){return runtime.is_mission_script(t);};
         adapter.stored_player_weapon=lcs::sa_saved_player_weapon;
         adapter.camera_ped_zoom=lcs::sa_camera_ped_zoom;adapter.freeze_ped_zoom=lcs::sa_freeze_ped_zoom;
@@ -1272,11 +1275,10 @@ struct Campaign {
             if(corona_pending)return {};
         }
         if(gameplay_animations)frame_updates.run("gesture-expiry",lcs::UpdateScope::auxiliary,now,"Cannot release an expired mission wait gesture",[&](){return gameplay_animations->tick(now);});
-        skip_pressed=false;
         frame_updates.run("threat-scanner-ranges",lcs::UpdateScope::auxiliary,now,"Cannot update native threat scanner radii",lcs::sa_tick_threat_ranges);
         frame_updates.run("dialogue-input",lcs::UpdateScope::auxiliary,now,"Cannot read native dialogue input",[&](){
             const auto skip=lcs::execute_sa({0x00E2,{0,16},{},0,1});if(!skip.executed)return false;
-            const bool down=skip.values[0]!=0;skip_pressed=down && !skip_down;skip_down=down;return true;
+            const bool down=skip.values[0]!=0;skip_pressed=skip_pressed || (down && !skip_down);skip_down=down;return true;
         });
         // HUD is a runtime input/output dependency. Hold the VM while its
         // actual binding is unavailable, retaining all code/markers/scene state.
@@ -1308,7 +1310,15 @@ struct Campaign {
             }))return {};
         if(!frame_updates.run("island-collision-residency",lcs::UpdateScope::dependency,now,
             "Native island collision residency consumer failed",lcs::sa_allowed_collision_healthy))return {};
-        const auto events=runtime.tick(now,elapsed,1000);
+        const auto native_step=lcs::sa_frame_time_step();
+        if(!native_step || !std::isfinite(*native_step) || *native_step<0)
+            throw std::runtime_error("Native script timestep unavailable");
+        std::vector<lcs::Execution> events;
+        if(const auto slice=script_cadence.advance(elapsed,*native_step)) {
+            script_time_step=slice->step;
+            events=runtime.tick(now,slice->elapsed,1000);
+            skip_pressed=false; // Retain input edges across render frames without a script slice.
+        }
         corona_pending=!frame_updates.run("script-coronas",lcs::UpdateScope::dependency,now,"Original script corona renderer refused ownership",[&](){return coronas.tick();});
         frame_updates.run("attack-with-cops",lcs::UpdateScope::auxiliary,now,"Attack-with-cops reaction consumer unavailable",[&](){
             return adapter.tick_attack_with_cops();
