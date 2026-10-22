@@ -61,6 +61,7 @@ public:
     Vm& vm() { return vm_; }
     const Script& script(ScriptId id) const;
     size_t active_count() const { return active_.size(); }
+    const std::vector<ScriptId>& active_ids() const { return active_; }
     bool is_mission_script(const Thread& thread) const;
     // Generic fault boundaries, derived from code residency and actual launch
     // dependencies, never from a whitelist of script names. A blocked worker

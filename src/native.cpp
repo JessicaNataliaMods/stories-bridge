@@ -2970,6 +2970,10 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         }
         if(i<found->inputs)call.inputs.push_back(vm.parameter(thread));
     }
+    if(diagnostic_event && (opcode==COMMAND_DO_FADE || opcode==COMMAND_REGISTER_MISSION_PASSED || opcode==COMMAND_MISSION_HAS_FINISHED)) {
+        std::string detail=opcode==COMMAND_DO_FADE && call.inputs.size()>=2 ? " time="+std::to_string(call.inputs[0])+" direction="+std::to_string(call.inputs[1]) : "";
+        diagnostic_event(std::string("Script command: thread=")+thread.name+" "+opcode_name(opcode)+detail);
+    }
     if(opcode==COMMAND_CHANGE_CAR_COLOUR && !vehicle_colour_map_.empty()) {
         for(size_t i=1;i<3;++i) {
             const auto original=call.inputs[i];

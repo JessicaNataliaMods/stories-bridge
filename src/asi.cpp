@@ -1343,6 +1343,19 @@ struct Campaign {
         frame_updates.run("spatial-mission-speech",lcs::UpdateScope::auxiliary,now,"Cannot update original positioned mission speech",[&](){return audio.tick_spatial();});
         report_fast_vehicles();
         report_lane_samples(now);
+        // Mission heartbeat: where the mission thread is while the player sees
+        // no progress (e.g. a black screen after a fade-out).
+        static uint32_t last_heartbeat=0;
+        if(runtime.on_mission() && now-last_heartbeat>=5000) {
+            last_heartbeat=now;
+            for(const auto id:runtime.active_ids()) {
+                const auto& script=runtime.script(id);
+                if(!runtime.is_mission_script(script.thread))continue;
+                log("Mission heartbeat: thread="+std::to_string(id)+" name="+script.thread.name+" ip="+std::to_string(script.thread.ip)+
+                    " lastIp="+std::to_string(script.thread.last_ip)+" lastCommand="+lcs::opcode_name(script.thread.last_opcode)+
+                    " waiting="+(script.thread.waiting?"1":"0")+" wake="+std::to_string(script.thread.wake_time)+" now="+std::to_string(now));
+            }
+        }
         for(const auto& event:events)if(event.result==lcs::StepResult::unsupported || event.result==lcs::StepResult::failed) {
             const auto fault=runtime.failure(event.id);
             if(!fault) {
