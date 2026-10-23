@@ -538,7 +538,7 @@ if(BUILD_TESTING)
   if(ASSET_VALIDATION_PYTHON)
     add_test(NAME campaign_private_animation_storage COMMAND "${ASSET_VALIDATION_PYTHON}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/campaign_animation_storage_tests.py"
-      "${CMAKE_CURRENT_SOURCE_DIR}/out/campaign-copy4-v124/data/lcs/animations"
+      "${CMAKE_CURRENT_SOURCE_DIR}/out/campaign-copy4-v127/data/lcs/animations"
       "${CMAKE_CURRENT_SOURCE_DIR}/out/gameplay-animations-v4" "${CMAKE_CURRENT_SOURCE_DIR}/out/named-animations-v2")
     add_test(NAME original_ped_animation_retarget COMMAND "${ASSET_VALIDATION_PYTHON}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/lcs_ifp_tests.py")

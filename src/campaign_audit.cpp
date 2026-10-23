@@ -89,7 +89,8 @@ struct Use {
 int main(int argc,char** argv) {
     try {
         const bool compatibility_sites=argc==3 && std::string(argv[2])=="--compat-sites";
-        if(argc!=2 && !compatibility_sites)throw std::runtime_error("Usage: lcs-campaign-audit MAIN.SCM [--compat-sites]");
+        const bool wait_states=argc==3 && std::string(argv[2])=="--wait-states";
+        if(argc!=2 && !compatibility_sites && !wait_states)throw std::runtime_error("Usage: lcs-campaign-audit MAIN.SCM [--compat-sites]");
         // Focused provenance for single-player scope decisions. Reuse the
         // existing decoded sites; never search raw bytes as if they were code.
         const std::set<uint16_t> focused{195,196,940,941,942,1448,1450,1492,1552,
@@ -124,6 +125,7 @@ int main(int argc,char** argv) {
                     if(!spec)throw std::runtime_error(std::string("No primary decode signature: ")+lcs::opcode_name(opcode));
                     std::set<std::string> texts;
                     std::vector<Number> labels;
+                    std::vector<Number> operands;
                     if(opcode==COMMAND_CALL || opcode==COMMAND_CALLNOT) {
                         const auto inputs=cursor.byte(),outputs=cursor.byte(),offset=cursor.byte();
                         if(unsigned(inputs)+outputs+offset>96)throw std::runtime_error("Invalid function frame");
@@ -133,8 +135,10 @@ int main(int argc,char** argv) {
                     } else {
                         for(const auto kind:spec->inputs) {
                             if(kind=='s')texts.insert(cursor.text());
-                            else {const auto value=cursor.number();if(kind=='l')labels.push_back(value);}
+                            else {const auto value=cursor.number();if(kind=='l')labels.push_back(value);operands.push_back(value);}
                         }
+                        if(wait_states && (opcode==COMMAND_SET_CHAR_WAIT_STATE || opcode==COMMAND_SET_CHAR_WAIT_STATE_REPEAT) && operands.size()>=2)
+                            std::cerr<<"WAIT context="<<(at<image.main_size?-1:context)<<" ip="<<at<<" state="<<(operands[1].constant?std::to_string(operands[1].value):std::string("var"))<<std::endl;
                         for(size_t i=0;i<spec->outputs;++i)cursor.number(true);
                         if(opcode==COMMAND_START_NEW_SCRIPT) {
                             unsigned args=0;

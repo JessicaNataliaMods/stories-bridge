@@ -123,4 +123,21 @@ assert [round(k[0], 3) for k in folded] == [0.0, 0.5, 1.0] and after['WALK_civi'
 t, s = original_tracks['WALK_civi'][41], original_tracks['WALK_civi'][2]
 for time, q, _ in folded:
     assert close(li.qmat(q), matrix_product(li.qmat(li.sample(t, time)), li.qmat(li.sample(s, time))), 1e-5)
+
+# 6. Seat height: a rotation-only Root sequence gains a constant (0, 0, -drop) translation; the rest is untouched.
+_tag, _begin, _end, _at = li._section(original, 0)
+_at = li._section(original, _begin)[3]
+_name, _nb, _ne, _after_name = li._section(original, _at)
+_dgan, _db, _de, _after = li._section(original, _after_name)
+walk_record = original[_at:_after]
+assert original[_nb:_ne].split(bytes(1))[0] == b'WALK_civi'
+lowered = li.lower_root(walk_record, 0.35)
+tracks_after = li.read_original_block(pack(b'ANPK', pack(b'INFO', struct.pack('<I', 1) + b'ped' + bytes(1)) + lowered))['WALK_civi']
+assert len(tracks_after[0]) == 2 and all(k[2][:2] == (0.0, 0.0) and abs(k[2][2] + 0.35) < 1e-6 for k in tracks_after[0])
+assert tracks_after[2] == original_tracks['WALK_civi'][2] and tracks_after[41] == original_tracks['WALK_civi'][41]
+try:
+    li.lower_root(lowered, 0.35)
+    raise SystemExit('A Root that already keys translation must be refused')
+except ValueError:
+    pass
 print('PASS: lcs_ifp quaternion order, thigh fold, ANP3 encoding, block replacement and ANPK retarget')

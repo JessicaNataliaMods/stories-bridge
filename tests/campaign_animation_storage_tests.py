@@ -1,5 +1,7 @@
 """Check private bundled animations against all original prepared records."""
 import hashlib,json,pathlib,struct,sys
+sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'tools'))
+import lcs_ifp
 package=pathlib.Path(sys.argv[1]);gestures=pathlib.Path(sys.argv[2]);named=pathlib.Path(sys.argv[3])
 
 def records(path):
@@ -28,6 +30,9 @@ assert not list(package.rglob('*.ifp'))
 combined=records(package/'LG00.ifp.bin');expected={}
 for row in json.loads((gestures/'manifest.json').read_text())['files']:
     expected.update(records(gestures/row['path']))
+for label,drop in lcs_ifp.SPAWN_DROPS.items():   # the only intended change: the seat height keyed on the Root
+    assert combined[label]!=expected[label] and combined[label]==lcs_ifp.lower_root(expected[label],drop)
+    expected[label]=combined[label]
 assert combined==expected, 'NAME/DGAN records, including bone tags and every keyframe, changed'
 assert (package/'named/LN00.ifp.bin').read_bytes()==(named/'LN00.ifp').read_bytes()
 source=[line.split('\t') for line in (gestures/'index.tsv').read_text().splitlines()]
