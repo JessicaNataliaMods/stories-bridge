@@ -5,6 +5,10 @@ import pathlib
 import re
 
 
+# peds.ide fields: type, stats, animation group, and the ped/voice types of the revised slots.
+IDE_REVISABLE_FIELDS = {3, 4, 5, 11, 12, 13}
+
+
 def ide(path):
     rows = {}
     for line in path.read_text(encoding='ascii').splitlines():
@@ -61,9 +65,12 @@ def validate(package, game):
             if (source / 'rw-assets' / (alias + ext)).read_bytes() != (source / 'rw-assets' / (canonical_asset + ext)).read_bytes():
                 raise ValueError('Nonidentical source skins aliased together')
     expected_files = set()
+    # tools/revise-gameplay-peds.py may retype a bound slot (type, stats, animation group, voices); the model/TXD
+    # identity, car masks and everything else stay the stock SA values, and unbound slots are untouched.
     for ident, native in original.items():
         if installed[ident] != native:
-            raise ValueError('Unexpected native IDE field change')
+            if ident not in by_id or len(installed[ident]) != len(native) or                     any(a != b for i, (a, b) in enumerate(zip(native, installed[ident])) if i not in IDE_REVISABLE_FIELDS):
+                raise ValueError('Unexpected native IDE field change')
     for row in rows:
         native = original[row['nativeModelId']]
         if native[1].lower() != row['nativeName'].lower() or native[2].lower() != row['nativeDictionary'].lower():
@@ -90,13 +97,12 @@ def validate(package, game):
     ambient = {r['nativeName'].lower() for r in rows if r['sourceKind'] == 'population' and r['nativeName'] != 'male01'}
     if len(before) != len(after) or any(len(a) != len(b) or len(b) > 32 or any(n.lower() not in ambient for n in b) for a, b in zip(before, after)):
         raise ValueError('Ambient group contains story skin or invalid inventory')
-    for name in ('peds.ide','pedgrp.dat'):
-        if (package/'data'/name).read_bytes() != (game/'data'/name).read_bytes():
-            raise ValueError('Native population definitions/groups changed')
+    if (package/'data/pedgrp.dat').read_bytes() != (game/'data/pedgrp.dat').read_bytes():
+        raise ValueError('Native population groups changed')
     ini = (package / 'LcsSaBridge.ini').read_text(encoding='utf-16')
     if not re.search(r'^GameplaySkins=1\s*$', ini, re.M):
         raise ValueError('Scoped skin culling is disabled')
     return dict(valid=True, sourceSkins=139, uniqueNativeReplacements=len(rows),
                 populationSkins=manifest['populationSourceCount'], canonicalMissionBindings=len(canonical),
-                nativePopulationByteExact=True, sourceBodyProportionsVerified=True, gameExecuted=False,
+                nativePopulationByteExact=False, nativePedGroupsByteExact=True, sourceBodyProportionsVerified=True, gameExecuted=False,
                 runtimeVerified=False, playerImgModified=False)
