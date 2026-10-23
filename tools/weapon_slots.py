@@ -44,9 +44,9 @@ REUSED_SLOTS = {"DILDO1": 1, "DILDO2": 1, "VIBE1": 1, "VIBE2": 1, "PISTOL_SILENC
 # original animation group (knife/screwdrv swing, baseball swing).
 MELEE_COMBOS = {"knife": "KNIFE", "screwdrv": "KNIFE", "baseball": "BBALLBAT", "golfclub": "BBALLBAT"}
 # Gun types that were unused SA slots copy the animation data of the SA weapon
-# they now behave like (Ingram: one-handed SMG; M60: two-handed rifle stance, since the flame group
-# is the flamethrower's low hip pose and its own group has no SA counterpart).
-BORROWED_GUN_ROWS = {"PISTOL_SILENCED": "MICRO_UZI", "COUNTRYRIFLE": "M4"}
+# they now behave like (Ingram: one-handed SMG; M60: the minigun's stance, flags and accuracy: the M60's own
+# group has no SA counterpart, and a rifle row lets shots follow the arm instead of the crosshair).
+BORROWED_GUN_ROWS = {"PISTOL_SILENCED": "MICRO_UZI", "COUNTRYRIFLE": "MINIGUN"}
 # v95+: original animation group (WEAPON.DAT column P) -> SA group whose block
 # carries the converted original animations (tools/weapon_animations.py), and
 # the SA weapon that natively uses that group: a weapon moved to another group
@@ -176,10 +176,6 @@ def convert_weapon_dat(sa_text, original_text, models, sa_model_names, animation
             fields[26:30] = original[7:11]
         group = original[14].lower()
         loops = original[15:22]
-        if group == 'm60':
-            # The original M60 group has no SA block; it plays the rifle group
-            # with the Ruger's loops (an SA type that natively uses it).
-            group, loops = 'rifle', by_name['AK47'][15:22]
         if animations and group in ANIMATED_GROUPS:
             # Every skill row plays the converted original group (LCS has no
             # weapon skill, low-skill or twin-pistol variants), with that
@@ -190,11 +186,7 @@ def convert_weapon_dat(sa_text, original_text, models, sa_model_names, animation
             fields[25] = template[25]
             fields[18:25] = loops
         if len(fields) in (26, 30) and fields[0] == '$' and fields[2] == 'INSTANT_HIT' and int(fields[25], 16) & 0x1:
-            # ONLYFREEAIM (0x8) instead of CANAIM, like the minigun: shots follow the crosshair, not the arm;
-            # the skill-less LCS has no 'bad' animation group variants either.
-            fields[25] = '%X' % ((int(fields[25], 16) & ~0x1) | 0x38)
-            if fields[8].endswith('bad'):
-                fields[8] = fields[8][:-3]
+            fields[25] = '%X' % (int(fields[25], 16) | 0x30)
             # LCS has no weapon skill: accuracy (column R, which also sizes SA's crosshair
             # ring) is never worse than the best SA skill level.
             fields[16] = number(max(float(fields[16]), MIN_ACCURACY))
