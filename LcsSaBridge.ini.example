@@ -3,3 +3,24 @@
 ; and the original PS2 AUDIO folder is copied next to it (docs/audio.md).
 ; 0 keeps SA's own radio stations instead of the original LCS radio.
 LcsRadio=1
+; Straight hand aim (docs/hand-aim.md): the aiming hand of one-handed guns is kept upright for CJ and NPCs.
+; Every key below defaults to 1 (on) when absent; 0 turns that part off. HandAim=0 turns the whole feature off.
+HandAim=1
+HandAimCJ=1
+HandAimNPCs=1
+HandAimGrove=1
+HandAimBallas=1
+HandAimOtherGangs=1
+HandAimCops=1
+HandAimCivilians=1
+HandAimOtherPeds=1
+HandAimDualLeftHand=1
+HandAimSameAnimationGroup=1
+; Weapon types added by other mods that are not covered by their animation group, e.g. 40,41
+HandAimExtraWeaponTypes=
+; 0 forearm line (steadiest), 1 hand axis from the game's aim, 2 blend (HandAimBlendPercent)
+HandAimAxis=0
+HandAimBlendPercent=50
+HandAimMaxDeviationDegrees=20
+HandAimBlendInMs=150
+HandAimBlendOutMs=350

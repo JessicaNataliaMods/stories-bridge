@@ -2,6 +2,7 @@
 #include "lcs/route_native_backend.hpp"
 #include "lcs/route_scripts.hpp"
 #include "sa_ui_draw.hpp"
+#include "sa_hand_aim.hpp"
 #include "sa_route_service.hpp"
 #include "lcs/cop_native_translation.hpp"
 #include "lcs/route_vehicle_native.hpp"
@@ -2157,6 +2158,24 @@ bool install_hook() {
         log(install_fixed_crosshair_radius()?"LCS HUD: crosshair size fixed":"LCS HUD: SA crosshair size function differs; crosshair keeps SA's growth");
     if(mission_hud && setting(L"Mode")==L"Campaign" && setting(L"LcsHud")!=L"0")
         log(install_call(0x58FBBF,&on_crosshairs,original_crosshairs)?"LCS HUD: sniper/camera sights installed":"LCS HUD: SA crosshair call site differs; sniper/camera sights stay with SA");
+    if(setting(L"Mode")==L"Campaign" && setting(L"HandAim")!=L"0") {
+        // Straight hand aim (docs/hand-aim.md): every key defaults to on; 0 turns that group off.
+        const auto on=[](const wchar_t* key){return setting(key)!=L"0";};
+        lcs::HandAimConfig hand;
+        hand.cj=on(L"HandAimCJ");hand.npcs=on(L"HandAimNPCs");hand.grove=on(L"HandAimGrove");hand.ballas=on(L"HandAimBallas");
+        hand.vagos=hand.sfrifa=hand.danang=hand.mafia=hand.triads=hand.aztecas=on(L"HandAimOtherGangs");
+        hand.cops=on(L"HandAimCops");hand.civilians=on(L"HandAimCivilians");hand.otherPeds=on(L"HandAimOtherPeds");
+        hand.leftHand=on(L"HandAimDualLeftHand");hand.sameAnimationGroup=on(L"HandAimSameAnimationGroup");
+        for(const wchar_t ch:setting(L"HandAimExtraWeaponTypes"))hand.extraWeaponTypes.push_back(char(ch<128?ch:' '));
+        const auto number=[](const wchar_t* key,int fallback){const auto text=setting(key);return text.empty()?fallback:_wtoi(text.c_str());};
+        hand.aimAxis=number(L"HandAimAxis",0);hand.blendPercent=number(L"HandAimBlendPercent",50);
+        hand.maxDeviationDegrees=number(L"HandAimMaxDeviationDegrees",20);
+        hand.blendInMs=number(L"HandAimBlendInMs",150);hand.blendOutMs=number(L"HandAimBlendOutMs",350);
+        lcs::sa_hand_aim_set_logger([](const char* message){log(message);});
+        std::string hand_message;
+        const bool hand_ok=lcs::sa_hand_aim_install(hand,hand_message);
+        log(std::string(hand_ok?"Hand aim: ":"Hand aim unavailable, SA poses kept: ")+hand_message);
+    }
     // Wrap the parent HUD call: DrawMissionTimers is skipped in widescreen,
     // while the source credits roll must still reach the shared font flush.
     if(lcs::sa_credits_render_profile())install_call(0x53E4FF,&on_credits_hud,original_credits_hud);
