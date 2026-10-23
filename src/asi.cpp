@@ -1899,7 +1899,8 @@ LCS_SKIP_STUB(ammo_b,lcs_weapon_skip)
 ScriptProcess original_wanted_stars=nullptr;
 void __cdecl on_wanted_stars(){if(!lcs_wanted_skip)original_wanted_stars();}
 // Call sites inside CHud::DrawPlayerInfo (0x58EAF0), each confirmed against the
-// 1.0 US executable: 0x589270 health bar, 0x589190 armour bar, 0x71A700 text,
+// 1.0 US executable: 0x589270 health bar, 0x5890A0 armour bar, 0x71A700 text.
+// 0x589190 is breath: leave its calls intact so SA's swimming system keeps its indicator.
 // 0x58D7D0 weapon icon, 0x5893B0 ammunition; and the DrawWanted call (0x58D9A0) in CHud::Draw.
 // Text print sites of the HUD (CFont::PrintString 0x71A700 / PrintStringFromBottom 0x71A820, both
 // cdecl with (x, y, text)). The element ids match lcs::ui::TextElement.
@@ -1957,7 +1958,7 @@ ScriptProcess original_crosshairs=nullptr;
 void __cdecl on_crosshairs(){if(!lcs::sa_ui_draw_scope())original_crosshairs();}
 bool install_player_info_stubs(){
     return install_call(0x58EE9A,&on_health_a,original_health_a) && install_call(0x58EF0D,&on_health_b,original_health_b) &&
-           install_call(0x58F131,&on_armour_a,original_armour_a) && install_call(0x58F1AD,&on_armour_b,original_armour_b) &&
+           install_call(0x58EF6B,&on_armour_a,original_armour_a) && install_call(0x58EFDE,&on_armour_b,original_armour_b) &&
            install_call(0x58EC21,&on_clock_text,original_clock_text) && install_call(0x58F607,&on_money_text,original_money_text) &&
            install_call(0x58F944,&on_weapon_icon_a,original_weapon_icon_a) && install_call(0x58F9B1,&on_weapon_icon_b,original_weapon_icon_b) &&
            install_call(0x58FA25,&on_ammo_a,original_ammo_a) && install_call(0x58FABE,&on_ammo_b,original_ammo_b) &&
