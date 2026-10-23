@@ -48,6 +48,7 @@ const AudioSample* SaInterfaceSounds::sample(uint64_t key,uint32_t a,uint32_t b,
     } catch(const std::exception&) {return nullptr;}
 }
 bool SaInterfaceSounds::event(int32_t sa_event) {
+    if(!mixer_ || !mixer_->available())return false;
     const auto sound=interface_sound_for_event(sa_event);
     if(!sound)return false;
     const uint32_t now=GetTickCount();
@@ -81,7 +82,8 @@ void SaInterfaceSounds::play(const InterfaceSound& sound_ref,int32_t sa_event) {
     if(sound->frequency>0)voice.frequency=uint32_t(sound->frequency);
     else if(sa_event>=sa_frontend::bullet_pass_left_rear && sa_event<=sa_frontend::bullet_pass_right_front)
         voice.frequency=uint32_t(int32_t(voice.frequency)+random_.displacement(voice.frequency>>5));
-    const uint8_t volume=uint8_t(std::clamp(float(interface_volume)*std::clamp(float(effects_scale_),0.f,1.f),0.f,127.f)+0.5f);
-    speech_.play_owned_effect(voice,AudioMix{volume,sound->pan});
+    const uint8_t volume=interface_volume; // the shared mixer applies the menu gain once
+    const auto frequency=voice.frequency;
+    mixer_->play_one_shot(std::make_shared<const AudioSample>(std::move(voice)),frequency,volume,sound->pan);
 }
 }

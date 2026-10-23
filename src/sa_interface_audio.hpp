@@ -1,6 +1,7 @@
 #pragma once
 #include "sa_audio.hpp"
 #include "sa_audio_jobs.hpp"
+#include "sa_audio_mixer.hpp"
 #include <atomic>
 #include <memory>
 #include "lcs/audio.hpp"
@@ -26,7 +27,7 @@ bool sa_interface_event_calls(uintptr_t hook);
 // equivalent (or when no voice is free) stay with SA.
 class SaInterfaceSounds {
     const AudioArchive& archive_;
-    MissionSpeech speech_{OwnedVoiceProfile::source_audio};
+    std::shared_ptr<SaAudioMixer> mixer_;
     SourceAudioRandom random_;
     std::unordered_map<uint64_t,AudioSample> cache_;
     uint32_t next_pickup_=0,next_mission_=0;
@@ -34,14 +35,13 @@ class SaInterfaceSounds {
     std::array<uint16_t,64> window_count_{};
     std::array<bool,64> seen_{};
     std::function<void(const std::string&)> log_;
-    std::atomic<float> effects_scale_{1.0f};
     const AudioSample* sample(uint64_t key,uint32_t a,uint32_t b,bool mixed);
     void play(const InterfaceSound& sound,int32_t sa_event);   // worker thread: decodes and opens the wave device
     std::unique_ptr<AudioWorker> worker_;                      // last member
 public:
-    explicit SaInterfaceSounds(const AudioArchive& archive):archive_(archive),worker_(std::make_unique<AudioWorker>(nullptr,std::chrono::milliseconds(1000))){}
-    ~SaInterfaceSounds(){worker_.reset();speech_.shutdown();}
-    void set_effects_scale(float value){effects_scale_=value;}
+    SaInterfaceSounds(const AudioArchive& archive,std::shared_ptr<SaAudioMixer> mixer):archive_(archive),mixer_(std::move(mixer)),worker_(std::make_unique<AudioWorker>(nullptr,std::chrono::milliseconds(1000))){}
+    ~SaInterfaceSounds(){worker_.reset();}
+    void set_effects_scale(float value){if(mixer_)mixer_->set_effects_scale(value);}
     void set_logger(std::function<void(const std::string&)> value){log_=std::move(value);}
     // True: LCS played (or dropped it on purpose); SA must skip the event.
     bool event(int32_t sa_event);

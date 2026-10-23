@@ -238,6 +238,10 @@ bool AudioAdapter::tick_spatial() {
     std::optional<SpatialListener> transform;
     for(size_t i=0;i<slots_.size();++i){
         const auto& slot=slots_[i];if(!slot.started || !slot.position)continue;
+        // Finished positioned lines no longer own a live spatial gain update.
+        // In particular, an old out-of-range slot must not keep writing zero
+        // while another slot plays a new unpositioned mission line.
+        if(finished && finished(i))continue;
         if(!set_mix || !spatial_listener)return false;
         if(!transform){transform=spatial_listener();if(!transform)return false;}
         if(!set_mix(i,mission_audio_mix(*slot.position,*transform)))return false;
@@ -338,7 +342,7 @@ AudioAdapter::WorldSound AudioAdapter::play_weapon_shot(const WeaponShotSpec& sp
         pan=mission_audio_mix(position,*listener_state).pan;
     }
     scale_mono_pcm(effect.pcm,volume); // interleaved 16-bit values scale the same way
-    if(post_world_effect){post_world_effect(std::move(effect),{world_effect_gain(effects_scale),pan});return WorldSound::played;}
+    if(post_world_effect)return post_world_effect(std::move(effect),{world_effect_gain(effects_scale),pan})?WorldSound::played:WorldSound::refused;
     return play_positioned_effect(effect,{world_effect_gain(effects_scale),pan})?WorldSound::played:WorldSound::refused;
 }
 AudioAdapter::WorldSound AudioAdapter::play_weapon_reload(const WeaponReloadSpec& spec,const std::array<float,3>& position,float effects_scale) {
@@ -362,7 +366,7 @@ AudioAdapter::WorldSound AudioAdapter::play_weapon_reload(const WeaponReloadSpec
     AudioSample effect;effect.channels=1;effect.frequency=uint32_t(frequency);effect.pcm=sample->pcm;
     scale_mono_pcm(effect.pcm,volume);
     const AudioMix mix{world_effect_gain(effects_scale),mission_audio_mix(position,*listener_state).pan};
-    if(post_world_effect){post_world_effect(std::move(effect),mix);return WorldSound::played;}
+    if(post_world_effect)return post_world_effect(std::move(effect),mix)?WorldSound::played:WorldSound::refused;
     return play_positioned_effect(effect,mix)?WorldSound::played:WorldSound::refused;
 }
 bool AudioAdapter::handles(uint16_t opcode) {

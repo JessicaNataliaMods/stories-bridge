@@ -5,7 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 static void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
-int main(){try {
+int main(int argc,char** argv){try {
     lcs::EndingTuneEnvelope fade;
     check(!fade.service(1) && !fade.service(0) && !fade.service(4) && !fade.service(8),"Original frontend fade waits three serviced audio frames at cadence4");
     check(fade.service(12)==6 && !fade.service(12) && fade.service(16)==12,"Original fade advances6 once per serviced frame");
@@ -311,7 +311,7 @@ int main(){try {
     }
     {
         lcs::NativeCityMusic city;
-        const auto source=std::filesystem::path(__FILE__).parent_path().parent_path()/"local/originals/lcs-ps2/AUDIO/MUSIC/CITY.VB";
+        const auto source=argc>1?std::filesystem::path(argv[1]):std::filesystem::path(__FILE__).parent_path().parent_path()/"local/originals/lcs-ps2/AUDIO/MUSIC/CITY.VB";
         lcs::ContinuousSourceRandom shared(180371);
         const auto table=shared.audio_table();
         std::array<uint32_t,10> lengths;lengths.fill(600320);
@@ -343,6 +343,13 @@ int main(){try {
         audio_mock::fail_reset=true;
         check(!city.shutdown(),"Refused CITY release remains owned");audio_mock::fail_reset=false;
         check(city.shutdown() && !city.playing_track(),"CITY release retries without losing published decoder storage");
+    }
+    {
+        lcs::MissionSpeech dialogue;
+        check(dialogue.play(0,sample) && dialogue.set_mix(0,{0,20}),"Distant dialogue can reach its authored silent gain");
+        dialogue.stop(0);
+        check(dialogue.play(0,sample) && audio_mock::last_volume==0xFFFFFFFFu,
+              "A new unpositioned mission line explicitly restores centered full gain before its PCM starts");
     }
     std::cout<<"PASS: owned effect/stream generation, authored loops, stable queue buffers, completion and device faults; no device/game executed\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

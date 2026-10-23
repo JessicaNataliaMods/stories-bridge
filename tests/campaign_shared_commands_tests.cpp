@@ -406,9 +406,9 @@ int main(int argc,char** argv){try{
     unhandled.backend=[&](Vm& v,Thread& thread,uint16_t op){if(const auto sound=try_engine_adapter(audio,v,thread,op))return *sound;if(const auto display=try_engine_adapter(hud,v,thread,op))return *display;reached_native=true;return native.dispatch(v,thread,op);};
     check(unhandled.step(t,0)==StepResult::continued && reached_native,"Unclaimed opcodes still reach their actual native owner");
     AudioAdapter spatial(archive);SpatialListener listener;std::vector<std::pair<size_t,AudioMix>> mixes;
-    bool mixer_ok=true;size_t plays=0,stops=0;
+    bool mixer_ok=true;size_t plays=0,stops=0;std::array<bool,2> speech_done{};
     spatial.play=[&](size_t slot,const AudioSample& sample){check(slot<2 && !sample.pcm.empty(),"Positioned speech must play real original PCM in a dialogue slot");++plays;return true;};
-    spatial.stop=[&](size_t slot){check(slot<2,"Speech clear cannot stop NEWS/effects");++stops;};spatial.finished=[](size_t){return false;};
+    spatial.stop=[&](size_t slot){check(slot<2,"Speech clear cannot stop NEWS/effects");++stops;};spatial.finished=[&](size_t slot){return speech_done.at(slot);};
     spatial.spatial_listener=[&]()->std::optional<SpatialListener>{return listener;};
     spatial.set_mix=[&](size_t slot,AudioMix mix){mixes.emplace_back(slot,mix);return mixer_ok;};
     const auto sample_name=AudioArchive::mission_names().front();
@@ -429,6 +429,10 @@ int main(int argc,char** argv){try{
     listener.position={};listener.right={{0,1,0}};mixes.clear();check(spatial.tick_spatial() && mixes[0].second.pan==63,"Pan uses the actual camera basis, including its orientation");
     listener.right={{1,0,0}};
     check(sound_command(COMMAND_SET_MISSION_AUDIO_POSITION,{1,bits(80.f),0,0})==StepResult::continued && spatial.tick_spatial() && mixes[mixes.size()-2].second.volume==0,"At the original range boundary speech is actually muted, without pretending playback finished");
+    speech_done[0]=true;mixes.clear();
+    check(spatial.tick_spatial() && mixes.size()==1 && mixes.front().first==1,
+          "Finished distant dialogue cannot keep muting a live slot through stale spatial updates");
+    speech_done[0]=false;
     mixer_ok=false;check(!spatial.tick_spatial() && plays==2,"Advisory mixer failure reports failure without replaying the original speech");mixer_ok=true;
     check(sound_command(COMMAND_SET_MISSION_AUDIO_POSITION,{1,int32_t(0x7fc00000),0,0})==StepResult::failed,"NaN positions are rejected before mutating voice state");
     check(sound_command(COMMAND_LOAD_MISSION_AUDIO,{1},true)==StepResult::continued && sound_command(COMMAND_PLAY_MISSION_AUDIO,{1})==StepResult::continued,"Loading a new line resets that slot to original two-dimensional speech");

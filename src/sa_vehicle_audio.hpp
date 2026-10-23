@@ -1,7 +1,6 @@
 #pragma once
-#include "sa_audio.hpp"
 #include "sa_audio_jobs.hpp"
-#include <atomic>
+#include "sa_audio_mixer.hpp"
 #include <memory>
 #include <mutex>
 #include "lcs/audio.hpp"
@@ -12,9 +11,17 @@
 #include <functional>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 namespace lcs {
-// SA 1.0 US vehicle audio entry points (all checked against the exe; addresses
-// and structures follow the gta-reversed CAEVehicleAudioEntity layout):
+enum class SaVehicleEventSound : uint8_t { none, door_open, door_close, engine_start };
+inline SaVehicleEventSound sa_vehicle_event_sound(int32_t event) {
+    // Bonnet/boot motion from damage stays in the native SA consumer.
+    if(event>=80 && event<=83)return SaVehicleEventSound::door_open;
+    if(event>=86 && event<=89)return SaVehicleEventSound::door_close;
+    if(event==103)return SaVehicleEventSound::engine_start;
+    return SaVehicleEventSound::none;
+}
+// SA 1.0 US vehicle audio entry points and gta-reversed CAEVehicleAudioEntity layout:
 //   ProcessVehicle            0x501E10  per-vehicle audio update
 //   PlayHornOrSiren           0x4F99D0  thiscall(horn, siren, fastSiren, tVehicleParams*) ret 0x10, call at 0x500366
 //   ProcessPlayerVehicleEngine 0x4FBB10 thiscall(tVehicleParams*) ret 4, calls 0x501FD6 / 0x5021C2
@@ -41,24 +48,23 @@ struct VehicleSoundConfig {bool horns=false,sirens=false,doors=false,engines=fal
 // LCS samples of the model each SA slot stands for. Everything not taken over
 // (other models, other sounds, a failed voice) keeps running in SA.
 //
-// The SA hooks only decide what should sound and publish it; a worker thread opens, retunes and closes the
-// wave devices (each such call costs milliseconds and used to stall the game thread).
+// Hooks publish desired voices; the adapter worker resolves archived assets and the shared mixer owns
+// the single WinMM output stream, keeping device and decoding work off the game thread.
 class SaVehicleSounds {
     enum Kind : uint64_t {horn_loop=0,siren_loop=1,engine_idle_loop=2,engine_rev_loop=3};
     // A looping voice wanted by the game thread and kept up to date by the worker.
     struct Slot {
         bool want=false;uint32_t sample=0,assumed_rate=0,frequency=0;uint8_t volume=0,pan=63;uint32_t touched=0;   // game thread writes
-        std::optional<OwnedEffectVoice> voice;uint32_t voice_sample=0,voice_frequency=0;uint8_t voice_volume=0,voice_pan=63;uint32_t sent=0;
-        bool failed=false,silent=false;                                                                          // worker writes
+        bool ready=false,failed=false,silent=false;                                                              // worker status
     };
     struct Entry {
         uint32_t touched=0;uint16_t model=0;
         bool engine_idle=true;uint32_t engine_switch=0,engine_quiet_since=0;
         enum class Engine:uint8_t{undecided,lcs,sa} engine_owner=Engine::undecided;
     };
-    struct Asset {AudioSample pcm;uint32_t begin=0,end=0;bool silent=false;};   // silent: retail placeholder sample (e.g. RC idle)
+    struct Asset {std::shared_ptr<const AudioSample> pcm;uint32_t begin=0,end=0;bool silent=false;}; // retail placeholder (e.g. RC idle)
     const AudioArchive& archive_;
-    MissionSpeech speech_{OwnedVoiceProfile::source_audio};
+    std::shared_ptr<SaAudioMixer> mixer_;
     VehicleSoundConfig config_;
     std::function<std::optional<int>(int)> lcs_for_native_;
     std::unordered_map<uintptr_t,Entry> entries_;          // game thread only
@@ -71,11 +77,14 @@ class SaVehicleSounds {
     std::mutex asset_mutex_;
     std::unordered_map<uint64_t,Asset> assets_;
     SourceAudioRandom random_;                              // worker only
-    std::atomic<float> effects_scale_{1.0f};
     const Asset* asset(uint32_t sample,uint32_t assumed_rate);
-    static uint64_t key(uintptr_t entity,Kind kind) {return (uint64_t(entity)<<2)|kind;}
+    static uint64_t key(uintptr_t entity,Kind kind) {
+        // Keep vehicle loops in a disjoint range from weapon loop IDs in the shared mixer.
+        return (uint64_t(1)<<60)|(uint64_t(entity)<<2)|kind;
+    }
     void publish(uint64_t key,uint32_t sample,uint32_t assumed_rate,uint32_t frequency,uint8_t volume,uint8_t pan);
     void release(uint64_t key);
+    bool ready(uint64_t key);
     bool failed(uint64_t key);
     void tick();                                            // worker thread
     Entry* entry_for(uintptr_t entity,uint16_t model,uint32_t now);
@@ -83,6 +92,7 @@ class SaVehicleSounds {
     std::unique_ptr<AudioWorker> worker_;                   // last member: starts after everything above exists
 public:
     SaVehicleSounds(const AudioArchive& archive,VehicleSoundConfig config);
+    SaVehicleSounds(const AudioArchive& archive,VehicleSoundConfig config,std::shared_ptr<SaAudioMixer> mixer);
     ~SaVehicleSounds(){shutdown();}
     const VehicleSoundConfig& config() const {return config_;}
     void set_range_scale(float value){range_scale_=value;}
@@ -90,7 +100,7 @@ public:
     void set_resolver(std::function<std::optional<int>(int)> value){lcs_for_native_=std::move(value);}
     bool has_resolver() const {return bool(lcs_for_native_);}
     // SA's SFX menu volume (master * fader), refreshed every audio frame.
-    void set_effects_scale(float value){effects_scale_=value;}
+    void set_effects_scale(float value){if(mixer_)mixer_->set_effects_scale(value);}
     // PlayHornOrSiren. taken_horn / taken_siren say which of the two LCS now plays.
     void horn_siren(const void* audio_entity,bool horn,bool siren,bool fast,const void* params,bool& taken_horn,bool& taken_siren);
     // ProcessPlayer/DummyVehicleEngine. True: the LCS engine owns this vehicle and SA's call is skipped.

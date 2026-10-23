@@ -83,6 +83,16 @@ int main(int argc,char** argv){try {
                  <<left.pcm.size()*500/left.frequency<<"ms peak"<<peak(left)<<" fixed="<<shot.fixed_frequency
                  <<" / reload sfx#"<<reload.sample<<' '<<reloaded.frequency<<"Hz "<<reloaded.pcm.size()*500/reloaded.frequency<<"ms rate="<<reload.fixed_frequency<<'\n';
     }
+    lcs::AudioAdapter adapter(archive);
+    adapter.spatial_listener=[](){return std::optional<lcs::SpatialListener>(lcs::SpatialListener{{0,0,0},{1,0,0}});};
+    adapter.play_positioned_effect=[](const lcs::AudioSample&,lcs::AudioMix){return true;};
+    adapter.post_world_effect=[](lcs::AudioSample,lcs::AudioMix){return false;};
+    const auto spec=lcs::weapon_shot_for_sa_type(22);
+    check(spec && adapter.play_weapon_shot(*spec,{0,0,0})==lcs::AudioAdapter::WorldSound::refused,
+          "A full or failed shared mixer must retain the native shot");
+    const auto reload_spec=lcs::weapon_reload_for_sa_type(22);
+    check(reload_spec && adapter.play_weapon_reload(*reload_spec,{0,0,0})==lcs::AudioAdapter::WorldSound::refused,
+          "A full or failed shared mixer must retain the native reload");
     std::cout<<"PASS: 14 SA gun types own exactly one LCS weapon sound each; samples decode; gameExecuted=false\n";
     return 0;
 } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

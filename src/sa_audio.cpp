@@ -57,7 +57,11 @@ bool MissionSpeech::stop_unlocked(size_t slot) {
     voice.header={};voice.loop_headers={};voice.loop_bytes.clear();voice.looping=false;voice.loop_fault=false;voice.paused=false;voice.bytes.clear();voice.frequency=0;return true;
 }
 bool MissionSpeech::play(size_t slot,const AudioSample& sample) {
-    std::lock_guard<std::mutex> guard(mutex_);return play_unlocked(slot,sample);
+    std::lock_guard<std::mutex> guard(mutex_);
+    // Every dialogue/NEWS line starts with an explicit mix. A previous distant
+    // line must not leave the next unpositioned line at its old device gain.
+    const AudioMix initial{127,63};
+    return play_unlocked(slot,sample,slot<3?&initial:nullptr);
 }
 bool MissionSpeech::open_unlocked(size_t slot,const AudioSample& sample,const AudioMix* initial_mix,bool streaming) {
     auto& voice=*voices_.at(slot);

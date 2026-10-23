@@ -37,6 +37,10 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "sa_vehicle_audio.hpp"
 #include "sa_interface_audio.hpp"
 #include "sa_audio_jobs.hpp"
+#include "sa_audio_mixer.hpp"
+#include "sa_weapon_loops.hpp"
+#include "sa_ped_audio.hpp"
+#include "sa_vehicle_surface_audio.hpp"
 #include "sa_cutscenes.hpp"
 #include "sa_hud.hpp"
 #include "sa_script_coronas.hpp"
@@ -88,6 +92,11 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include <set>
 
 namespace {
+std::shared_ptr<lcs::SaAudioMixer> effects_mixer() {
+    // Lazy: no device or worker is opened while DllMain holds the loader lock.
+    static auto mixer=std::make_shared<lcs::SaAudioMixer>();
+    return mixer;
+}
 bool vehicle_colour_profile_ready=false;
 HMODULE module = nullptr;
 using ScriptProcess = void (__cdecl*)();
@@ -130,6 +139,7 @@ std::vector<lcs::EquivalentEntity> equivalent_bindings;
 // Set once the call sites were verified and redirected at load; the profile checks compare the original
 // call targets, so they must not be repeated after the redirection.
 bool vehicle_sound_hooks_installed=false,interface_sound_hooks_installed=false;
+bool ped_sound_hooks_installed=false,vehicle_surface_hooks_installed=false;
 // Audio hooks run on the game thread: log any LCS sound call slow enough to be heard as a stutter.
 void log(const std::string& text);
 struct SlowSoundCall {
@@ -424,12 +434,16 @@ struct Campaign {
     // LcsWeaponSounds: SA's WeaponFire/WeaponReload play the LCS sample of the
     // original weapon converted onto that SA type (docs/audio.md).
     bool lcs_weapon_sounds=false;
-    std::unique_ptr<lcs::AudioWorker> weapon_worker;   // opens the wave devices of gun shots off the game thread
+    std::shared_ptr<lcs::SaAudioMixer> weapon_mixer;
+    std::unique_ptr<lcs::SaWeaponLoops> weapon_loops;
+    std::unique_ptr<lcs::SaPedAudio> ped_audio;
+    std::unique_ptr<lcs::SaVehicleSurfaceAudio> vehicle_surface_audio;
     // LcsVehicleHorns / Sirens / Doors / Engines: LCS samples of the original model each converted SA slot stands for.
     std::unique_ptr<lcs::SaVehicleSounds> vehicle_sounds;
     std::array<bool,128> weapon_sound_logged{};
     unsigned weapon_sound_refusals=0;
     bool play_weapon_sound(int32_t sa_type,const void* entity,bool reload){
+        if(!weapon_mixer || !weapon_mixer->available())return false;
         using Result=lcs::AudioAdapter::WorldSound;
         const auto owner=lcs::weapon_owner_for_sa_type(sa_type);
         if(!owner)return false;
@@ -438,7 +452,8 @@ struct Campaign {
         Result result=Result::refused;
         const char* name="";
         const auto native=continuous_native_settings();
-        const float effects_scale=native?native->effects_scale:1.0f;
+        weapon_mixer->set_effects_scale(native?native->effects_scale:0.0f);
+        const float effects_scale=1.0f; // applied once by the shared mixer
         if(reload){
             const auto spec=lcs::weapon_reload_for_lcs_weapon(*owner);
             if(!spec)return false;
@@ -798,10 +813,12 @@ struct Campaign {
         // LcsWeaponSounds=0 keeps SA's own gun sounds.
         if(setting(L"LcsWeaponSounds")!=L"0" && audio_archive.sample_count()>0) {
             lcs_weapon_sounds=true;
+            weapon_mixer=effects_mixer();
+            weapon_loops=std::make_unique<lcs::SaWeaponLoops>(audio_archive,weapon_mixer,[](){return lcs::sa_audio_listener();});
             {const auto text=setting(L"LcsOneShotRangePercent");const int percent=text.empty()?50:_wtoi(text.c_str());audio.one_shot_range_scale=float(std::clamp(percent,10,100))/100.0f;}
-            weapon_worker=std::make_unique<lcs::AudioWorker>(nullptr,std::chrono::milliseconds(1000));
             audio.post_world_effect=[this](lcs::AudioSample sample,lcs::AudioMix mix){
-                weapon_worker->post([this,sample=std::move(sample),mix]{speech.play_owned_effect(sample,mix);});
+                const auto frequency=sample.frequency;
+                return weapon_mixer->play_one_shot(std::make_shared<const lcs::AudioSample>(std::move(sample)),frequency,mix.volume,mix.pan);
             };
             log("Original LCS weapon sounds active: SA gun fire and reload events play the LCS sample of the converted weapon");
         }
@@ -810,10 +827,42 @@ struct Campaign {
             vehicles.horns=setting(L"LcsVehicleHorns")!=L"0";vehicles.sirens=setting(L"LcsVehicleSirens")!=L"0";
             vehicles.doors=setting(L"LcsVehicleDoors")!=L"0";vehicles.engines=setting(L"LcsVehicleEngines")!=L"0";
             if((vehicles.horns || vehicles.sirens || vehicles.doors || vehicles.engines) && audio_archive.sample_count()>0 && vehicle_sound_hooks_installed) {
-                vehicle_sounds=std::make_unique<lcs::SaVehicleSounds>(audio_archive,vehicles);
+                vehicle_sounds=std::make_unique<lcs::SaVehicleSounds>(audio_archive,vehicles,effects_mixer());
                 {const auto text=setting(L"LcsOneShotRangePercent");const int percent=text.empty()?50:_wtoi(text.c_str());vehicle_sounds->set_range_scale(float(std::clamp(percent,10,100))/100.0f);}
                 log(std::string("Original LCS vehicle sounds active:")+(vehicles.horns?" horns":"")+(vehicles.sirens?" sirens":"")+(vehicles.doors?" doors":"")+(vehicles.engines?" engines":""));
             }
+        }
+        if(vehicle_surface_hooks_installed && setting(L"LcsVehicleSurfaceSounds")!=L"0") {
+            vehicle_surface_audio=std::make_unique<lcs::SaVehicleSurfaceAudio>(audio_archive,effects_mixer(),[](int model)->std::optional<int>{
+                std::optional<int> original;
+                for(const auto& e:equivalent_bindings)if(e.kind==lcs::ModelKind::vehicle && e.native==model) {
+                    if(original && *original!=e.original)return std::nullopt;
+                    original=e.original;
+                }
+                return original;
+            });
+        }
+        if(ped_sound_hooks_installed && setting(L"LcsPedSounds")!=L"0") {
+            ped_audio=std::make_unique<lcs::SaPedAudio>(audio_archive,effects_mixer(),[](){return lcs::sa_audio_listener();});
+            ped_audio->set_model_resolver([](int16_t model){
+                using Role=lcs::SaPedVoiceRole;
+                const lcs::EquivalentEntity* match=nullptr;
+                for(const auto& e:equivalent_bindings)if(e.kind==lcs::ModelKind::ped && e.native==model) {
+                    if(match && match->name!=e.name)return Role::generic;
+                    match=&e;
+                }
+                if(!match)return Role::generic;
+                const auto& name=match->name;
+                if(name=="cop")return Role::cop;
+                if(name=="swat")return Role::swat;
+                if(name=="fbi")return Role::fbi;
+                if(name=="medic")return Role::medic;
+                if(name=="fireman")return Role::fireman;
+                if(name=="maria")return Role::maria;
+                if(name=="love")return Role::donald_love;
+                if(name=="jd")return Role::jd_otool;
+                return Role::generic;
+            });
         }
         adapter.original_credits_finished=[this](){return credits.finished();};
         if(!first) {
@@ -1284,6 +1333,10 @@ struct Campaign {
         lcs::sa_release_garage_capacity();
     }
     void abort() {
+        if(weapon_loops)weapon_loops->shutdown();
+        if(ped_audio)ped_audio->shutdown();
+        if(vehicle_surface_audio)vehicle_surface_audio->shutdown();
+        if(vehicle_sounds)vehicle_sounds.reset();
         if(task_observer && task_observer_on_thread()){task_observer->set_release_probe({});task_observer->reset();}
         crusher_cleanup_pending=!lcs::sa_crusher_cleanup();
         garage_door_cleanup_pending=!lcs::sa_garage_door_cleanup();
@@ -1921,6 +1974,12 @@ void service_original_finale() {
         campaign->vehicle_sounds->set_effects_scale(native?native->effects_scale:1.0f);
         campaign->vehicle_sounds->sweep(GetTickCount());
     }
+    {
+        const auto settings=continuous_native_settings();
+        effects_mixer()->set_effects_scale(settings?settings->effects_scale:0.0f);
+        if(campaign->vehicle_surface_audio)campaign->vehicle_surface_audio->service(GetTickCount(),!settings || settings->paused);
+        if(campaign->weapon_loops)campaign->weapon_loops->service(GetTickCount(),!settings || settings->paused,settings?settings->effects_scale:0.0f);
+    }
     campaign->frame_updates.run("city-music",lcs::UpdateScope::auxiliary,original_audio_frame,
         "Original CITY music service unavailable",[](){
             const auto settings=ending_tune_settings();
@@ -2199,7 +2258,10 @@ ScriptProcess original_weapon_fire_ped=nullptr,original_weapon_fire_vehicle=null
 template<ScriptProcess* Original,bool Reload> void __fastcall on_weapon_sound(void* self,void*,int32_t type,void* entity,int32_t event) {
     SlowSoundCall timing(Reload?"weapon reload":"weapon fire");
     // No C++ exception may cross into SA's audio code: any failure keeps the SA sound.
-    try {if(campaign && campaign->lcs_weapon_sounds && campaign->play_weapon_sound(type,entity,Reload))return;}
+    try {
+        if constexpr(!Reload)if(campaign && campaign->weapon_loops && campaign->weapon_loops->event(type,entity,event))return;
+        if(campaign && campaign->lcs_weapon_sounds && campaign->play_weapon_sound(type,entity,Reload))return;
+    }
     catch(...) {}
     reinterpret_cast<void(__thiscall*)(void*,int32_t,void*,int32_t)>(*Original)(self,type,entity,event);
 }
@@ -2264,7 +2326,7 @@ lcs::SaInterfaceSounds* interface_sounds_ready() {
     if(interface_audio.failed)return nullptr;
     try {
         interface_audio.archive=std::make_unique<lcs::AudioArchive>(lcs::AudioArchive::Ps2Audio{},original_audio_directory());
-        interface_audio.sounds=std::make_unique<lcs::SaInterfaceSounds>(*interface_audio.archive);
+        interface_audio.sounds=std::make_unique<lcs::SaInterfaceSounds>(*interface_audio.archive,effects_mixer());
         interface_audio.sounds->set_logger([](const std::string& text){log(text);});
         log("Original LCS interface sounds active: SA frontend events (menu, pickups, HUD, jingles) play the LCS samples");
     } catch(const std::exception& error) {
@@ -2303,6 +2365,23 @@ bool install_vehicle_sounds() {
     if((on(L"LcsVehicleDoors") || on(L"LcsVehicleEngines")) )
         ok=lcs::sa_vehicle_event_calls(reinterpret_cast<uintptr_t>(&on_vehicle_event)) && ok;
     return ok;
+}
+// PS2 LCS has no loading tune. Filter only the start event at the native
+// StartLoadingTune call; its following sound-manager service still runs.
+ScriptProcess original_loading_frontend=nullptr;
+void __fastcall on_loading_frontend(void* self,void*,int32_t event,float boost,float speed) {
+    if(event==50)return; // AE_FRONTEND_LOADING_TUNE_START
+    reinterpret_cast<void(__thiscall*)(void*,int32_t,float,float)>(original_loading_frontend)(self,event,boost,speed);
+}
+bool install_silent_loading() {
+    __try {
+        constexpr uint8_t prefix[]={0x68,0x00,0x00,0x80,0x3F,0x6A,0x00,0x6A,0x32,0x81,0xC1,0xB4,0x00,0x00,0x00};
+        if(std::memcmp(reinterpret_cast<const void*>(0x507410),prefix,sizeof(prefix)))return false;
+        const auto* call=reinterpret_cast<const uint8_t*>(0x50741F);
+        int32_t relative=0;std::memcpy(&relative,call+1,4);
+        if(call[0]!=0xE8 || int64_t(0x507424)+relative!=0x4DD4A0)return false;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    return install_call(0x50741F,reinterpret_cast<ScriptProcess>(&on_loading_frontend),original_loading_frontend);
 }
 ScriptProcess original_campaign_save=nullptr,original_campaign_load=nullptr;
 bool bind_campaign_target(uintptr_t site,uintptr_t target) {
@@ -2398,6 +2477,16 @@ bool install_hook() {
     if(setting(L"Mode")==L"Campaign" && setting(L"LcsInterfaceSounds")!=L"0") {
         interface_sound_hooks_installed=lcs::sa_interface_event_calls(reinterpret_cast<uintptr_t>(&on_frontend_event));
         if(!interface_sound_hooks_installed)log("Original LCS interface sounds unavailable: SA frontend report call sites differ; SA interface sounds stay active");
+    }
+    if(setting(L"Mode")==L"Campaign" && setting(L"LcsSilentLoading")!=L"0") {
+        if(!install_silent_loading())log("Silent PS2 loading unavailable: SA loading-tune call differs");
+    }
+    if(setting(L"Mode")==L"Campaign" && setting(L"LcsVehicleSurfaceSounds")!=L"0")
+        if(!(vehicle_surface_hooks_installed=lcs::sa_vehicle_surface_audio_install([](){return campaign?campaign->vehicle_surface_audio.get():nullptr;})))
+            log("LCS vehicle surface audio profile differs; native sounds retained");
+    if(setting(L"Mode")==L"Campaign" && setting(L"LcsPedSounds")!=L"0") {
+        ped_sound_hooks_installed=lcs::sa_ped_audio_install([](){return campaign?campaign->ped_audio.get():nullptr;});
+        if(!ped_sound_hooks_installed)log("Original LCS ped sounds unavailable: SA speech profile differs; native voices retained");
     }
     const bool mission_hud=lcs::sa_hud_render_profile() && install_call(0x58FBEE,&on_mission_hud,original_mission_hud);
     lcs::sa_hud_render_bound(mission_hud);

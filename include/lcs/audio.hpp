@@ -77,7 +77,7 @@ public:
     std::function<bool(const AudioSample&,AudioMix)> play_positioned_effect;
     // World one-shots that must not stall the game thread (gun shots): the device is opened elsewhere. When set it
     // replaces play_positioned_effect for them and is assumed to accept the sound.
-    std::function<void(AudioSample,AudioMix)> post_world_effect;
+    std::function<bool(AudioSample,AudioMix)> post_world_effect;
     // LcsOneShotRangePercent: shrinks the audible range of world one-shots (the original ranges are far larger than SA's).
     float one_shot_range_scale=1.0f;
     std::function<std::optional<SpatialListener>()> spatial_listener;

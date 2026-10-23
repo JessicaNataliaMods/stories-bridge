@@ -33,7 +33,7 @@ Cada `.SDT` tem registros de 12 bytes (`offset`, `tamanho`, `frequência`) sobre
 - Amostras com cabeçalho `VAGp`: o primeiro quadro (silencioso) é omitido; a reprodução termina no primeiro quadro com a marca de fim; se esse quadro tiver a marca de repetição, o loop começa no quadro com a marca de início de loop.
 - Amostras sem cabeçalho começam no quadro de início de loop (é o caso do sino e do aviso da ponte levadiça).
 - Cada amostra é decodificada como uma voz do SPU2 a partir do key-on: histórico do preditor zerado e saturação em 16 bits.
-- Os 27 registros sem cabeçalho dos bancos de motor (`SET1`) não trazem frequência no `.SDT` e são recusados com diagnóstico. A ponte ainda não toca som de motor do LCS.
+- Os registros sem cabeçalho dos bancos de motor (`SET1`) não trazem frequência utilizável no `.SDT`. O adaptador de veículos fornece explicitamente a taxa do consumidor de motor; os demais consumidores continuam recusando registros sem taxa.
 
 O `sfx.RAW` convertido usado antes da v90 carregava o histórico do preditor de uma amostra para a seguinte e dava a volta (em vez de saturar) em estouros. Por isso o áudio atual difere dele em poucas amostras iniciais de alguns sons; os metadados (frequência, loop, duração) são idênticos.
 
@@ -109,9 +109,15 @@ O SA decide o som por tipo de arma em `CAEWeaponAudioEntity::WeaponFire` (`0x504
 
 As regras são as de `cAudioManager::ProcessPedOneShots` (`SOUND_WEAPON_SHOT_FIRED`/`SOUND_WEAPON_RELOAD`): alcance de 120 m (recarga 30 m), volume do evento por arma (`table[i]%m+b`), `ComputeVolume` com queda quadrática depois de 1/5 do alcance, variação de taxa (`RandomDisplacement`) e, a menos de 20% do alcance, o par L/R tocado em 2D (esquerdo no canal esquerdo, direito no direito); mais longe só a amostra esquerda, posicionada. O par vira uma única voz estéreo.
 
-Fica como no SA, por serem sons contínuos ou de outro sistema: lança-chamas (37), minigun (38), spray, extintor, câmera, armas brancas e granadas, a cauda/eco do tiro (`SOUND_WEAPON_AK47_BULLET_ECHO`), impacto de bala e o som de projéteis. O laser scope usa o tipo do sniper e portanto o som do sniper. O lança-foguetes também é "estéreo" no original, mas `SFX_ROCKET_LEFT` é seguido por `SFX_ROCKET_RELOAD` (um espaço reservado mudo de 728 bytes na mídia retail), então o disparo toca mono e a recarga do lança-foguetes é silenciosa como no original.
+O lança-chamas (37) e a minigun (38) têm um serviço próprio de loops, descrito abaixo. Spray, extintor, câmera, armas brancas, granadas e eco do tiro continuam nos respectivos consumidores nativos. O laser scope usa o tipo do sniper e portanto o som do sniper. O lança-foguetes também é "estéreo" no original, mas `SFX_ROCKET_LEFT` é seguido por `SFX_ROCKET_RELOAD` (um espaço reservado mudo de 728 bytes na mídia retail), então o disparo toca mono e a recarga do lança-foguetes é silenciosa como no original.
 
-Limites: as vozes de efeito são compartilhadas (8 simultâneas); sem voz livre o SA toca o próprio som daquele tiro.
+Tiros e recargas só suprimem o áudio nativo depois de o mixer aceitar o PCM. Falha de dispositivo ou falta de espaço mantém o som do SA.
+
+### Mixer de efeitos e armas contínuas
+
+Veículos, tiros, interface e os novos adaptadores usam uma saída PCM estéreo compartilhada. Ganho, panorâmica e mudança de frequência são aplicados por voz em software; atualizar um loop mantém sua posição, e o limitador contém picos de sobreposição. A saída usa blocos de 10 ms e não abre um dispositivo para cada evento. O volume de efeitos do SA é aplicado uma única vez. Os testes exercitam o núcleo PCM sem abrir dispositivos.
+
+Os eventos de disparo da minigun mantêm `MINIGUN_FIRE_LEFT` e reproduzem `MINIGUN_STOP` ao terminar. O evento de giro sem munição mantém o consumidor do SA. O lança-chamas mantém `FLAMETHROWER_LEFT/RIGHT` e seu início de chama; na mídia PS2 o canal direito é um único quadro silencioso, preservado explicitamente. O pedido dura três quadros de áudio na minigun e seis no lança-chamas, com tolerância de 50 ms para o agendamento SA. Pausa e encerramento liberam apenas as vozes possuídas pela família. A variação de frequência da chama pelo índice de entidade LCS não é reproduzida: esse índice não existe no consumidor SA.
 
 ## Sons de veículos
 
@@ -128,7 +134,7 @@ Quatro chaves independentes (padrão `1`; `0` mantém o som do SA daquele tipo e
 
 O perfil confere os bytes das funções do SA e o destino de cada chamada antes de instalar; o desvio de `AddAudioEvent` só entra se o prólogo for exatamente `push -1; jmp 0x40727C`. Posições e velocidades vêm do próprio `tVehicleParams` do SA (velocidade, `m_MaxVelocity`, marcha pela tabela de câmbio, pedal suavizado `m_GasPedalAudioRevs`), com os deslocamentos conferidos no exe.
 
-Limites desta fase: o motor usa o modelo de motor "de IA" do LCS para todos (também o jogador, sem a troca de marcha detalhada do `ProcessPlayersVehicleEngine`); buzina, sirene e motor ficam com o SA quando faltam vozes (40 vozes próprias para veículos); banco de motor com amostra de marcha lenta silenciosa no retail (RC e carrinho de golfe) fica sem marcha lenta como no original; derrapagem, ruído de pista, marcha à ré, chuva e danos continuam do SA. Aviões, helicópteros e barcos usam o motor do SA.
+O motor usa o modelo de motor de IA do LCS também para o jogador, sem a troca de marcha detalhada do `ProcessPlayersVehicleEngine`. Marcha lenta e aceleração ficam no mesmo mixer; a posse só muda depois de ambos os loops estarem disponíveis. O banco com marcha lenta silenciosa (RC e carrinho de golfe) mantém esse silêncio. Aviões, helicópteros e barcos ainda usam o motor do SA.
 
 ## Sons de interface
 
@@ -160,11 +166,20 @@ Pickups e jingles de missão que chegam a menos de 100 ms do anterior são desca
 | `LcsWeaponSounds` | `1` | `0` mantém o tiro e a recarga de armas do SA |
 | `LcsVehicleHorns` | `1` | `0` mantém a buzina do SA |
 | `LcsVehicleSirens` | `1` | `0` mantém as sirenes do SA |
-| `LcsVehicleDoors` | `1` | `0` mantém os sons de porta/capô/porta-malas do SA |
+| `LcsVehicleDoors` | `1` | `0` mantém os sons de portas do SA |
 | `LcsVehicleEngines` | `1` | `0` mantém o motor e a partida do SA |
 | `LcsInterfaceSounds` | `1` | `0` mantém os sons de menu, pickups e HUD do SA |
+| `LcsSilentLoading` | `1` | filtra somente o início da música de carregamento do SA; `0` restaura essa música |
+| `LcsPedSounds` | `1` | substitui contextos de voz comprovados; `0` mantém as vozes SA |
+| `LcsVehicleSurfaceSounds` | `1` | ruído de pista, derrapagem e ré nos veículos convertidos; `0` mantém o SA |
 
-Sons de pedestres do LCS ainda não estão implementados; terão a sua chave quando existirem, e desligá-la manterá o som do SA.
+### Vozes de pedestres
+
+O gancho de `CPed::Say` chama primeiro `AddSayEvent` e preserva seu retorno. Só um evento nativo aceito, imediato e sem as opções frontend/force-audible pode receber a voz LCS. O agendamento, a seleção de prioridade e os callbacks nativos continuam ativos. Quando o PCM substituto é aceito, apenas o volume da voz nativa agendada é silenciado antes de seu serviço; uma recusa restaura o volume original.
+
+Dor, morte, fogo e pânico usam os grupos masculino/feminino do LCS; o jogador usa Toni e o fallback genérico do original. A morte de Toni é silêncio explícito no original. O alcance é de 40 m, com volume 127 em linha de visão e 31 atrás de paredes. Os samples desses grupos são pré-carregados em uma fila própria; um sample indisponível mantém o SA. A atribuição por gênero/tipo é uma adaptação ao SA, não uma reconstrução de vozes individuais por modelo. Contextos ainda sem correspondência comprovada mantêm o som nativo.
+
+As identidades numéricas de dor, fogo e pânico são conferidas com o [enum público do gta-reversed](https://github.com/gta-reversed/gta-reversed/blob/master/source/game_sa/Audio/Enums/PedSpeechContexts.h), separadamente dos testes de bytes do consumidor SA. Testes por nomes de constantes, sozinhos, não provam essa correspondência.
 
 ## Validação
 
@@ -172,3 +187,15 @@ Sons de pedestres do LCS ainda não estão implementados; terão a sua chave qua
 - `tests/lcs_radio_tests.cpp`: mapeamento SA↔LCS, regra de posição do retail, cálculo de bloco e decodificação do stream lido do disco.
 
 Os dois rodam na validação de inicialização do pacote (`tools/validate-campaign-startup.py`).
+
+### Escopo e diálogos de missão
+
+Impactos de bala/objetos em superfícies, chuva, trovões e demais efeitos de ambiente continuam no SA, por escolha do usuário. Não há ganchos novos nesses consumidores.
+
+Cada fala de missão/NEWS começa com volume e pan explícitos antes de publicar PCM. Um novo diálogo 2D não herda o ganho de uma fala distante. Falas posicionadas já terminadas deixam de emitir atualizações espaciais; o estado de conclusão observado pelo script continua vindo da reprodução real.
+
+O ruído de pista, piso molhado, derrapagem e marcha à ré usam os pedidos e campos do veículo SA. Os processadores nativos continuam executando e mantendo seus sons; o ganho do duplicado só é reduzido quando o mixer aceita a substituição. Amostras indisponíveis, superfície desconhecida ou modelo ambíguo mantêm o SA. As vozes próprias expiram quando o veículo deixa de ser servido e são liberadas na pausa.
+
+As falas contextuais comprovadas de policiais, SWAT/FBI, paramédicos e personagens identificados usam resolução pelo nome equivalente exato. Perseguição/bump de policial exigem os predicados de estado/wanted legíveis. A seleção entre bancos usa identidade estável do ator SA, uma adaptação ao índice de entidade do LCS.
+
+Capô e porta-malas mantêm o consumidor nativo do SA: a movimentação desses painéis em danos não é convertida em um pedido de porta de passageiro do LCS.

@@ -4,8 +4,8 @@
 #include <windows.h>
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 namespace lcs {
 namespace {
@@ -71,9 +71,6 @@ Spatial spatial_of(const std::array<float,3>& position) {
     for(size_t i=0;i<3;++i){const float d=position[i]-listener->position[i];squared+=d*d;right+=d*listener->right[i];}
     return {std::sqrt(squared),right,true};
 }
-uint8_t scaled(uint8_t volume,float effects_scale) {
-    return uint8_t(std::clamp(float(volume)*std::clamp(effects_scale,0.f,1.f),0.f,127.f)+0.5f);
-}
 }
 bool sa_vehicle_audio_profile_matches() {
     constexpr uint8_t horn[]={0x83,0xEC,0x0C,0xA1,0xF8,0x00,0xBD,0x00,0x0F,0xBE,0x50,0x60};   // PlayHornOrSiren
@@ -117,7 +114,12 @@ bool sa_vehicle_event_calls(uintptr_t hook) {
     return true;
 }
 
-SaVehicleSounds::SaVehicleSounds(const AudioArchive& archive,VehicleSoundConfig config):archive_(archive),config_(config) {
+SaVehicleSounds::SaVehicleSounds(const AudioArchive& archive,VehicleSoundConfig config)
+    :archive_(archive),mixer_(std::make_shared<SaAudioMixer>()),config_(config) {
+    worker_=std::make_unique<AudioWorker>([this]{tick();},std::chrono::milliseconds(16));
+}
+SaVehicleSounds::SaVehicleSounds(const AudioArchive& archive,VehicleSoundConfig config,std::shared_ptr<SaAudioMixer> mixer)
+    :archive_(archive),mixer_(mixer?std::move(mixer):std::make_shared<SaAudioMixer>()),config_(config) {
     worker_=std::make_unique<AudioWorker>([this]{tick();},std::chrono::milliseconds(16));
 }
 const SaVehicleSounds::Asset* SaVehicleSounds::asset(uint32_t sample,uint32_t assumed_rate) {
@@ -127,20 +129,23 @@ const SaVehicleSounds::Asset* SaVehicleSounds::asset(uint32_t sample,uint32_t as
     if(found!=assets_.end())return &found->second;
     try {
         Asset value;
-        value.pcm=assumed_rate?archive_.sample(sample,assumed_rate):archive_.sample(sample);
+        auto decoded=assumed_rate?archive_.sample(sample,assumed_rate):archive_.sample(sample);
         const auto record=assumed_rate?archive_.record(sample,assumed_rate):archive_.record(sample);
-        const auto size=uint32_t(value.pcm.pcm.size());
+        if(decoded.pcm.size()>std::numeric_limits<uint32_t>::max())return nullptr;
+        const auto size=uint32_t(decoded.pcm.size());
         const auto span=continuous_pcm_loop_span(record.size,record.loop_start,record.loop_end);
         value.begin=span?span->begin:0;value.end=span?std::min(span->end,size):size;
-        if(!size || value.begin>=value.end || value.pcm.channels!=1)return nullptr;
-        value.silent=std::all_of(value.pcm.pcm.begin(),value.pcm.pcm.end(),[](uint8_t byte){return byte==0;});
+        if(!size || value.begin>=value.end || (decoded.channels!=1 && decoded.channels!=2) ||
+           decoded.pcm.size()%(size_t(decoded.channels)*2))return nullptr;
+        value.silent=std::all_of(decoded.pcm.begin(),decoded.pcm.end(),[](uint8_t byte){return byte==0;});
+        value.pcm=std::make_shared<AudioSample>(std::move(decoded));
         return &assets_.emplace(cache_key,std::move(value)).first->second;   // node-based map: the pointer stays valid
     } catch(const std::exception&) {return nullptr;}
 }
 void SaVehicleSounds::publish(uint64_t id,uint32_t sample,uint32_t assumed_rate,uint32_t frequency,uint8_t volume,uint8_t pan) {
     std::lock_guard<std::mutex> guard(slot_mutex_);
     auto& slot=slots_[id];
-    if(slot.sample!=sample){slot.failed=false;slot.silent=false;}
+    if(slot.sample!=sample || slot.assumed_rate!=assumed_rate) {slot.ready=false;slot.failed=false;slot.silent=false;}
     slot.want=true;slot.sample=sample;slot.assumed_rate=assumed_rate;slot.frequency=frequency;slot.volume=volume;slot.pan=pan;slot.touched=GetTickCount();
 }
 void SaVehicleSounds::release(uint64_t id) {
@@ -148,79 +153,52 @@ void SaVehicleSounds::release(uint64_t id) {
     const auto found=slots_.find(id);
     if(found!=slots_.end())found->second.want=false;
 }
+bool SaVehicleSounds::ready(uint64_t id) {
+    std::lock_guard<std::mutex> guard(slot_mutex_);
+    const auto found=slots_.find(id);
+    return found!=slots_.end() && found->second.ready && !found->second.failed;
+}
 bool SaVehicleSounds::failed(uint64_t id) {
     std::lock_guard<std::mutex> guard(slot_mutex_);
     const auto found=slots_.find(id);
     return found!=slots_.end() && found->second.failed;
 }
-// Worker thread: starts, retunes and stops the looping voices the game thread asked for.
+// Worker thread: resolves assets and publishes loops to the shared PCM mixer.
 void SaVehicleSounds::tick() {
-    struct Job {enum class Action{start,stop,update} action;uint64_t id;uint32_t sample,rate,frequency;uint8_t volume,pan;std::optional<OwnedEffectVoice> voice;bool write_frequency;};
-    std::vector<Job> jobs;
+    struct Desired {uint64_t id;uint32_t sample,rate,frequency;uint8_t volume,pan;};
+    std::vector<Desired> desired;
+    std::vector<uint64_t> released;
     const uint32_t now=GetTickCount();
-    const float scale=effects_scale_;
     {
         std::lock_guard<std::mutex> guard(slot_mutex_);
         for(auto it=slots_.begin();it!=slots_.end();) {
             auto& slot=it->second;
             const bool alive=slot.want && now-slot.touched<400;
             if(!alive) {
-                if(slot.voice){jobs.push_back({Job::Action::stop,it->first,0,0,0,0,0,slot.voice,false});slot.voice.reset();}
+                released.push_back(it->first);
                 it=slots_.erase(it);continue;
             }
-            if(slot.voice && slot.voice_sample!=slot.sample) {
-                jobs.push_back({Job::Action::stop,it->first,0,0,0,0,0,slot.voice,false});slot.voice.reset();
-            }
-            if(!slot.voice) {
-                if(!slot.failed && !slot.silent)
-                    jobs.push_back({Job::Action::start,it->first,slot.sample,slot.assumed_rate,slot.frequency,slot.volume,slot.pan,std::nullopt,false});
-            } else {
-                // At most ~16 driver writes a second per loop, and only for an audible change.
-                const int volume_step=std::abs(int(slot.volume)-int(slot.voice_volume)),pan_step=std::abs(int(slot.pan)-int(slot.voice_pan));
-                const int64_t rate_step=slot.frequency?std::llabs(int64_t(slot.frequency)-int64_t(slot.voice_frequency)):0;
-                const bool audible=volume_step>=3 || pan_step>=4 || rate_step*100>=int64_t(slot.voice_frequency);
-                const bool due=(now-slot.sent>=60 || volume_step>=20) && (audible || now-slot.sent>=250);
-                if(due)jobs.push_back({Job::Action::update,it->first,slot.sample,0,slot.frequency,slot.volume,slot.pan,slot.voice,rate_step*100>=int64_t(slot.voice_frequency) && slot.frequency!=0});
-            }
+            if(!slot.failed && !slot.silent)
+                desired.push_back({it->first,slot.sample,slot.assumed_rate,slot.frequency,slot.volume,slot.pan});
             ++it;
         }
     }
-    for(const auto& job:jobs) {
-        switch(job.action) {
-        case Job::Action::stop:speech_.stop_owned_effect(*job.voice);break;
-        case Job::Action::start: {
-            const auto* a=asset(job.sample,job.rate);
-            bool ok=false,silent=false;std::optional<OwnedEffectVoice> voice;uint32_t frequency=job.frequency;
-            if(a) {
-                if(a->silent)silent=true;
-                else {
-                    if(!frequency)frequency=a->pcm.frequency;
-                    AudioSample sample=a->pcm;sample.frequency=frequency;
-                    const auto receipt=speech_.play_owned_loop(sample,a->begin,a->end,{scaled(job.volume,scale),job.pan},std::nullopt);
-                    ok=receipt.accepted && receipt.voice;if(ok)voice=receipt.voice;
-                }
-            }
-            std::lock_guard<std::mutex> guard(slot_mutex_);
-            const auto found=slots_.find(job.id);
-            if(found==slots_.end()) {if(voice)speech_.stop_owned_effect(*voice);break;}
-            if(silent)found->second.silent=true;
-            else if(!ok)found->second.failed=true;
-            else {
-                auto& slot=found->second;
-                slot.voice=voice;slot.voice_sample=job.sample;slot.voice_frequency=frequency;slot.voice_volume=job.volume;slot.voice_pan=job.pan;slot.sent=GetTickCount();
-            }
-            break;}
-        case Job::Action::update: {
-            const auto receipt=speech_.update_owned_effect(*job.voice,{scaled(job.volume,scale),job.pan},job.write_frequency?job.frequency:0,job.write_frequency);
-            std::lock_guard<std::mutex> guard(slot_mutex_);
-            const auto found=slots_.find(job.id);
-            if(found==slots_.end())break;
-            auto& slot=found->second;
-            if(!receipt.accepted) {speech_.stop_owned_effect(*job.voice);slot.voice.reset();break;}   // never leak a voice
-            slot.voice_volume=job.volume;slot.voice_pan=job.pan;slot.sent=GetTickCount();
-            if(job.write_frequency)slot.voice_frequency=job.frequency;
-            break;}
+    for(const auto id:released)mixer_->release_loop(id);
+    for(const auto& request:desired) {
+        const auto* a=asset(request.sample,request.rate);
+        bool accepted=false,silent=false;
+        if(a) {
+            silent=a->silent;
+            if(silent) mixer_->release_loop(request.id);
+            else accepted=mixer_->publish_loop(request.id,a->pcm,a->begin,a->end,request.frequency,request.volume,request.pan);
         }
+        std::lock_guard<std::mutex> guard(slot_mutex_);
+        const auto found=slots_.find(request.id);
+        if(found==slots_.end() || found->second.sample!=request.sample || found->second.assumed_rate!=request.rate)continue;
+        auto& slot=found->second;
+        slot.silent=silent;
+        slot.ready=silent || accepted;
+        slot.failed=!a || (!silent && !accepted);
     }
 }
 SaVehicleSounds::Entry* SaVehicleSounds::entry_for(uintptr_t entity,uint16_t model,uint32_t now) {
@@ -234,7 +212,7 @@ void SaVehicleSounds::release_entry(uintptr_t entity) {
 }
 void SaVehicleSounds::horn_siren(const void* audio_entity,bool horn,bool siren,bool fast,const void* params,bool& taken_horn,bool& taken_siren) {
     taken_horn=taken_siren=false;
-    if(!config_.horns && !config_.sirens)return;
+    if((!config_.horns && !config_.sirens) || !mixer_ || !mixer_->available())return;
     VehicleRead v;
     if(!read_params_vehicle(params,v) || !lcs_for_native_)return;
     const auto lcs_model=lcs_for_native_(v.model);
@@ -250,7 +228,7 @@ void SaVehicleSounds::horn_siren(const void* audio_entity,bool horn,bool siren,b
         const auto id=key(entity,horn_loop);
         const auto volume=continuous_sound_volume(vehicle_horn_volume,vehicle_horn_range,where.distance).value_or(0);
         if(!horn || volume==0)release(id);
-        else {publish(id,row->horn_sample,0,uint32_t(row->horn_frequency),volume,pan);taken_horn=!failed(id);}
+        else {publish(id,row->horn_sample,0,uint32_t(row->horn_frequency),volume,pan);taken_horn=ready(id);if(failed(id))taken_horn=false;}
     }
     if(config_.sirens) {
         taken_siren=true;
@@ -263,12 +241,12 @@ void SaVehicleSounds::horn_siren(const void* audio_entity,bool horn,bool siren,b
             if(fast && switching) {sample=vehicle_fast_siren_sample();frequency=*lcs_model==148?12668u:0u;}   // 0: the sample's own rate; the FBI car uses a fixed one
             const auto volume=continuous_sound_volume(vehicle_siren_volume,vehicle_siren_range,where.distance).value_or(0);
             if(volume==0)release(id);
-            else {publish(id,sample,0,frequency,volume,pan);taken_siren=!failed(id);}
+            else {publish(id,sample,0,frequency,volume,pan);taken_siren=ready(id);if(failed(id))taken_siren=false;}
         }
     }
 }
 bool SaVehicleSounds::engine(const void* audio_entity,const void* params,bool player) {
-    if(!config_.engines || !lcs_for_native_)return false;
+    if(!config_.engines || !lcs_for_native_ || !mixer_ || !mixer_->available())return false;
     VehicleRead v;
     if(!read_params_vehicle(params,v))return false;
     const auto lcs_model=lcs_for_native_(v.model);
@@ -284,7 +262,7 @@ bool SaVehicleSounds::engine(const void* audio_entity,const void* params,bool pl
     if(entry->engine_owner==Entry::Engine::sa)return false;
     const auto idle_id=key(entity,engine_idle_loop),rev_id=key(entity,engine_rev_loop);
     const auto stop_engine=[&]{release(idle_id);release(rev_id);};
-    if(!engine.engine_on) {stop_engine();if(entry->engine_owner==Entry::Engine::undecided)entry->engine_owner=Entry::Engine::lcs;return true;}
+    if(!engine.engine_on) {stop_engine();return entry->engine_owner==Entry::Engine::lcs;}
     const auto where=spatial_of(v.position);
     if(!where.ok)return false;
     const auto sound=vehicle_engine_sound(engine.inputs);
@@ -305,35 +283,37 @@ bool SaVehicleSounds::engine(const void* audio_entity,const void* params,bool pl
     if(volume==0) {
         // Out of range: keep the loops muted for 2 s before releasing them, so the edge of the range does not churn.
         if(entry->engine_quiet_since) {if(now-entry->engine_quiet_since>2000)stop_engine();}
-        else entry->engine_quiet_since=now?now:1;
-        if(now-entry->engine_quiet_since<=2000) {
-            publish(idle_id,idle_sample,22050,idle_frequency,0,pan);publish(rev_id,rev_sample,22050,rev_frequency,0,pan);
+        else entry->engine_quiet_since=now?now:std::numeric_limits<uint32_t>::max();
+        if(now-entry->engine_quiet_since>2000) {
+            stop_engine();
+            return entry->engine_owner==Entry::Engine::lcs;
         }
-        if(entry->engine_owner==Entry::Engine::undecided)entry->engine_owner=Entry::Engine::lcs;
-        return true;
+        publish(idle_id,idle_sample,22050,idle_frequency,0,pan);publish(rev_id,rev_sample,22050,rev_frequency,0,pan);
+    } else {
+        entry->engine_quiet_since=0;
+        if(entry->engine_owner==Entry::Engine::undecided) {
+            // At most eight vehicle engines at once; the rest stay with SA.
+            unsigned active=0;
+            for(const auto& item:entries_)if(item.second.engine_owner==Entry::Engine::lcs)++active;
+            if(active>=8) {entry->engine_owner=Entry::Engine::sa;return false;}
+        }
+        publish(idle_id,idle_sample,22050,idle_frequency,entry->engine_idle?volume:uint8_t(0),pan);
+        publish(rev_id,rev_sample,22050,rev_frequency,entry->engine_idle?uint8_t(0):volume,pan);
     }
-    entry->engine_quiet_since=0;
-    if(entry->engine_owner==Entry::Engine::undecided) {
-        // At most eight vehicle engines at once; the rest stay with SA.
-        unsigned active=0;
-        for(const auto& item:entries_)if(item.second.engine_owner==Entry::Engine::lcs)++active;
-        if(active>=8) {entry->engine_owner=Entry::Engine::sa;return false;}
-    }
-    publish(idle_id,idle_sample,22050,idle_frequency,entry->engine_idle?volume:uint8_t(0),pan);
-    publish(rev_id,rev_sample,22050,rev_frequency,entry->engine_idle?uint8_t(0):volume,pan);
     if(failed(idle_id) || failed(rev_id)) {
         ++refusals_;
         stop_engine();
-        // Never leave a vehicle silent from the start: SA's engine keeps it until the vehicle is gone.
-        if(entry->engine_owner==Entry::Engine::undecided)entry->engine_owner=Entry::Engine::sa;
-        return entry->engine_owner==Entry::Engine::lcs;
+        entry->engine_owner=Entry::Engine::sa;
+        return false;
     }
+    if(!ready(idle_id) || !ready(rev_id))return false; // keep SA until both loops have PCM and mixer slots
     entry->engine_owner=Entry::Engine::lcs;
     return true;
 }
 bool SaVehicleSounds::vehicle_event(const void* audio_entity,int32_t event) {
-    const bool door=event>=door_open_first && event<=door_close_last;
-    if(!(door && config_.doors) && !(event==start_engine_event && config_.engines))return false;
+    const auto sound=sa_vehicle_event_sound(event);
+    const bool door=sound==SaVehicleEventSound::door_open || sound==SaVehicleEventSound::door_close;
+    if((!(door && config_.doors) && !(sound==SaVehicleEventSound::engine_start && config_.engines)) || !mixer_ || !mixer_->available())return false;
     VehicleRead v;
     if(!read_entity_vehicle(audio_entity,v) || !lcs_for_native_)return false;
     const auto lcs_model=lcs_for_native_(v.model);
@@ -341,7 +321,7 @@ bool SaVehicleSounds::vehicle_event(const void* audio_entity,int32_t event) {
     if(!row)return false;
     uint32_t sample;float range;bool open=false;
     if(door) {
-        open=event<door_open_first+6;
+        open=sound==SaVehicleEventSound::door_open;
         sample=vehicle_door_sample(row->door,open);range=vehicle_door_range*range_scale_;
     } else {
         const auto index=int(row->bank)-4;   // cars only: no starter on bikes, golf carts or aircraft
@@ -360,9 +340,9 @@ bool SaVehicleSounds::vehicle_event(const void* audio_entity,int32_t event) {
     worker_->post([this,sample,range,open,is_door,distance,camera_x]{
         random_.regenerate();
         const auto* base=asset(sample,0);
-        if(!base)return;
+        if(!base || base->silent)return;
         unsigned emitting=vehicle_start_volume;
-        int32_t frequency=int32_t(base->pcm.frequency);
+        int32_t frequency=int32_t(base->pcm->frequency);
         if(is_door) {
             emitting=open?random_.table(1)%(127u-vehicle_door_open_volume)+vehicle_door_open_volume
                          :random_.table(2)%(127u-vehicle_door_close_volume)+vehicle_door_close_volume;
@@ -371,8 +351,7 @@ bool SaVehicleSounds::vehicle_event(const void* audio_entity,int32_t event) {
         const auto volume=continuous_sound_volume(uint8_t(std::min(emitting,127u)),range,distance);
         const auto pan=continuous_sound_pan(distance,camera_x);
         if(!volume || !pan || *volume==0 || frequency<=0)return;
-        AudioSample voice=base->pcm;voice.frequency=uint32_t(frequency);
-        speech_.play_owned_effect(voice,AudioMix{scaled(*volume,effects_scale_),*pan});
+        mixer_->play_one_shot(base->pcm,uint32_t(frequency),*volume,*pan);
     });
     return true;
 }
@@ -388,10 +367,9 @@ void SaVehicleSounds::shutdown() {
     worker_.reset();
     {
         std::lock_guard<std::mutex> guard(slot_mutex_);
-        for(auto& item:slots_)if(item.second.voice)speech_.stop_owned_effect(*item.second.voice);
+        for(const auto& item:slots_)mixer_->release_loop(item.first);
         slots_.clear();
     }
     entries_.clear();
-    speech_.shutdown();
 }
 }
