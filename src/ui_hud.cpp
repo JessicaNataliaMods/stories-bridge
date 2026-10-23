@@ -69,6 +69,23 @@ std::vector<SpriteCommand> layout_player_info(const PlayerHudInputs& in){
     return out;
 }
 
+std::vector<SpriteCommand> layout_breath_bar(const Screen& s,float fraction,uint8_t alpha){
+    const float width=s.wide()?43.52f:54.4f;
+    const float life=s.wide()?375.f:360.f;
+    // The first quarter of bar_outline is transparent. Match the visible life
+    // frame, not its padded quad, and crop that padding from the oxygen frame.
+    constexpr float life_u0=0.01f,visible_u0=0.25f;
+    const float visible_left=s.right_anchored_x(life)+s.psp_x(width*(visible_u0-life_u0)/(1.f-life_u0));
+    const float right=visible_left-s.psp_x(1.f);
+    const float left=right-s.psp_x(width*(1.f-visible_u0)/(1.f-life_u0));
+    const float top=s.psp_y(40.f),bottom=s.psp_y(50.f);
+    const float dx=s.psp_x(width/64.f/(1.f-life_u0)),dy=s.psp_y(10.f/16.f);
+    const float fill_left=left+dx,fill_right=right-dx;
+    fraction=std::isfinite(fraction)?clamp(fraction,0.f,1.f):0.f;
+    return {{"",fill_left,top+dy,fill_right,bottom-dy,0,0,1,1,{32,32,32,alpha}},
+            {"",fill_left,top+dy,fill_left+(fill_right-fill_left)*fraction,bottom-dy,0,0,1,1,{255,255,255,alpha}},
+            {"bar_outline",left,top,right,bottom,visible_u0,0,1,1,{255,255,255,alpha}}};
+}
 // Weapons with a magazine show "total-clip"; SA types below 16 are melee, 40 is the detonator.
 CombatLayout layout_weapon_and_wanted(const PlayerHudInputs& in){
     CombatLayout out;

@@ -31,6 +31,7 @@ struct PlayerHudInputs {
 // Health and armour bars, the money counter and the clock (Hud.cpp DrawHealthBar,
 // DrawArmourBar, DrawCash, DrawTime), PSP layout over the PS2 textures.
 std::vector<SpriteCommand> layout_player_info(const PlayerHudInputs&);
+std::vector<SpriteCommand> layout_breath_bar(const Screen&,float fraction,uint8_t alpha=255);
 struct TextCommand {
     std::string text;
     TextStyle style;

@@ -76,6 +76,21 @@ int main(){try{
     w.wanted=6;w.parole=0;w.frame=0;w.now_ms=10000;combat=layout_weapon_and_wanted(w);
     float previous=1e9f;stars=0;for(const auto& sp:combat.sprites)if(sp.texture=="hudnumbers"){++stars;check(sp.left<previous,"Stars run leftwards from x=441");previous=sp.left;}
     check(stars==6,"Six stars at the maximum level");
+    for(float aspect:{4.f/3.f,16.f/9.f,3440.f/1440.f}){
+        Screen screen;screen.height=1440;screen.width=1440*aspect;
+        PlayerHudInputs p;p.screen=screen;
+        const auto life=layout_player_info(p).front();
+        const auto full=layout_breath_bar(screen,1.f),half=layout_breath_bar(screen,0.5f),empty=layout_breath_bar(screen,0.f);
+        const float total=screen.wide()?43.52f:54.4f;
+        const float visible_life=life.left+screen.psp_x(total*(0.25f-0.01f)/0.99f);
+        check(near(full[2].right-full[2].left,screen.psp_x(total*0.75f/0.99f)),"Oxygen matches the visible LCS frame width without transparent padding");
+        check(near(full[2].bottom-full[2].top,life.bottom-life.top) && near(full[2].top,life.top),"Oxygen aligns with life and matches its height");
+        check(near(visible_life-full[2].right,screen.psp_x(1.f)),"Visible oxygen and life frames have a one-unit gap");
+        check(full[2].u0==0.25f && full[1].left>full[2].left && full[1].right<full[2].right && full[1].top>full[2].top && full[1].bottom<full[2].bottom,"White fill stays inside the visible outline, never in its transparent padding");
+        check(full[1].colour==Rgba{255,255,255,255} && full[2].texture=="bar_outline","Oxygen has a white fill and LCS outline");
+        check(near(half[1].right-half[1].left,(full[1].right-full[1].left)*0.5f) && near(empty[1].right,empty[1].left),"Oxygen drains proportionally to zero");
+        check(near(layout_breath_bar(screen,2.f)[1].right,full[1].right),"Oxygen fill is clamped to its frame");
+    }
     // Radar geometry.
     Screen rs;rs.width=1920.f;rs.height=1080.f;
     const auto radar=layout_radar(rs);

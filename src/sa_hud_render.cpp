@@ -358,6 +358,39 @@ void sa_hud_use_lcs_ui(const std::filesystem::path& directory,void(*log)(const s
     lcs_resources=true;lcs_look=hud_enabled;lcs_loaded=false;lcs_directory=directory;lcs_log=log;
 }
 bool sa_hud_lcs_ui_active(){return lcs_resources_active();}
+namespace {
+bool read_breath(int player,float* fraction,bool* flash){
+    __try {
+        if(player!=0)return false;
+        const auto ped=*reinterpret_cast<const uintptr_t*>(native_entity_address(0xB7CD98));
+        if(!ped)return false;
+        const auto data=*reinterpret_cast<const uintptr_t*>(ped+0x480);
+        if(!data)return false;
+        const float value=*reinterpret_cast<const float*>(data+0x44);
+        const float maximum=reinterpret_cast<float(__cdecl*)(int)>(native_entity_address(0x559AF0))(8);
+        if(!std::isfinite(value)||!std::isfinite(maximum)||maximum<=0.f)return false;
+        *fraction=value/maximum;
+        *flash=*reinterpret_cast<const int16_t*>(native_entity_address(0xBAB1DC))==10 &&
+            (*reinterpret_cast<const uint32_t*>(native_entity_address(0xB7CB4C))&8u)!=0;
+        return true;
+    }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+}
+bool sa_hud_draw_lcs_breath(int player){
+    // Called only when SA wants its breath bar: keep native visibility and timing.
+    if(!lcs_player_info_skip || !sa_ui_ready())return false;
+    float fraction=0,width=0,height=0;bool flash=false;
+    if(!read_breath(player,&fraction,&flash)||!sa_ui_screen(width,height))return false;
+    if(flash)return true;
+    try {
+        for(const auto& s:ui::layout_breath_bar(ui::Screen{width,height},fraction)){
+            const bool ok=s.texture.empty()?sa_ui_draw_rect(s.left,s.top,s.right,s.bottom,s.colour):
+                sa_ui_draw_sprite(s.texture.c_str(),s.left,s.top,s.right,s.bottom,s.colour,s.u0,s.v0,s.u1,s.v1);
+            if(!ok)return false;
+        }
+        return true;
+    }catch(...){return false;}
+}
 void sa_hud_draw_owned(void(__cdecl* original)()){
     if(!original)return;
     sa_radar_frame(false,0.f,0.f);   // SA draws its own radar unless the LCS branch below turns it on

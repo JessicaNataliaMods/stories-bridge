@@ -1890,6 +1890,10 @@ LCS_SKIP_STUB(health_a,lcs_player_info_skip)
 LCS_SKIP_STUB(health_b,lcs_player_info_skip)
 LCS_SKIP_STUB(armour_a,lcs_player_info_skip)
 LCS_SKIP_STUB(armour_b,lcs_player_info_skip)
+using BreathDraw=void(__cdecl*)(int,int,int);
+ScriptProcess original_breath_a=nullptr,original_breath_b=nullptr;
+void __cdecl on_breath_a(int player,int x,int y){if(!lcs::sa_hud_draw_lcs_breath(player))reinterpret_cast<BreathDraw>(original_breath_a)(player,x,y);}
+void __cdecl on_breath_b(int player,int x,int y){if(!lcs::sa_hud_draw_lcs_breath(player))reinterpret_cast<BreathDraw>(original_breath_b)(player,x,y);}
 LCS_SKIP_STUB(clock_text,lcs_player_info_skip)
 LCS_SKIP_STUB(money_text,lcs_player_info_skip)
 LCS_SKIP_STUB(weapon_icon_a,lcs_weapon_skip)
@@ -1959,6 +1963,7 @@ void __cdecl on_crosshairs(){if(!lcs::sa_ui_draw_scope())original_crosshairs();}
 bool install_player_info_stubs(){
     return install_call(0x58EE9A,&on_health_a,original_health_a) && install_call(0x58EF0D,&on_health_b,original_health_b) &&
            install_call(0x58EF6B,&on_armour_a,original_armour_a) && install_call(0x58EFDE,&on_armour_b,original_armour_b) &&
+           install_call(0x58F131,reinterpret_cast<ScriptProcess>(&on_breath_a),original_breath_a) && install_call(0x58F1AD,reinterpret_cast<ScriptProcess>(&on_breath_b),original_breath_b) &&
            install_call(0x58EC21,&on_clock_text,original_clock_text) && install_call(0x58F607,&on_money_text,original_money_text) &&
            install_call(0x58F944,&on_weapon_icon_a,original_weapon_icon_a) && install_call(0x58F9B1,&on_weapon_icon_b,original_weapon_icon_b) &&
            install_call(0x58FA25,&on_ammo_a,original_ammo_a) && install_call(0x58FABE,&on_ammo_b,original_ammo_b) &&

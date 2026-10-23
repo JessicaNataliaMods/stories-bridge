@@ -40,3 +40,9 @@ A v110 adota a caixa 82x82 de FIX_RADAR do source de referência. A caixa antiga
 ## Colete duplicado
 
 A v112 corrige a identificação dos pontos de chamada: RenderArmorBar é 0x5890A0 (calls 0x58EF6B/0x58EFDE); 0x589190 é RenderBreathBar. As versões anteriores suprimiam fôlego e deixavam o colete branco do SA junto da barra azul do LCS. O fôlego nativo volta a permanecer intacto, e somente o colete do SA é suprimido após o desenho LCS bem-sucedido.
+
+## Oxigênio no layout LCS
+
+A v113 substitui somente o desenho do fôlego: barra branca à esquerda da vida, separada por4 unidades PSP, mesma largura/altura e contorno LCS. Os calls nativos58F131/58F1AD ainda determinam quando desenhar; a camada lê o fôlego real de CPlayerData e o máximo de CStats (modificador8), mantendo consumo, recuperação, condição de exibição e flash do SA. Sem HUD LCS ou em falha de leitura/desenho, o renderizador nativo continua. Testes cobrem alinhamento, branco, preenchimento e proporções4:3/16:9/ultrawide.
+
+A v114 recorta o primeiro quarto transparente da moldura do oxigênio, mantém preenchimentos dentro do contorno visível e usa gap1PSP entre as bordas visíveis da vida e do oxigênio. A largura corresponde à região visível da vida, sem contar o padding da textura.

@@ -16,4 +16,5 @@ bool sa_hud_present(const HudRequest&);
 void sa_hud_use_lcs_ui(const std::filesystem::path& directory,void(*log)(const std::string&),bool hud_enabled=true);
 // Shared lazy load for frontend text before the first gameplay HUD frame.
 bool sa_hud_lcs_ui_active();
+bool sa_hud_draw_lcs_breath(int player);
 }
