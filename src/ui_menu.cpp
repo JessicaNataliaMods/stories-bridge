@@ -3,6 +3,14 @@
 #include <string>
 #include <cmath>
 namespace lcs::ui {
+bool menu_text_supported(std::string_view text){
+    for(unsigned char c:text)if(c>=0x80 || (c<0x20 && c!='\n' && c!='\r'))return false;
+    for(size_t p=0;(p=text.find('~',p))!=std::string_view::npos;){
+        if(p+2>=text.size() || text[p+2]!='~' || std::string_view("BYbghlopqrtwxyn").find(text[p+1])==std::string_view::npos)return false;
+        p+=3;
+    }
+    return true;
+}
 namespace {
 std::vector<std::string> paragraphs(std::string_view text){
     std::vector<std::string> result(1);

@@ -81,13 +81,9 @@ bool read_text(const char* source,std::string& text,bool* copied=nullptr){
     bool complete=false;
     if(!guarded([&]{size_t n=0;while(n<4096 && source[n])++n;if(n<4096){text.assign(source,n);complete=true;}}) || !complete)return false;
     if(copied)*copied=true;
-    // Keep native button/key tokens and foreign extensions with their own
-    // renderer, rather than dropping a symbol the LCS glyph layer cannot draw.
-    for(size_t p=0;(p=text.find('~',p))!=std::string::npos;){
-        if(p+2>=text.size() || text[p+2]!='~' || std::strchr("BYbghlopqrtwxyn",text[p+1])==nullptr)return false;
-        p+=3;
-    }
-    return true;
+    // Plugin/SA localisation glyph codes cannot index the LCS atlas directly.
+    // Both printing and width interception use this same fallback decision.
+    return ui::menu_text_supported(text);
 }
 bool enqueue(uintptr_t target,float x,float y,const char* source,bool bottom){
     if(!active() || !std::isfinite(x)||!std::isfinite(y))return false;

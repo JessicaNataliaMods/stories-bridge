@@ -26,5 +26,9 @@ int main(){try{
     auto title=layout_menu_text(f,100.f,80.f,"A");
     check(title.quads.size()==1 && title.quads[0].page==2 && near(title.quads[0].u[0],float(new_character('A'-' ')%16)/16.f),"Menu titles use the remapped LCS heading atlas");
     check(menu_text_width(f,"A~n~AAAA")>menu_text_width(f,"A"),"Multiline width is the longest displayed paragraph");
-    std::cout<<"PASS: LCS menu font metrics, native anchors, wrapping, newlines and outline\n";return 0;
+    check(menu_text_supported("Options ~w~ON~n~Back"),"ASCII menu text retains LCS fonts");
+    for(int c=0x80;c<=0xff;++c)check(!menu_text_supported(std::string("Mod ")+char(c)),"Every native extended glyph requires original font and metrics");
+    check(!menu_text_supported("Configura\xc3\xa7\xc3\xb5" "es"),"UTF-8 localisation must not index LCS glyphs by byte");
+    check(!menu_text_supported("~k~~PED_FIREWEAPON~"),"Native button tokens retain native renderer");
+    std::cout<<"PASS: LCS menu layout and native localisation/button fallback\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

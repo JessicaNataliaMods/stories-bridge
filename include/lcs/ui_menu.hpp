@@ -19,5 +19,8 @@ struct MenuText {
     int lines=0;
 };
 float menu_text_width(const MenuFont&,std::string_view,bool spaces=true);
+// SA/plugin extended glyph bytes are not LCS atlas indices. Keep those
+// strings (and unsupported button tokens) with the native renderer/metrics.
+bool menu_text_supported(std::string_view);
 MenuText layout_menu_text(const MenuFont&,float x,float y,std::string_view,bool from_bottom=false);
 }
