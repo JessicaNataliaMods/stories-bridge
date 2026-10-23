@@ -1,4 +1,6 @@
 #include "lcs/native.hpp"
+#include "lcs/radar_sprites.hpp"
+#include "radar_sprite_origins.hpp"
 #include "lcs/threat_ranges.hpp"
 #include "lcs/route_vehicle_goal.hpp"
 #include "ScriptCommands.h"
@@ -16,6 +18,76 @@ namespace lcs {
 // only car/char/object arrows and contact-point cylinders are drawn. Display
 // values match SA (0 neither, 1 marker, 2 blip, 3 both); keep the radar bit.
 static int32_t coord_blip_display(int32_t display) {return display&2;}
+size_t NativeAdapter::recover_source_blip_sprites(Vm& vm,
+    const std::function<std::optional<RadarSpriteBlip>(int32_t)>& read,
+    const std::function<bool(int32_t,int32_t)>& set) {
+    if(!unique_radar_sprites || owned_blips_.empty() || !read || !set ||
+       image_.entry_point>=image_.main_size || vm.memory.size()<image_.main_size ||
+       vm.main_size!=image_.main_size || vm.variable_space!=image_.variable_space)return 0;
+    struct Site {uint32_t global;std::array<float,3> position;int32_t sprite;bool contact,short_range;};
+    std::vector<Site> sites;
+    const auto is_sprite_command=[](uint16_t op){
+        return op==COMMAND_ADD_SHORT_RANGE_SPRITE_BLIP_FOR_COORD || op==COMMAND_ADD_SPRITE_BLIP_FOR_COORD ||
+               op==COMMAND_ADD_SPRITE_BLIP_FOR_CONTACT_POINT || op==COMMAND_ADD_SHORT_RANGE_SPRITE_BLIP_FOR_CONTACT_POINT;
+    };
+    for(uint32_t at=image_.entry_point;at+2<=image_.main_size;++at) {
+        const auto op=read16(vm.memory,at);
+        if(!is_sprite_command(op))continue;
+        try {
+            Thread cursor;cursor.ip=at+2;std::array<int32_t,4> args{};bool valid=true;
+            std::array<int,3> local_coords{-1,-1,-1};bool needs_controller=false;
+            for(size_t i=0;i<args.size();++i) {
+                if(cursor.ip>=image_.main_size){valid=false;break;}
+                const auto kind=vm.memory[cursor.ip];
+                if(i<3 && kind>=12 && kind<108){
+                    local_coords[i]=int(kind)-12;needs_controller=true;++cursor.ip;
+                }else if(kind<10)args[i]=vm.parameter(cursor);
+                else {valid=false;break;}
+            }
+            if(!valid || cursor.ip>=image_.main_size || vm.memory[cursor.ip]<204 || vm.memory[cursor.ip]>=230)continue;
+            const auto global=vm.global_reference(cursor);
+            if(global<8 || uint64_t(global)+4>vm.variable_space || args[3]<0 || args[3]>62)continue;
+            if(needs_controller){
+                const auto values=radar_origin_detail::controller_coordinates(image_,at,local_coords);
+                if(!values)continue;
+                for(size_t i=0;i<3;++i)if(local_coords[i]>=0)args[i]=(*values)[i];
+            }
+            Site site{global,{},args[3],false,false};
+            for(size_t i=0;i<3;++i)std::memcpy(&site.position[i],&args[i],4);
+            site.contact=op==COMMAND_ADD_SPRITE_BLIP_FOR_CONTACT_POINT || op==COMMAND_ADD_SHORT_RANGE_SPRITE_BLIP_FOR_CONTACT_POINT;
+            site.short_range=op==COMMAND_ADD_SHORT_RANGE_SPRITE_BLIP_FOR_COORD || op==COMMAND_ADD_SHORT_RANGE_SPRITE_BLIP_FOR_CONTACT_POINT;
+            if(std::all_of(site.position.begin(),site.position.end(),[](float v){return std::isfinite(v);}))sites.push_back(site);
+        } catch(...) {
+            // A truncated or malformed candidate inside MAIN is not a proven
+            // creator site. Continue scanning without affecting live blips.
+        }
+    }
+    size_t changed=0;
+    for(const auto handle:owned_blips_) {
+        if(handle<0)continue;
+        const auto live=read(handle);if(!live)continue;
+        std::set<int32_t> matching_sprites;
+        for(const auto& site:sites) {
+            if(uint64_t(site.global)+4>vm.memory.size() || int32_t(read32(vm.memory,site.global))!=handle)continue;
+            if(site.contact!=live->contact || site.short_range!=live->short_range)continue;
+            bool same_position=true;
+            for(size_t i=0;i<3;++i){
+                // Retail ADD_*_SPRITE_BLIP resolves the below-map sentinel to
+                // ground height. XY still identifies the original point.
+                if(i==2 && site.position[i]<=-100.f)continue;
+                if(std::fabs(site.position[i]-live->position[i])>0.001f){same_position=false;break;}
+            }
+            if(same_position)matching_sprites.insert(site.sprite);
+        }
+        if(matching_sprites.size()!=1)continue;
+        const auto original=*matching_sprites.begin();
+        const int32_t legacy=source_radar_sprite(original,false),old_unique=original==0?0:original+1;
+        const int32_t target=source_radar_sprite(original,true);
+        if(target<0 || (live->sprite!=legacy && live->sprite!=old_unique && live->sprite!=target) || live->sprite==target)continue;
+        if(set(handle,target))++changed;
+    }
+    return changed;
+}
 void NativeAdapter::observe_source_actor_acquired(int32_t handle) {
     if(handle<0 || !source_actor_acquired)return;
     const auto actor=live_ped_identity?live_ped_identity(handle):std::nullopt;
@@ -3036,14 +3108,7 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         // use SA's mission question-mark icon until their original icons exist.
         auto& sprite=call.inputs[3];
         if(sprite<0 || sprite>62){thread.diagnostic="Unknown original radar sprite";return StepResult::unsupported;}
-        const auto original=sprite;sprite=37;
-        switch(original) {
-        case 0:sprite=0;break;case 1:sprite=2;break;case 2:sprite=3;break;case 3:sprite=4;break;
-        case 12:sprite=9;break;case 16:sprite=6;break;case 19:sprite=35;break;
-        case 25:sprite=31;break;case 27:sprite=63;break;case 28:case 41:sprite=45;break;
-        case 42:sprite=32;break;case 62:sprite=41;break;
-        default:break;
-        }
+        sprite=source_radar_sprite(sprite,unique_radar_sprites);
     }
     if(opcode==COMMAND_START_SCRIPT_FIRE || opcode==COMMAND_CREATE_PROTECTION_PICKUP || opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD || opcode==COMMAND_GET_CLOSEST_STRAIGHT_ROAD) {
         for(size_t i=0;i<(opcode==COMMAND_GET_CLOSEST_STRAIGHT_ROAD?5:3);++i) {

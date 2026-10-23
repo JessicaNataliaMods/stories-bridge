@@ -271,6 +271,8 @@ def prepare(base, output, version, notes, refresh, original_data):
             relative = source.relative_to(base)
             if version >= 90 and packaged_audio(relative):
                 continue
+            if version >= 98 and relative.as_posix() in ('models/lcs/fonts.txd', 'models/lcs/hud.txd'):
+                continue
             if source.is_dir():
                 (output/relative).mkdir(exist_ok=True)
                 continue
@@ -346,6 +348,30 @@ def prepare(base, output, version, notes, refresh, original_data):
             shutil.copy2(source_docked,target)
         if not any(row['relative']==relative for row in campaign['originalResources']):
             campaign['originalResources'].append(dict(relative=relative,source=str(source_docked),sha256=digest(source_docked)))
+    # v98+: the original LCS front-end textures (fonts and HUD sprites, converted from the user's PS2 assets) read by the
+    # UI layer. They are converted to the D3D9 layout SA reads (tools/txd_to_d3d9.py) and must NOT be called fonts.txd or
+    # hud.txd: the modloader would install files with those names over SA's own front-end dictionaries (v98..v102 did).
+    if version >= 98:
+        converter = tool_module('txd_to_d3d9')
+        stale = {'models/lcs/fonts.txd', 'models/lcs/hud.txd'}
+        campaign['originalResources'] = [row for row in campaign['originalResources'] if row['relative'] not in stale]
+        for name in ('fonts', 'hud'):
+            source_ui = original_data.resolve()/'models'/(name + '.txd')
+            if not source_ui.is_file():
+                raise ValueError('Original LCS UI texture dictionary missing: '+str(source_ui))
+            converted, converted_count = converter.convert(source_ui.read_bytes())
+            relative = 'models/lcs/lcs_'+name+'.txd'
+            target = output/relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and target.read_bytes() != converted:
+                target.unlink()
+            if not target.exists():
+                target.write_bytes(converted)
+            campaign['originalResources'] = [row for row in campaign['originalResources'] if row['relative'] != relative]
+            campaign['originalResources'].append(dict(relative=relative, source=str(source_ui), sha256=digest(target)))
+        campaign['lcsUi98'] = dict(setting='LcsHud', default=1, textures=['models/lcs/lcs_fonts.txd', 'models/lcs/lcs_hud.txd'],
+            format='RenderWare D3D9, 32-bit A8R8G8B8, converted from the D3D8 output', modloaderSafeNames=True,
+            layout='reStories (PSP-derived) HUD layout over the original PS2 textures', gameExecuted=False)
     if version >= 29:
         campaign['runtimeSafeguards'].update(nativePacketEntryReceipts=True,nativeEnteredFailureRequiresRepair=True,sourcePlayerAreaShootingPredicate=True)
     if version >= 30:
@@ -606,6 +632,10 @@ def prepare(base, output, version, notes, refresh, original_data):
         kept = [line for line in ini.splitlines() if line.split('=', 1)[0] not in PATH_KEYS]
         if version >= 92 and not any(line.startswith('LcsRadio=') for line in kept):
             kept.append('LcsRadio=1')  # docs/audio.md: 0 keeps SA's radio
+        if version >= 98 and not any(line.startswith('LcsHud=') for line in kept):
+            kept.append('LcsHud=1')  # docs/lcs-hud.md: gameplay HUD only
+        if version >= 107 and not any(line.startswith('LcsMenuFonts=') for line in kept):
+            kept.append('LcsMenuFonts=1')  # independent native frontend font switch
         if kept != ini.splitlines():
             if ini_path.stat().st_nlink != 1:
                 raise ValueError('Mutable INI must not share an inode with a rollback')
@@ -628,6 +658,8 @@ def prepare(base, output, version, notes, refresh, original_data):
         relative = source.relative_to(base)
         if version >= 90 and packaged_audio(relative):
             continue
+        if version >= 98 and relative.as_posix() in ('models/lcs/fonts.txd', 'models/lcs/hud.txd'):
+            continue    # replaced by the converted lcs_*.txd; the modloader must never see these names
         if source.is_file() and immutable(relative) and not mutable_profile(relative, version):
             if digest(source) != digest(output/relative):
                 raise ValueError('Original immutable resource changed: '+str(relative))

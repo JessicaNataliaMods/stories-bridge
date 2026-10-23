@@ -8,6 +8,8 @@
 #include "lcs/sa_task_memory.hpp"
 // Keep the observer-backed route specialization compiled alongside the owned host.
 namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
+#include "sa_ui_radar.hpp"
+#include "sa_ui_menu.hpp"
 #include <windows.h>
 #include "lcs/runtime.hpp"
 #include "lcs/script_cadence.hpp"
@@ -712,6 +714,8 @@ struct Campaign {
             return result;
         };
         adapter.stop_credits=[this](){lcs::NativeResult result;credits.stop();result.executed=true;return result;};
+        // Original radar icons need their own native sprite slots (see sa_ui_apply_radar_sprites).
+        if(setting(L"LcsHud")!=L"0")adapter.unique_radar_sprites=true;
         // LcsRadio=0 keeps SA's own radio stations.
         if(setting(L"LcsRadio")!=L"0") {
             if(!lcs::sa_radio_profile_matches())log("Original LCS radio refused: SA radio manager profile differs; SA radio stays active");
@@ -1154,6 +1158,8 @@ struct Campaign {
         pending_saved_world={};
         restoring_world=false;log("Campaign LOAD restored LCS globals/threads/services and Toni without replaying MAIN");
         if(repair_evicted_car_switches(adapter)<0)log("Road switch repair: native switched-area list could not be read or replayed");
+        const auto repaired_blips=adapter.recover_source_blip_sprites(runtime.vm(),lcs::sa_radar_sprite_blip,lcs::sa_radar_set_sprite_blip);
+        if(repaired_blips)log("LCS radar: restored source sprite identities for "+std::to_string(repaired_blips)+" owned saved blips");
         return true;
     }
     void release_taxi_hails() {
@@ -1873,6 +1879,71 @@ bool install_sniper_query() {
     }
     return lcs::sa_sniper_query_calls_healthy();
 }
+// SA's player-information block (health, armour, money, clock) is drawn by cdecl
+// callees that take arguments, so each call site gets a naked stub: it either
+// returns at once (the LCS HUD is on screen, the caller pops the arguments) or
+// jumps to the previous target with the stack untouched.
+extern "C" volatile uint8_t lcs_player_info_skip,lcs_weapon_skip,lcs_wanted_skip;
+#define LCS_SKIP_STUB(name,flag)     ScriptProcess original_##name=nullptr;     __declspec(naked) void __cdecl on_##name(){__asm{cmp byte ptr [flag],0 __asm jne skip __asm jmp dword ptr [original_##name] __asm skip: __asm ret}}
+LCS_SKIP_STUB(health_a,lcs_player_info_skip)
+LCS_SKIP_STUB(health_b,lcs_player_info_skip)
+LCS_SKIP_STUB(armour_a,lcs_player_info_skip)
+LCS_SKIP_STUB(armour_b,lcs_player_info_skip)
+LCS_SKIP_STUB(clock_text,lcs_player_info_skip)
+LCS_SKIP_STUB(money_text,lcs_player_info_skip)
+LCS_SKIP_STUB(weapon_icon_a,lcs_weapon_skip)
+LCS_SKIP_STUB(weapon_icon_b,lcs_weapon_skip)
+LCS_SKIP_STUB(ammo_a,lcs_weapon_skip)
+LCS_SKIP_STUB(ammo_b,lcs_weapon_skip)
+ScriptProcess original_wanted_stars=nullptr;
+void __cdecl on_wanted_stars(){if(!lcs_wanted_skip)original_wanted_stars();}
+// Call sites inside CHud::DrawPlayerInfo (0x58EAF0), each confirmed against the
+// 1.0 US executable: 0x589270 health bar, 0x589190 armour bar, 0x71A700 text,
+// 0x58D7D0 weapon icon, 0x5893B0 ammunition; and the DrawWanted call (0x58D9A0) in CHud::Draw.
+// Text print sites of the HUD (CFont::PrintString 0x71A700 / PrintStringFromBottom 0x71A820, both
+// cdecl with (x, y, text)). The element ids match lcs::ui::TextElement.
+extern "C" int __cdecl lcs_text_hook(int element,float x,float y,const char* text);
+#define LCS_TEXT_STUB(name,id)     ScriptProcess original_##name=nullptr;     __declspec(naked) void __cdecl on_##name(){__asm{push dword ptr [esp+12] __asm push dword ptr [esp+12] __asm push dword ptr [esp+12] __asm push id __asm call lcs_text_hook __asm add esp,16 __asm test eax,eax __asm jnz handled __asm jmp dword ptr [original_##name] __asm handled: __asm ret}}
+LCS_TEXT_STUB(text_zone,0)
+LCS_TEXT_STUB(text_vehicle,1)
+LCS_TEXT_STUB(text_subtitle,2)
+LCS_TEXT_STUB(text_help,3)
+LCS_TEXT_STUB(text_big0,4)
+LCS_TEXT_STUB(text_big1,5)
+LCS_TEXT_STUB(text_big2,6)
+LCS_TEXT_STUB(text_big3,7)
+LCS_TEXT_STUB(text_big4,8)
+LCS_TEXT_STUB(text_big5,9)
+// Sites confirmed against the 1.0 US executable: 0x58AE5D zone name, 0x58B156 vehicle name, 0x58C68A subtitles,
+// 0x58BD67 help text, 0x58CA30/0x58D470/0x58CC6A/0x58CFA0/0x58CD99/0x58D21A big message slots 0..5
+// (slot 6 at 0x58CE9E has no LCS counterpart and stays with SA).
+bool install_text_stubs(){
+    return install_call(0x58AE5D,&on_text_zone,original_text_zone) && install_call(0x58B156,&on_text_vehicle,original_text_vehicle) &&
+           install_call(0x58C68A,&on_text_subtitle,original_text_subtitle) && install_call(0x58BD67,&on_text_help,original_text_help) &&
+           install_call(0x58CA30,&on_text_big0,original_text_big0) && install_call(0x58D470,&on_text_big1,original_text_big1) &&
+           install_call(0x58CC6A,&on_text_big2,original_text_big2) && install_call(0x58CFA0,&on_text_big3,original_text_big3) &&
+           install_call(0x58CD99,&on_text_big4,original_text_big4) && install_call(0x58D21A,&on_text_big5,original_text_big5);
+}
+// The SA radar disc is four draws of one sprite (CSprite2d::Draw, thiscall, ret 8) inside
+// CHud::DrawRadar (0x58A330): the first becomes the LCS disc, the others are skipped.
+#define LCS_DISC_STUB(name)     ScriptProcess original_##name=nullptr;     __declspec(naked) void __cdecl on_##name(){__asm{cmp byte ptr [lcs_radar_skip],0 __asm jne skipped __asm jmp dword ptr [original_##name] __asm skipped: __asm ret 8}}
+LCS_DISC_STUB(radar_disc_b)
+LCS_DISC_STUB(radar_disc_c)
+LCS_DISC_STUB(radar_disc_d)
+ScriptProcess original_radar_disc_a=nullptr;
+__declspec(naked) void __cdecl on_radar_disc_a(){__asm{cmp byte ptr [lcs_radar_skip],0 __asm jne draw __asm jmp dword ptr [original_radar_disc_a] __asm draw: __asm call lcs_radar_disc_draw __asm ret 8}}
+bool install_radar_stubs(){
+    return install_call(0x58A823,&on_radar_disc_a,original_radar_disc_a) && install_call(0x58A8CD,&on_radar_disc_b,original_radar_disc_b) &&
+           install_call(0x58A977,&on_radar_disc_c,original_radar_disc_c) && install_call(0x58AA25,&on_radar_disc_d,original_radar_disc_d);
+}
+bool install_player_info_stubs(){
+    return install_call(0x58EE9A,&on_health_a,original_health_a) && install_call(0x58EF0D,&on_health_b,original_health_b) &&
+           install_call(0x58F131,&on_armour_a,original_armour_a) && install_call(0x58F1AD,&on_armour_b,original_armour_b) &&
+           install_call(0x58EC21,&on_clock_text,original_clock_text) && install_call(0x58F607,&on_money_text,original_money_text) &&
+           install_call(0x58F944,&on_weapon_icon_a,original_weapon_icon_a) && install_call(0x58F9B1,&on_weapon_icon_b,original_weapon_icon_b) &&
+           install_call(0x58FA25,&on_ammo_a,original_ammo_a) && install_call(0x58FABE,&on_ammo_b,original_ammo_b) &&
+           install_call(0x58FBDB,&on_wanted_stars,original_wanted_stars);
+}
 void __cdecl on_mission_hud(){lcs::sa_hud_draw_owned(original_mission_hud);}
 void __cdecl on_credits_hud(){
     original_credits_hud();
@@ -2036,6 +2107,27 @@ bool install_hook() {
     }
     const bool mission_hud=lcs::sa_hud_render_profile() && install_call(0x58FBEE,&on_mission_hud,original_mission_hud);
     lcs::sa_hud_render_bound(mission_hud);
+    // Menu fonts and gameplay HUD have independent switches; only the lazy
+    // isolated texture dictionaries are shared.
+    const bool lcs_hud_enabled=setting(L"LcsHud")!=L"0";
+    const bool lcs_menu_enabled=setting(L"LcsMenuFonts")!=L"0";
+    if(mission_hud && setting(L"Mode")==L"Campaign" && (lcs_hud_enabled || lcs_menu_enabled)){
+        lcs::sa_hud_use_lcs_ui(module_directory()/L"models"/L"lcs",[](const std::string& message){log(message);},lcs_hud_enabled);
+    }
+    if(mission_hud && setting(L"Mode")==L"Campaign" && lcs_menu_enabled){
+        std::string menu_font_diagnostic;
+        const bool menu_fonts=lcs::sa_ui_menu_install(menu_font_diagnostic);
+        log(std::string(menu_fonts?"LCS menu: ":"LCS menu fonts unavailable, SA kept: ")+menu_font_diagnostic);
+    }
+    if(mission_hud && setting(L"Mode")==L"Campaign" && setting(L"LcsHud")!=L"0" &&
+       !install_player_info_stubs())log("LCS HUD: SA player-information call sites differ; health/armour/money/clock may be drawn twice");
+    if(mission_hud && setting(L"Mode")==L"Campaign" && setting(L"LcsHud")!=L"0" &&
+       !install_text_stubs())log("LCS HUD: SA text call sites differ; zone, vehicle, subtitle, help and big message texts may keep SA's font");
+    if(mission_hud && setting(L"Mode")==L"Campaign" && setting(L"LcsHud")!=L"0") {
+        std::string radar_message;
+        const bool radar=lcs::sa_radar_install(radar_message) && install_radar_stubs();
+        log(radar?std::string("LCS HUD: radar geometry and disc installed"):"LCS HUD: radar stays with SA ("+radar_message+")");
+    }
     // Wrap the parent HUD call: DrawMissionTimers is skipped in widescreen,
     // while the source credits roll must still reach the shared font flush.
     if(lcs::sa_credits_render_profile())install_call(0x53E4FF,&on_credits_hud,original_credits_hud);

@@ -1,7 +1,9 @@
 #include "lcs/equivalents.hpp"
+#include "lcs/radar_sprites.hpp"
 #include "lcs/road_area.hpp"
 #include "lcs/hideout_capacity.hpp"
 #include "ScriptCommands.h"
+#include "radar_sprite_origins.hpp"
 #include <sstream>
 #include <iostream>
 #include <stdexcept>
@@ -10,7 +12,29 @@ using namespace lcs;
 static void check(bool ok,const char* why){if(!ok)throw std::runtime_error(why);}
 static void op(std::vector<uint8_t>& c,uint16_t n){c.push_back(uint8_t(n));c.push_back(uint8_t(n>>8));}
 static void arg(std::vector<uint8_t>& c,int32_t n){c.push_back(6);for(int i=0;i<4;++i)c.push_back(uint8_t(uint32_t(n)>>(8*i)));}
-int main(){try {
+static void arg_float(std::vector<uint8_t>& c,float n){int32_t bits;std::memcpy(&bits,&n,4);arg(c,bits);}
+static uint32_t radar_creator(ScmImage& image,int32_t sprite,float x,float y,float z,uint16_t opcode=COMMAND_ADD_SPRITE_BLIP_FOR_COORD){
+    const auto at=uint32_t(image.bytes.size());op(image.bytes,opcode);arg_float(image.bytes,x);arg_float(image.bytes,y);arg_float(image.bytes,z);arg(image.bytes,sprite);
+    image.bytes.push_back(204);image.bytes.push_back(4);return at;
+}
+int main(int argc,char** argv){try {
+    if(argc==2){
+        const auto source=ScmImage::load(argv[1]);std::set<int32_t> contacts;
+        for(uint32_t at=source.entry_point;uint64_t(at)+2<source.main_size;++at){
+            const auto command=read16(source.bytes,at);
+            if(command!=COMMAND_ADD_SPRITE_BLIP_FOR_CONTACT_POINT && command!=COMMAND_ADD_SHORT_RANGE_SPRITE_BLIP_FOR_CONTACT_POINT)continue;
+            try {
+                radar_origin_detail::Cursor c{source,at+2};std::array<int,3> locals;
+                for(auto& local:locals)local=c.number().local;
+                const auto sprite=c.number();
+                if(std::all_of(locals.begin(),locals.end(),[](int v){return v>=0&&v<96;}) && sprite.constant && sprite.value>=31 && sprite.value<=40 &&
+                   radar_origin_detail::controller_coordinates(source,at,locals))contacts.insert(sprite.value);
+            }catch(...){continue;}
+        }
+        check(contacts.count(40)!=0,"Original Vincenzo controller must have a proven stable coordinate preamble, including its shared calls");
+        std::cout<<"PASS: original MAIN controller coordinate proof for "<<contacts.size()<<" distinct contact icons; no script executed\n";
+        return 0;
+    }
     ScmImage image;NativeAdapter native(image);std::istringstream profile("109 124 vinc_01 vmaff1 ped\n152 547 kuruma primo vehicle\n157 547 alias primo vehicle\n79 125 gang01 vmaff2 ped\n");
     bind_equivalents(native,read_equivalents(profile));native.world_ready=native.text_ready=true;
     std::istringstream weapon_profile("274 346 glock17 colt45 object\n");
@@ -175,5 +199,83 @@ int main(){try {
     check(run(c,t)==StepResult::continued && calls.back().inputs==std::vector<int32_t>{262},"Residency follows actual loaded character, not previous donor");
     c.clear();op(c,COMMAND_LOAD_SPECIAL_CHARACTER);arg(c,1);c.insert(c.end(),{'m','i','s','s','i','n','g',0});
     check(run(c,t)==StepResult::unsupported && native.model(109)==262,"Missing original gameplay resource cannot become an unrelated actor");
+    // Original radar sprites: collapsed onto SA icons by default, one native slot each with the LCS HUD.
+    const auto blip_sprite=[&](int32_t original)->int32_t{
+        std::vector<uint8_t> b;op(b,COMMAND_ADD_SPRITE_BLIP_FOR_COORD);arg(b,0);arg(b,0);arg(b,0);arg(b,original);b.push_back(12);
+        Thread bt;if(run(b,bt)!=StepResult::continued)return -999;
+        return calls.back().inputs.back();
+    };
+    native.unique_radar_sprites=false;
+    check(blip_sprite(1)==2 && blip_sprite(19)==35 && blip_sprite(36)==37,"Default radar sprite mapping keeps the SA icons");
+    native.unique_radar_sprites=true;
+    check(blip_sprite(0)==0 && blip_sprite(1)==2 && blip_sprite(3)==4 && blip_sprite(19)==20 && blip_sprite(36)==37 && blip_sprite(40)==42 && blip_sprite(41)==63 && blip_sprite(62)==41,"With the LCS HUD unique source icons avoid SA's reserved waypoint slot");
+    check(blip_sprite(63)==-999,"Radar sprites beyond the original table are refused");
+    std::array<bool,64> mapped{};
+    for(int32_t source=0;source<=62;++source){const auto slot=source_radar_sprite(source,true);check(slot>=0 && slot<64 && !mapped[size_t(slot)],"Unique LCS radar mapping is in-range and collision-free");mapped[size_t(slot)]=true;}
+    check(source_radar_sprite(1,true)==2 && source_radar_sprite(2,true)==3 && source_radar_sprite(3,true)==4 && source_radar_sprite(62,true)==41,"SA center/map/north and waypoint slots retain their native identities");
+    check(source_radar_sprite(-1,true)==-1 && source_radar_sprite(63,true)==-1,"Invalid source radar IDs have no native slot");
+    native.unique_radar_sprites=false;
+
+    // Saved blips contain only native handles. Recover a changed source sprite
+    // only when a MAIN creator's output global, literal coordinates and flags
+    // identify the same generation-checked owned blip unambiguously.
+    ScmImage recovery_image;recovery_image.variable_space=64;recovery_image.entry_point=64;recovery_image.bytes.resize(64);
+    const auto creator=radar_creator(recovery_image,40,120.0f,-55.0f,8.0f);
+    op(recovery_image.bytes,COMMAND_ADD_SPRITE_BLIP_FOR_COORD);recovery_image.bytes.push_back(6);recovery_image.bytes.push_back(0);recovery_image.bytes.push_back(0); // truncated literal
+    recovery_image.main_size=uint32_t(recovery_image.bytes.size());
+    NativeAdapter recovery(recovery_image);recovery.unique_radar_sprites=true;recovery.world_ready=true;
+    int32_t next_blip=90;recovery.execute=[&](const NativeCall&){NativeResult r;r.executed=true;r.values[0]=next_blip++;return r;};
+    Vm recovery_vm(recovery_image);recovery_vm.backend=[&](Vm& v,Thread& th,uint16_t command){return recovery.dispatch(v,th,command);};
+    Thread recovery_thread;recovery_thread.ip=creator;
+    check(recovery_vm.step(recovery_thread,0)==StepResult::continued && read32(recovery_vm.memory,16)==90,"Synthetic MAIN creates an owned radar blip");
+    RadarSpriteBlip saved_blip{{120.0f,-55.0f,8.0f},37,false,false};int32_t changed_sprite=-1;int set_calls=0;
+    const auto read_saved=[&](int32_t handle)->std::optional<RadarSpriteBlip>{return handle==90?std::optional<RadarSpriteBlip>(saved_blip):std::nullopt;};
+    const auto set_saved=[&](int32_t handle,int32_t sprite){if(handle!=90)return false;++set_calls;changed_sprite=sprite;return true;};
+    check(recovery.recover_source_blip_sprites(recovery_vm,read_saved,set_saved)==1 && changed_sprite==42,"Legacy collapsed Vincenzo icon recovers from a literal MAIN creator; truncated candidates are ignored");
+
+    saved_blip.position[0]+=1.0f;set_calls=0;
+    check(recovery.recover_source_blip_sprites(recovery_vm,read_saved,set_saved)==0 && set_calls==0,"Coordinate mismatch cannot rewrite an owned blip");
+    saved_blip.position[0]=120.0f;saved_blip.sprite=58;
+    check(recovery.recover_source_blip_sprites(recovery_vm,read_saved,set_saved)==0 && set_calls==0,"Unrecognized custom sprite is preserved");
+    saved_blip.sprite=37;recovery_vm.memory[16]=0xE7;
+    check(recovery.recover_source_blip_sprites(recovery_vm,read_saved,set_saved)==0 && set_calls==0,"A creator whose output global no longer owns the handle cannot rewrite it");
+
+    ScmImage ambiguous_image;ambiguous_image.variable_space=64;ambiguous_image.entry_point=64;ambiguous_image.bytes.resize(64);
+    const auto first_creator=radar_creator(ambiguous_image,40,3.0f,4.0f,5.0f);
+    const auto second_creator=radar_creator(ambiguous_image,41,3.0f,4.0f,5.0f);
+    ambiguous_image.main_size=uint32_t(ambiguous_image.bytes.size());
+    NativeAdapter ambiguous(ambiguous_image);ambiguous.unique_radar_sprites=true;ambiguous.world_ready=true;
+    int32_t ambiguous_handle=100;ambiguous.execute=[&](const NativeCall&){NativeResult r;r.executed=true;r.values[0]=ambiguous_handle++;return r;};
+    Vm ambiguous_vm(ambiguous_image);ambiguous_vm.backend=[&](Vm& v,Thread& th,uint16_t command){return ambiguous.dispatch(v,th,command);};
+    Thread first_thread;first_thread.ip=first_creator;Thread second_thread;second_thread.ip=second_creator;
+    check(ambiguous_vm.step(first_thread,0)==StepResult::continued && ambiguous_vm.step(second_thread,0)==StepResult::continued,"Synthetic MAIN runs two creators sharing an output global");
+    RadarSpriteBlip ambiguous_live{{3.0f,4.0f,5.0f},37,false,false};int ambiguous_sets=0;
+    const auto read_ambiguous=[&](int32_t handle)->std::optional<RadarSpriteBlip>{return handle==101?std::optional<RadarSpriteBlip>(ambiguous_live):std::nullopt;};
+    const auto set_ambiguous=[&](int32_t,int32_t){++ambiguous_sets;return true;};
+    check(ambiguous.recover_source_blip_sprites(ambiguous_vm,read_ambiguous,set_ambiguous)==0 && ambiguous_sets==0,"Different source sprites targeting the same live output global are rejected as ambiguous");
+    // Named controller with constant locals, a shared GOSUB and an isolated
+    // CALL frame. This is the production pattern used for persistent contacts.
+    ScmImage controller;controller.variable_space=64;controller.entry_point=64;controller.bytes.resize(64);
+    op(controller.bytes,COMMAND_START_NEW_SCRIPT);arg(controller.bytes,72);controller.bytes.push_back(0);
+    op(controller.bytes,COMMAND_SCRIPT_NAME);for(char ch:std::string("CONTACT\0",8))controller.bytes.push_back(uint8_t(ch));
+    for(int i=0;i<3;++i){op(controller.bytes,COMMAND_SET_LVAR_FLOAT);controller.bytes.push_back(uint8_t(12+i));arg_float(controller.bytes,i==0?120.f:i==1?-55.f:-100.f);}
+    op(controller.bytes,COMMAND_GOSUB);const auto shared_label=controller.bytes.size()+1;arg(controller.bytes,0);
+    op(controller.bytes,COMMAND_CALL);controller.bytes.insert(controller.bytes.end(),{0,0,3});const auto call_label=controller.bytes.size()+1;arg(controller.bytes,0);
+    const auto local_creator=uint32_t(controller.bytes.size());op(controller.bytes,COMMAND_ADD_SPRITE_BLIP_FOR_CONTACT_POINT);
+    controller.bytes.insert(controller.bytes.end(),{12,13,14});arg(controller.bytes,40);controller.bytes.insert(controller.bytes.end(),{204,4});
+    op(controller.bytes,COMMAND_TERMINATE_THIS_SCRIPT);const auto shared=uint32_t(controller.bytes.size());op(controller.bytes,COMMAND_NOP);op(controller.bytes,COMMAND_RETURN);
+    for(const auto label:{shared_label,call_label})for(unsigned i=0;i<4;++i)controller.bytes[label+i]=uint8_t(shared>>(8*i));
+    controller.main_size=uint32_t(controller.bytes.size());
+    NativeAdapter controller_adapter(controller);controller_adapter.unique_radar_sprites=true;controller_adapter.world_ready=true;
+    controller_adapter.execute=[](const NativeCall&){NativeResult r;r.executed=true;r.values[0]=70;return r;};
+    Vm controller_vm(controller);controller_vm.backend=[&](Vm& v,Thread& th,uint16_t command){return controller_adapter.dispatch(v,th,command);};
+    Thread controller_thread;controller_thread.ip=local_creator;
+    check(controller_vm.step(controller_thread,0)==StepResult::continued,"Controller creator gives the adapter real ownership of its output handle");
+    RadarSpriteBlip grounded{{120.f,-55.f,12.f},37,true,false};int controller_sets=0;
+    const auto read_controller=[&](int32_t handle)->std::optional<RadarSpriteBlip>{return handle==70?std::optional<RadarSpriteBlip>(grounded):std::nullopt;};
+    const auto set_controller=[&](int32_t handle,int32_t sprite){++controller_sets;return handle==70&&sprite==42;};
+    check(controller_adapter.recover_source_blip_sprites(controller_vm,read_controller,set_controller)==1 && controller_sets==1,"Stable controller locals recover contact identity; below-map Z is resolved by the native engine");
+    auto unsafe=controller;unsafe.bytes.resize(shared);op(unsafe.bytes,COMMAND_SET_LVAR_FLOAT);unsafe.bytes.push_back(12);arg_float(unsafe.bytes,999.f);op(unsafe.bytes,COMMAND_RETURN);unsafe.main_size=uint32_t(unsafe.bytes.size());
+    check(!radar_origin_detail::controller_coordinates(unsafe,local_creator,{0,1,2}),"A shared callee that overwrites a coordinate local invalidates the source proof");
     std::cout<<"PASS: native equivalents, real residency, converted named special-slot lifecycle and failed/missing resource rejection; gameExecuted=false\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -1,5 +1,7 @@
 #include <windows.h>
 #include "sa_hud.hpp"
+#include "sa_ui_draw.hpp"
+#include "sa_ui_radar.hpp"
 #include "lcs/native_memory.hpp"
 #include "ScriptCommands.h"
 #include <map>
@@ -21,6 +23,16 @@ uintptr_t native_entity_address(uintptr_t address){
     return memory+(address&0xFFF);
 }
 bool sa_executor_profile_matches(){return true;}
+// The isolated fixture has no RenderWare: the LCS UI layer is never ready here.
+bool sa_ui_ready(){return false;}
+bool sa_ui_apply_radar_sprites(){return false;}
+void sa_radar_frame(bool,float,float){}
+bool sa_ui_load(const std::filesystem::path&,std::string&){return false;}
+bool sa_ui_draw_glyphs(const std::vector<ui::GlyphQuad>&){return false;}
+bool sa_ui_draw_rect(float,float,float,float,ui::Rgba){return false;}
+bool sa_ui_screen(float&,float&){return false;}
+bool sa_ui_draw_weapon_icon(int,float,float,float,float,ui::Rgba){return false;}
+bool sa_ui_draw_sprite(const char*,float,float,float,float,ui::Rgba,float,float,float,float){return false;}
 void native_hud_add_clock(uint32_t offset,const char*,uint32_t type){
     auto& id=*reinterpret_cast<uint32_t*>(native_entity_address(0xBA1788));
     if(!id){id=offset;*reinterpret_cast<bool*>(native_entity_address(0xBA1788+0x38))=true;

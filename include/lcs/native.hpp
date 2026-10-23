@@ -1,5 +1,6 @@
 #pragma once
 #include "lcs/route_vehicle_native.hpp"
+#include "lcs/radar_sprites.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -385,6 +386,8 @@ public:
     // Original LCS radio replaces SA's radio audio (LcsRadio=1): script radio
     // commands then tune SA's station slots and seek the LCS station.
     bool lcs_radio=false;
+    // LcsHud: original radar sprites use the dedicated LCS-to-SA slot mapping.
+    bool unique_radar_sprites=false;
     std::function<void(int32_t station,int32_t seek_ms)> lcs_radio_position;
     using Executor=std::function<NativeResult(const NativeCall&)>;
     Executor execute;
@@ -433,6 +436,10 @@ public:
     explicit NativeAdapter(const ScmImage& image) : image_(image) {}
     // Failure cleanup removes only markers successfully created by this VM.
     bool release_script_markers();
+    // Repair owned blips restored from saves made with older sprite mappings.
+    // The reader/setter must validate the native handle generation before use.
+    size_t recover_source_blip_sprites(Vm&,const std::function<std::optional<RadarSpriteBlip>(int32_t)>& read,
+                                       const std::function<bool(int32_t,int32_t)>& set);
     void bind_model(int32_t lcs_id,int32_t sa_id,const std::string& lcs_name,ModelKind kind=ModelKind::object);
     void bind_named_model(int32_t sa_id,const std::string& lcs_name,ModelKind kind);
     bool named_special_characters=false;
