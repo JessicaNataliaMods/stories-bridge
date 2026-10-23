@@ -24,6 +24,8 @@ def digest(path):
 
 # ModelIndices.h IsExplosiveThingModel.
 EXPLOSIVE_THING_MODEL_NAMES = ('barrel4', 'petrolpump', 'washgaspump')
+# LCS-only model named for its explosive barrel; unverified against the LCS code.
+LCS_EXPLOSIVE_MODEL_NAMES = ('barrelexpos',)
 
 # The LCS and SA CollisionDamageEffect enums are not interchangeable. Effects
 # 1 and 3 in LCS request a damaged model; SA uses effect 1 for its damaged
@@ -144,6 +146,10 @@ def _translate_object_data(source_fields, runtime_name, native_fields=None,
             damage_effect = breakable_effect
     elif not (legacy_v2 or legacy_v3) and lcs_effect in LCS_BREAKABLE_EFFECTS:
         damage_effect = breakable_effect if breakable_effect is not None else 0
+    if explosive and not (legacy_v2 or legacy_v3) and not damage_effect:
+        # SA's ObjectDamage returns before any explosion when the damage effect
+        # is 0; its own explosive barrel and pumps use effect 20 (smash).
+        damage_effect = 20
     if not (legacy_v2 or legacy_v3) and source_fields[0].lower() == 'fire_hydrant' and not damage_effect:
         # SA's CObject::ObjectDamage returns before the FxSystem step when the
         # damage effect is 0. A model without a damaged atomic ignores effect 1's
@@ -338,7 +344,8 @@ def object_data_inputs(package, original, sa_objectdata=None,
     }
     explosive_aliases = {
         item[3]: item[2].lower() for item in all_bindings.values()
-        if item[2].lower() in EXPLOSIVE_THING_MODEL_NAMES
+        if item[2].lower() in (EXPLOSIVE_THING_MODEL_NAMES if (legacy_v2 or legacy_v3)
+                               else EXPLOSIVE_THING_MODEL_NAMES + LCS_EXPLOSIVE_MODEL_NAMES)
         and item[2].lower() in source_rows
     }
     placements = []

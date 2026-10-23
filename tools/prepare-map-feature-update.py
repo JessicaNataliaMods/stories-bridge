@@ -1,4 +1,4 @@
-﻿"""Stage map fixes over the exact current local package, preserving custom assets.
+"""Stage map fixes over the exact current local package, preserving custom assets.
 
 Unlike a campaign refresh, this never regenerates weapons, HUD, audio, paths,
 scripts or vehicles. The normal startup and package validators still apply.
@@ -159,7 +159,10 @@ def prepare(base, output, original, rom, names, asi, version, asset_cache=None, 
     physics = objects.mount(output, original, game/'data/object.dat',
         damaged_atomic_names=damage['damageAtomicBySourceModel'],
         breakable_names=damage['breakableBySourceModel'],
-        breakable_effects={name:200 for name in damage['breakableBySourceModel']})
+        # SA's generic break effect shatters a mesh per triangle, which is not
+        # what LCS does. Only the traffic light uses it, and there the runtime
+        # replaces the shatter with the original LCS pieces.
+        breakable_effects={name:200 for name in damage['breakableBySourceModel'] if name == 'trafficlight1'})
     effects = map_effects.mount(output, rom, names)
     campaign = json.loads((output/'metadata/campaign.json').read_text())
     campaign['mapDamage'] = dict(manifest='metadata/map-damage.json', sha256=map_effects.digest(output/'metadata/map-damage.json'))
