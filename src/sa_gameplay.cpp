@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <map>
 #include <cstddef>
+#include <cmath>
+#include <utility>
+#include <cstdio>
 namespace lcs {
 namespace {
 struct NativeAnimBlockLayout {
@@ -165,6 +168,58 @@ uintptr_t load_native(const char* path,const char* alias,int animations,int32_t*
     if(!owned)receipts.insert_or_assign(alias,AnimationReceipt{path,animations,after.block,after.index,after.range_start,after.range_count});
     last_animation_load_diagnostic.clear();*index=after.index;return after.block;
 }
+std::vector<std::string> gameplay_trace;
+// Sunken-ped watchdog. A ped standing idle whose centre is far below the surface under it (the engine keeps
+// centre = ground + ~1.0) was spawned inside the floor beyond what SA collision recovers. Logged; lifted once.
+struct PedSample {int32_t handle;uint16_t model;uint32_t state;float x,y,z;};
+int sample_ped(int32_t i,PedSample* out) {
+    __try {
+        const auto pool=*reinterpret_cast<const uintptr_t*>(0xB74490);if(!pool)return -1;
+        const auto objects=*reinterpret_cast<const uintptr_t*>(pool);const auto flags=*reinterpret_cast<const uintptr_t*>(pool+4);
+        const int32_t size=*reinterpret_cast<const int32_t*>(pool+8);if(!objects || !flags || size<=0 || size>1000 || i>=size)return -1;
+        const auto flag=*reinterpret_cast<const uint8_t*>(flags+i);if(flag&0x80)return 0;
+        const auto ped=objects+uintptr_t(i)*0x7C4;
+        if(ped==*reinterpret_cast<const uintptr_t*>(0xB7CD98))return 0; // never touch the player
+        const auto matrix=*reinterpret_cast<const uintptr_t*>(ped+0x14);if(!matrix)return 0;
+        out->handle=int32_t((i<<8)|(flag&0x7F));out->model=*reinterpret_cast<const uint16_t*>(ped+0x22);out->state=*reinterpret_cast<const uint32_t*>(ped+0x530);
+        out->x=*reinterpret_cast<const float*>(matrix+0x30);out->y=*reinterpret_cast<const float*>(matrix+0x34);out->z=*reinterpret_cast<const float*>(matrix+0x38);
+        return 1;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+}
+int32_t float_word(float v){int32_t r;std::memcpy(&r,&v,4);return r;}
+float word_float(int32_t v){float r;std::memcpy(&r,&v,4);return r;}
+struct SunkTrack {float x=0,y=0,z=0;int stable=0;bool handled=false;uint32_t seen=0;};
+std::map<int32_t,SunkTrack> sunk_tracks;
+uint32_t sunk_serial=0;int sunk_logged=0;
+void sunk_ped_watchdog() {
+    ++sunk_serial;PedSample ped;
+    for(int32_t i=0;i<1000;++i) {
+        const int got=sample_ped(i,&ped);if(got<0)break;if(!got)continue;
+        auto& track=sunk_tracks[ped.handle];track.seen=sunk_serial;
+        const bool still=std::fabs(ped.x-track.x)<0.1f && std::fabs(ped.y-track.y)<0.1f && std::fabs(ped.z-track.z)<0.05f;
+        track.x=ped.x;track.y=ped.y;track.z=ped.z;
+        if(ped.state!=1 || !still){track.stable=0;continue;}
+        if(track.handled || ++track.stable<3)continue;
+        // Surface at most 0.6 m above the centre: a healthy ped has it ~1.0 m below.
+        NativeCall query;query.opcode=0x02CE;query.inputs={float_word(ped.x),float_word(ped.y),float_word(ped.z+0.6f)};query.outputs=1;
+        const auto ground=execute_sa(query);if(!ground.executed)continue;
+        const float surface=word_float(ground.values[0]);
+        if(!std::isfinite(surface) || surface<=-99.0f || surface<=ped.z-0.55f || surface>ped.z+0.6f)continue;
+        const float expected=surface+1.0f;
+        std::string action="logged only";
+        if(expected-ped.z<=1.5f) {
+            NativeCall move;move.opcode=0x00A1;move.inputs={ped.handle,float_word(ped.x),float_word(ped.y),float_word(surface)};
+            action=execute_sa(move).executed ? "lifted to the surface" : "lift failed";
+        }
+        track.handled=true;
+        if(sunk_logged++<200 && gameplay_trace.size()<400) {
+            char text[320];snprintf(text,sizeof text,"Sunken ped: handle=%d model=%u pos=(%.2f,%.2f,%.2f) surface=%.2f below_expected=%.2f action=%s",
+                ped.handle,unsigned(ped.model),ped.x,ped.y,ped.z,surface,expected-ped.z,action.c_str());
+            gameplay_trace.push_back(text);
+        }
+    }
+    for(auto it=sunk_tracks.begin();it!=sunk_tracks.end();)it=it->second.seen!=sunk_serial?sunk_tracks.erase(it):std::next(it);
+}
 bool fade_owned(int32_t handle,uintptr_t hierarchy) {
 #ifdef LCS_GAMEPLAY_ANIMATION_FADE
     return LCS_GAMEPLAY_ANIMATION_FADE(handle,hierarchy);
@@ -308,6 +363,7 @@ NativeGameplayAnimations::NativeGameplayAnimations(const std::filesystem::path& 
         riot_names_[i]=found->name; // Preserve actual original archive spelling.
     }
 }
+std::vector<std::string> take_gameplay_animation_trace(){return std::exchange(gameplay_trace,{});}
 NativeGameplayAnimations::~NativeGameplayAnimations() {
     if(!sa_executor_profile_matches())return;
     for(const auto& pose:poses_)fade_owned(pose.first,pose.second.hierarchy);
@@ -406,14 +462,17 @@ bool NativeGameplayAnimations::play(int32_t actor,int32_t state,int32_t duration
     if(!requested_.count(gesture->second.logical_block))return false;
     const auto control=sa_char_in_control(actor);if(!control)return false;if(!*control)return true;
     if(!clear(actor))return false;
-    const auto hierarchy=play_native(actor,blocks_.at(gesture->second.block).native,gesture->second.animation.c_str(),uint16_t(gesture->second.flags | (repeat?2:0)));
+    const uint16_t play_flags=uint16_t(gesture->second.flags | (repeat?2:0));
+    const auto hierarchy=play_native(actor,blocks_.at(gesture->second.block).native,gesture->second.animation.c_str(),play_flags);
     if(!hierarchy)return false;
     // Only standard wait states use the script timeout. Nonstandard mission
     // gestures keep the original association's fade/freeze/loop lifetime.
-    poses_[actor]={hierarchy,state<36 && duration>=0,now_+uint32_t(std::max(duration,0))};return true;
+    poses_[actor]={hierarchy,state<36 && duration>=0,now_+uint32_t(std::max(duration,0)),state,now_+1000};
+    return true;
 }
 bool NativeGameplayAnimations::tick(uint32_t now) {
     now_=now;
+    if(int32_t(now-next_sunk_check_)>=0){next_sunk_check_=now+1000;sunk_ped_watchdog();}
     for(auto riot=riots_.begin();riot!=riots_.end();) {
         const auto actor=riot->first;auto& pose=riot->second;
         const auto status=riot_status(actor,pose.hierarchy,pose.cycle.expired(now));

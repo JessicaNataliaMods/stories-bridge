@@ -1370,6 +1370,7 @@ struct Campaign {
             if(corona_pending)return {};
         }
         if(gameplay_animations)frame_updates.run("gesture-expiry",lcs::UpdateScope::auxiliary,now,"Cannot release an expired mission wait gesture",[&](){return gameplay_animations->tick(now);});
+        for(const auto& line:lcs::take_gameplay_animation_trace())log(line);
         frame_updates.run("threat-scanner-ranges",lcs::UpdateScope::auxiliary,now,"Cannot update native threat scanner radii",lcs::sa_tick_threat_ranges);
         frame_updates.run("dialogue-input",lcs::UpdateScope::auxiliary,now,"Cannot read native dialogue input",[&](){
             const auto skip=lcs::execute_sa({0x00E2,{0,16},{},0,1});if(!skip.executed)return false;

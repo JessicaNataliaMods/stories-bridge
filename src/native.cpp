@@ -3253,6 +3253,21 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         if(!request.executed || !loaded.executed){thread.diagnostic="Native mission entity model request failed";return StepResult::unsupported;}
         if(!loaded.condition){thread.ip=thread.last_ip;thread.diagnostic="Waiting for original mission entity model";return StepResult::yielded;}
     }
+    if(opcode==COMMAND_CREATE_CHAR && call.inputs.size()>=5) {
+        // LCS resolves a ped spawned slightly inside the floor through its own collision. The SA engine only
+        // recovers small offsets (the converted map sits ~0.4 m above the LCS floor); a larger one leaves the
+        // ped stuck below the floor. Spawn on the surface just above the requested Z instead (never lowers).
+        const float z=bits_float(call.inputs[4]);
+        if(std::isfinite(z) && z>-99.0f) {
+            const auto ground=execute({0x02CE,{call.inputs[2],call.inputs[3],float_bits(z+1.0f)},{},0,1});
+            const float surface=ground.executed ? bits_float(ground.values[0]) : z;
+            if(std::isfinite(surface) && surface>z && surface<=z+1.0f) {
+                call.inputs[4]=float_bits(surface);
+                try {if(diagnostic_event)diagnostic_event("CREATE_CHAR spawn lifted to the floor: x="+std::to_string(bits_float(call.inputs[2]))+" y="+std::to_string(bits_float(call.inputs[3]))+
+                    " z="+std::to_string(z)+" -> "+std::to_string(surface));}catch(...){}
+            }
+        }
+    }
     if(opcode==COMMAND_SWAP_NEAREST_BUILDING_MODEL) {
         bool ready=true;
         for(const auto index:{4,5}) {
