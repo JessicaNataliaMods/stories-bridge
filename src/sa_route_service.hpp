@@ -1615,6 +1615,15 @@ public:
             if(effect.executed && effect.native_entered) {
                 const auto epoch=effect.accepted_script_task?sa_owned_vehicle_entry_epoch(*effect.accepted_script_task,*actor):std::nullopt;
                 if(!epoch) {
+                    // SA accepted the entry (or found it already running) but no private task epoch can be proven.
+                    // A mission script keeps the strict rule. An ambient script (ambtaxi, pedestrians hailing a
+                    // taxi...) must not be suspended for good because of missing cleanup tracking: the entry is
+                    // real and never replayed, only its ownership record is absent, and the script itself polls
+                    // IS_CHAR_IN_CAR for the result.
+                    if(!call.mission_context) {
+                        last_diagnostic_="Ambient script entry accepted without private ownership; continued untracked, never replayed";
+                        return effect;
+                    }
                     effect.executed=false;
                     effect.diagnostic="Native script entry accepted without provable private ownership; replay forbidden";
                     return effect;

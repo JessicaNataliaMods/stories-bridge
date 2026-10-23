@@ -2171,6 +2171,7 @@ bool install_hook() {
         hand.aimAxis=number(L"HandAimAxis",0);hand.blendPercent=number(L"HandAimBlendPercent",50);
         hand.maxDeviationDegrees=number(L"HandAimMaxDeviationDegrees",20);
         hand.blendInMs=number(L"HandAimBlendInMs",150);hand.blendOutMs=number(L"HandAimBlendOutMs",350);
+        hand.rollDegrees=number(L"HandAimRollDegrees",0);hand.uprightAxis=number(L"HandAimUprightAxis",2);
         lcs::sa_hand_aim_set_logger([](const char* message){log(message);});
         std::string hand_message;
         const bool hand_ok=lcs::sa_hand_aim_install(hand,hand_message);

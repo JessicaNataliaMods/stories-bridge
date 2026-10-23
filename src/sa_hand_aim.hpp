@@ -19,6 +19,8 @@ struct HandAimConfig {
     int aimAxis=0;                      // 0 forearm line, 1 hand axis from the aim IK, 2 blend
     int blendPercent=50,maxDeviationDegrees=20;
     int blendInMs=150,blendOutMs=350;
+    int rollDegrees=0;                  // extra roll about the forward axis, -180..180 (weapons whose model is turned in the hand)
+    int uprightAxis=2;                  // hand axis kept vertical: 1 = hand.up, 2 = hand.at
 };
 void sa_hand_aim_set_logger(void(*callback)(const char*));   // optional diagnostics
 // False when the executable is not SA 1.0 US or no ped vtable could be hooked; nothing is changed then.

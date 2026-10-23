@@ -225,10 +225,29 @@ bool CorrectHand(PedState* st,RpHAnimHierarchyLite* h,int hand01,int boneFore,in
     Vec3 vertical=ProjectPerpendicular(V(0,0,1),newR);
     if(Dot(vertical,vertical)<1e-6f)return false;
     vertical=NormalizeOr(vertical,V(0,0,1));
-    if(st->lockedSign[hand01]==0)st->lockedSign[hand01]=Dot(oldA,vertical)<0.0f?-1:1;
-    Vec3 newA=Mul(vertical,float(st->lockedSign[hand01]));
-    Vec3 newU=NormalizeOr(Mul(Cross(newA,newR),handed),oldU);
-    newA=NormalizeOr(Mul(Cross(newR,newU),handed),vertical);
+    const Vec3 oldUpright=cfg.uprightAxis==1?oldU:oldA;
+    if(st->lockedSign[hand01]==0){
+        st->lockedSign[hand01]=Dot(oldUpright,vertical)<0.0f?-1:1;
+        // The roll of the vanilla pose is near 90 degrees, so this sign is decided by small numbers: log them.
+        Log("Hand aim: hand %d first frame dot(up,vertical)=%.2f dot(at,vertical)=%.2f dot(right,arm)=%.2f sign=%d",hand01,
+            Dot(oldU,vertical),Dot(oldA,vertical),Dot(oldR,armDir),st->lockedSign[hand01]);
+    }
+    Vec3 newA,newU;
+    const Vec3 upright=Mul(vertical,float(st->lockedSign[hand01]));
+    if(cfg.uprightAxis==1){     // hand.up is the vertical axis; hand.at completes the basis
+        newU=upright;
+        newA=NormalizeOr(Mul(Cross(newR,newU),handed),oldA);
+        newU=NormalizeOr(Mul(Cross(newA,newR),handed),upright);
+    }else{                      // hand.at is the vertical axis; hand.up completes the basis
+        newA=upright;
+        newU=NormalizeOr(Mul(Cross(newA,newR),handed),oldU);
+        newA=NormalizeOr(Mul(Cross(newR,newU),handed),upright);
+    }
+    if(cfg.rollDegrees!=0){
+        const float rad=float(cfg.rollDegrees)*0.017453292519943295f*(hand01?-1.0f:1.0f);
+        const float s=std::sin(rad),c=std::cos(rad);
+        newU=RotateVec(newU,newR,s,c);newA=RotateVec(newA,newR,s,c);
+    }
     if(!Finite3(newR) || !Finite3(newU) || !Finite3(newA))return false;
 
     // Strength: the entering/leaving ramp times a fade while the arm hangs nearly vertical (rest pose, walking
@@ -386,6 +405,8 @@ bool sa_hand_aim_install(const HandAimConfig& config,std::string& diagnostic){
     cfg.maxDeviationDegrees=cfg.maxDeviationDegrees<0?0:(cfg.maxDeviationDegrees>90?90:cfg.maxDeviationDegrees);
     cfg.blendInMs=cfg.blendInMs<0?0:(cfg.blendInMs>2000?2000:cfg.blendInMs);
     cfg.blendOutMs=cfg.blendOutMs<0?0:(cfg.blendOutMs>2000?2000:cfg.blendOutMs);
+    cfg.rollDegrees=cfg.rollDegrees<-180?-180:(cfg.rollDegrees>180?180:cfg.rollDegrees);
+    cfg.uprightAxis=cfg.uprightAxis==1?1:2;
 
     int hooked=0,chained=0;
     for(int i=0;i<vtable_count;++i){
