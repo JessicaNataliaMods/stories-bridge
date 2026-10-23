@@ -109,7 +109,7 @@ def _translate_object_data(source_fields, runtime_name, native_fields=None,
         raise ValueError(f'Unsupported legacy ObjectData translation: {legacy_version}')
     if breakable_effect is not None:
         breakable_effect = int(breakable_effect)
-        if lcs_effect not in LCS_BREAKABLE_EFFECTS:
+        if lcs_effect not in LCS_BREAKABLE_EFFECTS and lcs_effect != 3:
             raise ValueError('SA fragment effect supplied for non-breakable LCS effect')
         if breakable_effect not in SA_FRAGMENT_EFFECTS:
             raise ValueError(f'Unsupported SA fragment effect: {breakable_effect}')
@@ -125,6 +125,10 @@ def _translate_object_data(source_fields, runtime_name, native_fields=None,
         damage_effect = 1 if damaged_atomic_available else 0
     elif not (legacy_v2 or legacy_v3) and lcs_effect in (1, 3):
         damage_effect = 1 if damaged_atomic_available else 0
+        if lcs_effect == 3 and not damaged_atomic_available and breakable_effect is not None:
+            # LCS smashes a traffic light; without a damaged atomic the SA
+            # breakable fragments are the nearest generated equivalent.
+            damage_effect = breakable_effect
     elif not (legacy_v2 or legacy_v3) and lcs_effect in LCS_BREAKABLE_EFFECTS:
         damage_effect = breakable_effect if breakable_effect is not None else 0
 
@@ -154,6 +158,9 @@ def _translate_object_data(source_fields, runtime_name, native_fields=None,
 
     if explosive:
         suffix = ('1', '2', '0.0', '0.0', '0.0', 'explosion_medium')
+    elif not (legacy_v2 or legacy_v3) and source_fields[0].lower() == 'fire_hydrant':
+        # SA FX_TYPE 1 plays the named FxSystem when the object is hit.
+        suffix = ('0', '1', '0.0', '0.0', '0.0', 'water_hydrant')
     else:
         suffix = ('0', '0', '0.0', '0.0', '0.0', 'none')
     return (runtime_name, *source_fields[1:8], str(damage_effect),
@@ -374,7 +381,7 @@ def object_data_inputs(package, original, sa_objectdata=None,
         if source_fields is None:
             continue
         source_effect = _integer_field(source_fields, 8, 'collision damage effect')
-        if source_effect in LCS_BREAKABLE_EFFECTS:
+        if source_effect in LCS_BREAKABLE_EFFECTS or source_effect == 3:
             breakable_candidates[source_name] = alias
     supported_breakable_source_names = {
         name for name, alias in breakable_candidates.items()

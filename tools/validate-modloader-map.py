@@ -327,6 +327,11 @@ def validate_campaign(package, map_report):
             if not required.issubset({row['executable'] for row in proof['checks'] if row['passed']}) or \
                 (campaign.get('version',0)<90 and not any(row['relative']=='metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin' for row in proof['inputs'])):
                 raise ValueError('Finale startup checks or authenticated input missing')
+        if campaign.get('version',0)>=116:
+            expected_checks+=3
+            required={'lcs-weapon-audio-tests.exe','lcs-vehicle-audio-tests.exe','lcs-interface-audio-tests.exe'}
+            if not required.issubset({row['executable'] for row in proof['checks'] if row['passed']}):
+                raise ValueError('LCS weapon/vehicle/interface audio checks missing')
         if campaign.get('version',0)>=94:
             expected_checks+=1
         if campaign.get('version',0)>=92:
@@ -404,6 +409,7 @@ def validate_campaign(package, map_report):
             if campaign.get('version',0)>=90:required_outputs.add('lcs-ps2-audio-source-tests.log')
             if campaign.get('version',0)>=92:required_outputs.add('lcs-radio-tests.log')
             if campaign.get('version',0)>=94:required_outputs.add('weapon-slot-contracts.log')
+            if campaign.get('version',0)>=116:required_outputs.update(('lcs-weapon-audio-tests.log','lcs-vehicle-audio-tests.log','lcs-interface-audio-tests.log'))
             if {row['output'] for row in proof['checks']}!=required_outputs:raise ValueError('Campaign regression proof outputs do not match required checks')
         for row in proof['inputs']:
             if digest(package/row['relative'])!=row['sha256']:raise ValueError('Campaign startup input changed: '+row['relative'])

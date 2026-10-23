@@ -1,4 +1,4 @@
-"""Stage map fixes over the exact current local package, preserving custom assets.
+﻿"""Stage map fixes over the exact current local package, preserving custom assets.
 
 Unlike a campaign refresh, this never regenerates weapons, HUD, audio, paths,
 scripts or vehicles. The normal startup and package validators still apply.
@@ -140,7 +140,7 @@ def prepare(base, output, original, rom, names, asi, version, asset_cache=None, 
         source_id, runtime_id, source_name, alias = line.split('\t')
         model_records[int(source_id)] = dict(name=alias)
     source_rows = objects.read_object_data(original/'DATA/OBJECT.DAT', 11)
-    fragment_sources = {name for name, row in source_rows.items() if int(row[8]) in (50, 60, 70, 80, 100)}
+    fragment_sources = {name for name, row in source_rows.items() if int(row[8]) in (3, 50, 60, 70, 80, 100)}
     with tempfile.TemporaryDirectory(prefix='.map-damage-', dir=output) as temporary:
         assets = Path(temporary)
         selected = {row['name'].lower()+'.dff' for model_id, row in model_records.items()

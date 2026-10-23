@@ -148,6 +148,7 @@ std::filesystem::path pending_native_save;
 std::unique_ptr<lcs::SaWorldPreview> world_preview;
 lcs::SaMapTrafficLights map_traffic_lights;
 ScriptProcess original_map_lights=nullptr;
+uint64_t map_light_calls=0;
 // Original ADD_POINT keeps its previous location process-wide across scripts.
 lcs::ScriptMarkers::ProcessState marker_process;
 std::unique_ptr<lcs::SaPlayerSkins> player_skins;
@@ -1614,7 +1615,7 @@ void retire_campaign_world() {
     // alone is insufficient: LOAD/New Game can clear and set it again between
     // two Process callbacks, retaining stale handles and a halted VM otherwise.
     campaign.reset();
-    world_preview.reset();map_traffic_lights=lcs::SaMapTrafficLights{};player_skins.reset();gameplay_skins.reset();
+    world_preview.reset();map_traffic_lights.release_native_slot();map_traffic_lights=lcs::SaMapTrafficLights{};player_skins.reset();gameplay_skins.reset();
     reported_fast_vehicles.clear();
     last_lane_sample=0;road_switches_reported=false;
     bindings.clear();equivalent_bindings.clear();marker_process={};
@@ -1702,6 +1703,8 @@ void observe_world() {
                 world_preview=std::make_unique<lcs::SaWorldPreview>(std::filesystem::path(directory));
                 if(!map_traffic_lights.configure(std::filesystem::path(directory)/L"model-bindings.tsv"))
                     throw std::runtime_error("Cannot resolve converted traffic-light model identity");
+                log(map_traffic_lights.bind_native_slot()?"Converted traffic light registered in SA's native signal model table; native phase lights active":
+                    "Converted traffic light could not be registered in SA's native signal model table");
                 log("Original island/atomic LOD ranges active; source physical buildings use normal collision sectors; CULLNONE at converted atomic draw callbacks (including road pass)");
             }
             if(setting(L"Mode")==L"Campaign" || setting(L"Mode")==L"FirstMission") {
@@ -1722,6 +1725,14 @@ void observe_world() {
         if(!signal_pass_reported && map_traffic_lights.signal_passes()) {
             log("Converted traffic-light native effects pass observed; source LCS corona parameters and native SA phase active");
             signal_pass_reported=true;
+        }
+        static ULONGLONG signal_seen_at=0;static int signal_diag_logs=0;
+        if(!signal_seen_at)signal_seen_at=GetTickCount64();
+        if(signal_diag_logs<2 && GetTickCount64()-signal_seen_at>=(signal_diag_logs?30000ULL:8000ULL)) {
+            log("Converted traffic-light pass: hookCalls="+std::to_string(map_light_calls)+" configuredModel="+
+                std::to_string(map_traffic_lights.model_id())+" chained=0x"+[]{char c[16];std::snprintf(c,sizeof(c),"%X",unsigned(reinterpret_cast<uintptr_t>(original_map_lights)));return std::string(c);}()+
+                " "+map_traffic_lights.diagnostic());
+            ++signal_diag_logs;
         }
         static bool draw_reported=false;
         if(!draw_reported && world_preview->double_sided_draws()) {
@@ -2296,6 +2307,7 @@ bool install_campaign_storage() {
     return save && load && lcs::sa_campaign_save_hooks_ready();
 }
 void __fastcall on_map_lights(void* entity,void*) {
+    if(map_light_calls!=UINT64_MAX)++map_light_calls;
     if(!map_traffic_lights.process_entity(reinterpret_cast<uintptr_t>(entity),reinterpret_cast<uintptr_t>(original_map_lights)))
         reinterpret_cast<void(__thiscall*)(void*)>(original_map_lights)(entity);
 }
