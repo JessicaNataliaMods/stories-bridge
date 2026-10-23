@@ -375,3 +375,36 @@ def retarget_anpk(data):
         at = after_dgan
     payload = b''.join(out)[8:]
     return _pack(b'ANPK', payload) + data[_section(data, 0)[3]:], rewritten
+
+
+# ------------------------------------------------ seat height of lowered spawns
+# The original spawns some seated characters lower than a standing one (the pose
+# keys no root translation) and lets its own collision rest them there. SA's
+# physics always stands a ped 1.0 m above the floor, so those poses hang in the
+# air. The drop (metres, original script difference between a standing and the
+# seated spawn Z) is keyed on the root instead.
+SPAWN_DROPS = {'VIC4_crate_idle': 0.35}
+
+
+def lower_root(record, drop):
+    """An original NAME+DGAN record whose Root sequence (rotation only) also keys a
+    constant translation (0, 0, -drop). Every other sequence stays byte-exact."""
+    name_tag, nb, ne, after_name = _section(record, 0)
+    dgan_tag, db, de, after_dgan = _section(record, after_name)
+    if name_tag != b'NAME' or dgan_tag != b'DGAN' or after_dgan != len(record):
+        raise ValueError('Not a NAME/DGAN record')
+    info, sequences = _anpk_sequences(record[db:de])
+    body, changed = info, 0
+    for anim, keys_tag, payload, bone in sequences:
+        if bone_id(bone) == 0 and keys_tag == b'KR00':
+            rows = b''
+            for i in range(len(payload) // 20):
+                x, y, z, w, t = struct.unpack_from('<5f', payload, 20 * i)
+                rows += struct.pack('<8f', x, y, z, w, 0.0, 0.0, -drop, t)
+            body += _pack(b'CPAN', _pack(b'ANIM', anim) + _pack(b'KRT0', rows))
+            changed += 1
+        else:
+            body += _pack(b'CPAN', _pack(b'ANIM', anim) + (_pack(keys_tag, payload) if keys_tag else b''))
+    if changed != 1:
+        raise ValueError('Expected exactly one rotation-only Root sequence')
+    return record[:after_name] + _pack(b'DGAN', body)

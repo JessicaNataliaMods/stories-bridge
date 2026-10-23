@@ -5,6 +5,8 @@ Logical gesture groups stay in the fifth index column to preserve LOAD/UNLOAD.
 """
 import hashlib, json, pathlib, shutil, struct
 
+import lcs_ifp
+
 def digest(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -65,6 +67,10 @@ def prepare(gestures, named, output):
         source_files.append(dict(alias=alias, path=str(path.resolve()), sha256=digest(path)))
     if not 1 <= len(combined) <= 256:
         raise ValueError('Gesture bundle exceeds parser/native limits')
+    for label, drop in lcs_ifp.SPAWN_DROPS.items():
+        if label not in combined:
+            raise ValueError('Seat-height animation missing from the gesture bundle: ' + label)
+        combined[label] = lcs_ifp.lower_root(combined[label], drop)
     output.mkdir(parents=True)
     payload = pack(b'INFO', struct.pack('<I', len(combined))+b'LG00\0')
     payload += b''.join(combined.values())

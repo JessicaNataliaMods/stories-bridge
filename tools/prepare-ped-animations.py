@@ -44,6 +44,11 @@ ALIASES = {
 TIMED_BY_SA = re.compile(r'(car_|bike_|drive|kart_|seat_|train_|door_|jump_|fall_|ev_)', re.IGNORECASE)
 
 
+# Same name, different meaning: in the air SA flails (FALL_fall) where the original tumbles
+# (seen in game as the ped rolling mid-air), so these stay SA data.
+KEEP_SA = {'FALL_fall', 'FALL_glide', 'JUMP_glide'}
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -63,6 +68,8 @@ def build(original_bytes, sa_bytes):
             if ALIASES[name].lower() not in by_lower:
                 raise ValueError('Alias target missing from the original block: ' + ALIASES[name])
             name_map[name] = ('ped', by_lower[ALIASES[name].lower()])
+    for name in KEEP_SA:
+        name_map.pop(name, None)
     data, report = lcs_ifp.convert_block(sa_bytes, {'ped': original_bytes}, name_map, add_original_only=True,
                                           keep_sa_length=lambda name: bool(TIMED_BY_SA.match(name)))
     check_block, converted = weapon_animations.read_anp3(data)
