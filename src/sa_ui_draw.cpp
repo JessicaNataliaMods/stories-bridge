@@ -40,7 +40,8 @@ bool ready=false,faulted=false;
 std::filesystem::path weapons_directory;
 // SA weapon type -> weapon model TXD and the icon texture inside it (the original
 // LCS model name), as mounted by tools/weapon_slots.py. Types without a row (flowers,
-// cane, shovel, pool cue, spray can, extinguisher...) have no LCS icon.
+// cane, shovel, pool cue, spray can, extinguisher...) have no LCS icon. An empty file
+// takes the texture from the LCS hud.txd instead (the detonator icon is gren_rem).
 struct WeaponIcon {int type;const char* file;const char* texture;};
 constexpr WeaponIcon weapon_icons[]={
     {1,"brassknuckle","brassknuckle"},{2,"golfclub","hockeystick"},{3,"nitestick","nitestick"},{4,"knifecur","knifecur"},
@@ -50,7 +51,7 @@ constexpr WeaponIcon weapon_icons[]={
     {25,"chromegun","chromegun"},{26,"sawnoff","buddyshot"},{27,"shotgspa","shotgspa"},{28,"micro_uzi","uzi"},
     {29,"mp5lng","mp5k"},{30,"ak47","ak47"},{31,"m4","m4"},{32,"tec9","tec9"},{33,"cuntgun","m60"},
     {34,"sniper","sniper"},{35,"rocketla","rocketla"},{36,"rocketla","rocketla"},{37,"flame","flame"},
-    {38,"minigun","minigun"},{39,"satchel","bomb"},{40,"satchel","detonator"},{43,"camera","camera"}};
+    {38,"minigun","minigun"},{39,"satchel","bomb"},{40,"","gren_rem"},{43,"camera","camera"}};
 std::map<int,void*> weapon_textures;       // loaded icon per type (nullptr: unavailable)
 std::map<std::string,void*> weapon_dictionaries;
 template<class Call> bool guarded(Call const& call){__try{call();return true;}__except(EXCEPTION_EXECUTE_HANDLER){return false;}}
@@ -177,6 +178,7 @@ void* weapon_icon_texture(int type){
     void* texture=nullptr;
     for(const auto& row:weapon_icons){
         if(row.type!=type)continue;
+        if(!*row.file){texture=find_named(hud_dictionary,row.texture);if(!raster_of(texture))texture=nullptr;break;}
         auto dictionary=weapon_dictionaries.find(row.file);
         if(dictionary==weapon_dictionaries.end())
             dictionary=weapon_dictionaries.emplace(row.file,load_dictionary(weapons_directory/(std::string(row.file)+".txd"))).first;

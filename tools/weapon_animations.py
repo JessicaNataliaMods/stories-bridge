@@ -38,6 +38,14 @@ BLOCKS = {
 }
 
 
+# Animations whose conversion is verified in game. Empty on purpose: copying the
+# LCS local rotations onto the SA skeleton leaves forearms/hands 80-130 degrees
+# off the SA aim pose (python_fire, UZI_fire), so guns aimed sideways/down and
+# the fire tracks locked the legs. The SA animations stay until a retargeting
+# step (per-bone rest-pose correction) exists and is checked against the game.
+VERIFIED = frozenset()
+
+
 def _padded(size):
     return (size + 3) & ~3
 
@@ -119,15 +127,32 @@ def _int16(value, scale):
     return max(-32768, min(32767, int(round(value * scale))))
 
 
-def convert_animation(name, sequences):
+def anp3_bone_ids(raw):
+    """Bone ids animated by one raw ANP3 animation record."""
+    objects = struct.unpack_from('<I', raw, 24)[0]
+    cursor, ids = 36, set()
+    for _ in range(objects):
+        kind, frames, bone_id = struct.unpack_from('<IIi', raw, cursor + 24)
+        ids.add(bone_id)
+        cursor += 36 + frames * (10 if kind == 3 else 16)
+    return ids
+
+
+def convert_animation(name, sequences, allowed=None):
     """One original ANPK animation as SA ANP3 bytes: quaternion conjugate
     (ANPK stores it negated), x4096; time in 1/60 s; translation x1024 only on
-    the root, as other original translations carry LCS bone lengths."""
+    the root, as other original translations carry LCS bone lengths.
+    allowed: bone ids of the SA animation being replaced. SA fires and reloads
+    standing animations on the upper body only (partial blend), so the walk
+    cycle keeps driving the legs while aiming; the LCS ones also key the
+    root, pelvis and legs, which froze the player in place."""
     objects, frame_bytes = [], 0
     for bone, kind, frames in sequences:
         if bone.lower() not in BONES:
             continue  # prop nodes (FLAME_fire animates 'chnsaw'); SA peds have no such node
         bone_id = BONES[bone.lower()]
+        if allowed is not None and bone_id not in allowed:
+            continue
         translated = bone_id == 0 and kind in ('KRT0', 'KRTS')
         packed = b''
         for frame in frames:
@@ -157,9 +182,9 @@ def rebuild_block(sa_block, originals):
         raise ValueError('SA block lacks mapped animations: ' + ', '.join(sorted(missing)))
     rebuilt, replaced = [], []
     for name, raw in animations:
-        if name in mapping:
+        if name in mapping and name in VERIFIED:
             source_block, source_name = mapping[name]
-            raw = convert_animation(name, parsed[source_block][source_name])
+            raw = convert_animation(name, parsed[source_block][source_name], anp3_bone_ids(raw))
             replaced.append(name)
         rebuilt.append((name, raw))
     return write_anp3(block, rebuilt), replaced
