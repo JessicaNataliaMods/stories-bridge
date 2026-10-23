@@ -52,6 +52,19 @@ LEGACY_V3_OBJECT_DAMAGE_EFFECTS = {
     0: 0, 1: 0, 3: 0, 50: 20, 60: 20, 70: 20, 80: 20, 100: 200,
 }
 LCS_BREAKABLE_EFFECTS = (50, 60, 70, 80, 100)
+
+# The pieces an LCS traffic light breaks into have no ObjectData row of their
+# own; SA's default row would make them immovable (mass 99999). The runtime
+# creates them as ordinary physical objects, so they get light, free-moving
+# physics. Fields: name, mass, turn mass, air resistance, elasticity, percent
+# submerged, uproot limit, damage multiplier, damage effect, special response,
+# camera avoidance.
+SIGNAL_DEBRIS_OBJECT_ROWS = {
+    'tlight_post': ('tlight_post', '80.0', '500.0', '0.99', '0.1', '50.0', '0.0', '1.0', '0', '0', '0'),
+    'tlight_box1': ('tlight_box1', '25.0', '20.0', '0.99', '0.1', '50.0', '0.0', '1.0', '0', '0', '0'),
+    'tlight_box2': ('tlight_box2', '25.0', '20.0', '0.99', '0.1', '50.0', '0.0', '1.0', '0', '0', '0'),
+    'tlight_walk': ('tlight_walk', '15.0', '10.0', '0.99', '0.1', '50.0', '0.0', '1.0', '0', '0', '0'),
+}
 SA_FRAGMENT_EFFECTS = (200, 202)
 
 
@@ -131,6 +144,11 @@ def _translate_object_data(source_fields, runtime_name, native_fields=None,
             damage_effect = breakable_effect
     elif not (legacy_v2 or legacy_v3) and lcs_effect in LCS_BREAKABLE_EFFECTS:
         damage_effect = breakable_effect if breakable_effect is not None else 0
+    if not (legacy_v2 or legacy_v3) and source_fields[0].lower() == 'fire_hydrant' and not damage_effect:
+        # SA's CObject::ObjectDamage returns before the FxSystem step when the
+        # damage effect is 0. A model without a damaged atomic ignores effect 1's
+        # render state, so it only lets the hit play the hydrant's water FX.
+        damage_effect = 1
 
     if (legacy_v2 or legacy_v3) and lcs_effect and native_fields is not None and \
             (legacy_v2 or lcs_effect not in (1, 3)):
@@ -296,6 +314,9 @@ def object_data_inputs(package, original, sa_objectdata=None,
     proving an installed runtime consumer for the selected SA effect.
     """
     source_rows = read_object_data(Path(original)/'DATA/OBJECT.DAT', 11)
+    if not (legacy_v2 or legacy_v3):
+        for debris_name, debris_row in SIGNAL_DEBRIS_OBJECT_ROWS.items():
+            source_rows.setdefault(debris_name, debris_row)
     native_path = resolve_native_object_data(package, sa_objectdata)
     native_rows = read_object_data(native_path, 13) if native_path else {}
 
@@ -356,9 +377,17 @@ def object_data_inputs(package, original, sa_objectdata=None,
     for item in all_bindings.values():
         source_name, alias = item[2].lower(), item[3].lower()
         source_fields = source_rows.get(source_name)
+        has_damage_atomic = source_name in supplied_damage_names or alias in supplied_damage_names
+        if not (legacy_v2 or legacy_v3) and has_damage_atomic:
+            # Every DFF that carries a `_dam` atomic needs SA's damage-atomic
+            # model class (IDE bit 0x1000): the DFF loader calls
+            # SetDamagedAtomic on it unconditionally and faults on any other
+            # class, whatever the model's ObjectData damage effect is.
+            supported_source_names.add(source_name)
+            continue
         if source_fields is None or _integer_field(source_fields, 8, 'collision damage effect') not in (1, 3):
             continue
-        if source_name in supplied_damage_names or alias in supplied_damage_names:
+        if has_damage_atomic:
             supported_source_names.add(source_name)
         else:
             unsupported_source_names.add(source_name)
@@ -452,11 +481,14 @@ def object_data_inputs(package, original, sa_objectdata=None,
                 breakable_effect=normalized_breakable_effects.get(source_name))
         output_rows.append(', '.join(translated))
         object_aliases.append(alias)
-        if translated[8] == '1':
+        if translated[8] == '1' and source_name != 'fire_hydrant' and legacy_mode:
             damage_required_aliases.append(alias)
         if translated[8] in ('200', '202') and source_name in breakable_candidates:
             breakable_required_aliases.append(alias)
     output_rows.append('*')
+    if not legacy_mode:
+        damage_required_aliases = sorted(
+            item[3] for item in all_bindings.values() if item[2].lower() in supported_source_names)
     if len({alias.lower() for alias in object_aliases}) != len(object_aliases):
         raise ValueError('Duplicate runtime map ObjectData alias')
     if not set(used).issubset(object_aliases):

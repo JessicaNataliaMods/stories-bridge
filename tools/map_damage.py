@@ -41,20 +41,29 @@ def _atomic_names(converter, source_dff):
 
 
 def _source_damage(row):
-    """Return a reason when source metadata does not prove atomic 1 damaged."""
+    """Return a reason when source metadata does not prove the last atomic damaged.
+
+    Two atomics: draw distances must not increase. Three atomics: the middle
+    one must be a farther LOD (larger distance) and the last one nearer than
+    the near atomic, which is how a damaged mesh is told apart from a LOD.
+    """
     if row.get('type') not in (1, 3):
         return 'source row is not an object or time object'
     if row.get('flags', 0) & 0x10:
         return 'source model is marked as an LOD'
-    if row.get('atomics') != 2:
-        return 'source model does not declare exactly two atomics'
+    count = row.get('atomics')
+    if count not in (2, 3):
+        return 'source model does not declare two or three atomics'
     distances = row.get('draw')
-    if not isinstance(distances, (tuple, list)) or len(distances) < 2:
-        return 'source model lacks two draw distances'
-    if any(not math.isfinite(float(value)) for value in distances[:2]):
+    if not isinstance(distances, (tuple, list)) or len(distances) < count:
+        return 'source model lacks its draw distances'
+    if any(not math.isfinite(float(value)) for value in distances[:count]):
         return 'source model has nonfinite draw distances'
-    if float(distances[0]) < float(distances[1]):
-        return 'source draw distances do not mark atomic 1 as damaged'
+    if count == 2:
+        if float(distances[0]) < float(distances[1]):
+            return 'source draw distances do not mark atomic 1 as damaged'
+    elif not (float(distances[1]) > float(distances[0]) and float(distances[2]) <= float(distances[0])):
+        return 'source draw distances do not mark atomic 2 as damaged beyond a far LOD'
     return None
 
 
@@ -223,12 +232,13 @@ def export_damage(game, models, assets, streamed_source, converter, lighting,
             continue
         try:
             atomic_names = _atomic_names(converter, source_dff)
-            if len(atomic_names) != 2:
-                raise ValueError('streamed source DFF does not contain exactly two atomics')
+            declared = int(game.models[model_id].get('atomics', 0))
+            if len(atomic_names) != declared:
+                raise ValueError('streamed source DFF atomic count differs from its model row')
             near_name = atomic_names[0].casefold()
-            damaged_name = atomic_names[1].casefold()
-            if not near_name.endswith('_l0') or damaged_name != near_name[:-3] + '_l1':
-                raise ValueError('streamed source atomics do not prove the `_L0`, `_L1` ordering')
+            damaged_name = atomic_names[-1].casefold()
+            if not near_name.endswith('_l0') or damaged_name != near_name[:-3] + '_l' + str(declared - 1) or                     (declared == 3 and atomic_names[1].casefold() != near_name[:-3] + '_l1'):
+                raise ValueError('streamed source atomics do not prove the `_L0`..`_L' + str(declared - 1) + '` ordering')
             old_raw = target_path.read_bytes()
             if not _geometry_count(old_raw):
                 raise ValueError('current target DFF has no geometry')
@@ -236,7 +246,7 @@ def export_damage(game, models, assets, streamed_source, converter, lighting,
                 converted_path = Path(temporary) / 'converted.dff'
                 command = [str(converter), str(source_dff), str(converted_path),
                            '--atomic-damage', target_name, atomic_names[0],
-                           atomic_names[1], str(lighting)]
+                           atomic_names[-1], str(lighting)]
                 completed = subprocess.run(command, capture_output=True, text=True, check=False)
                 if completed.returncode:
                     raise ValueError('native converter rejected the source pair')
@@ -253,9 +263,10 @@ def export_damage(game, models, assets, streamed_source, converter, lighting,
                 raise ValueError('multiple source models resolve to the same target asset')
             damage_entry = dict(modelId=model_id, sourceModel=source_name,
                 targetAsset=target_name, nearSourceAtomic=atomic_names[0],
-                damagedSourceAtomic=atomic_names[1], damageAtomicName=target_name + '_dam',
-                sourceAtomicCount=2, damageIndex=1, sourceSha256=hashlib.sha256(source_dff.read_bytes()).hexdigest(),
-                evidence='LCS distances are nonincreasing; source DFF order is _L0,_L1')
+                damagedSourceAtomic=atomic_names[-1], damageAtomicName=target_name + '_dam',
+                sourceAtomicCount=declared, damageIndex=declared - 1, sourceSha256=hashlib.sha256(source_dff.read_bytes()).hexdigest(),
+                evidence=('LCS distances are nonincreasing; source DFF order is _L0,_L1' if declared == 2 else
+                          'LCS distances: _L1 is a farther LOD, _L2 is nearer than _L0; source DFF order is _L0,_L1,_L2'))
             replacements[target_name] = converted
             result['damageAtomicBySourceModel'][source_name.casefold()] = damage_entry
             result['convertedDamagePairs'] += 1

@@ -47,6 +47,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "sa_gameplay.hpp"
 #include "sa_world_preview.hpp"
 #include "sa_map_traffic_lights.hpp"
+#include "sa_signal_debris.hpp"
 #include "sa_lcs_bridge.hpp"
 #include "sa_world_sectors.hpp"
 #include "sa_allowed_collision.hpp"
@@ -149,6 +150,8 @@ std::unique_ptr<lcs::SaWorldPreview> world_preview;
 lcs::SaMapTrafficLights map_traffic_lights;
 ScriptProcess original_map_lights=nullptr;
 uint64_t map_light_calls=0;
+lcs::SaSignalDebris signal_debris;
+ScriptProcess original_break_add=nullptr;
 // Original ADD_POINT keeps its previous location process-wide across scripts.
 lcs::ScriptMarkers::ProcessState marker_process;
 std::unique_ptr<lcs::SaPlayerSkins> player_skins;
@@ -1615,7 +1618,7 @@ void retire_campaign_world() {
     // alone is insufficient: LOAD/New Game can clear and set it again between
     // two Process callbacks, retaining stale handles and a halted VM otherwise.
     campaign.reset();
-    world_preview.reset();map_traffic_lights.release_native_slot();map_traffic_lights=lcs::SaMapTrafficLights{};player_skins.reset();gameplay_skins.reset();
+    world_preview.reset();map_traffic_lights.release_native_slot();signal_debris.reset();map_traffic_lights=lcs::SaMapTrafficLights{};player_skins.reset();gameplay_skins.reset();
     reported_fast_vehicles.clear();
     last_lane_sample=0;road_switches_reported=false;
     bindings.clear();equivalent_bindings.clear();marker_process={};
@@ -1703,6 +1706,9 @@ void observe_world() {
                 world_preview=std::make_unique<lcs::SaWorldPreview>(std::filesystem::path(directory));
                 if(!map_traffic_lights.configure(std::filesystem::path(directory)/L"model-bindings.tsv"))
                     throw std::runtime_error("Cannot resolve converted traffic-light model identity");
+                log(signal_debris.configure(std::filesystem::path(directory)/L"model-bindings.tsv")?
+                    "Converted traffic lights break into their original post, head and pedestrian-box pieces":
+                    "Converted traffic-light pieces unavailable; SA's own break effect applies");
                 log(map_traffic_lights.bind_native_slot()?"Converted traffic light registered in SA's native signal model table; native phase lights active":
                     "Converted traffic light could not be registered in SA's native signal model table");
                 log("Original island/atomic LOD ranges active; source physical buildings use normal collision sectors; CULLNONE at converted atomic draw callbacks (including road pass)");
@@ -1725,6 +1731,12 @@ void observe_world() {
         if(!signal_pass_reported && map_traffic_lights.signal_passes()) {
             log("Converted traffic-light native effects pass observed; source LCS corona parameters and native SA phase active");
             signal_pass_reported=true;
+        }
+        signal_debris.service();
+        static bool signal_debris_reported=false;
+        if(!signal_debris_reported && signal_debris.spawned()) {
+            log("Traffic light broken: original LCS pieces created as physical objects");
+            signal_debris_reported=true;
         }
         static ULONGLONG signal_seen_at=0;static int signal_diag_logs=0;
         if(!signal_seen_at)signal_seen_at=GetTickCount64();
@@ -2311,6 +2323,16 @@ void __fastcall on_map_lights(void* entity,void*) {
     if(!map_traffic_lights.process_entity(reinterpret_cast<uintptr_t>(entity),reinterpret_cast<uintptr_t>(original_map_lights)))
         reinterpret_cast<void(__thiscall*)(void*)>(original_map_lights)(entity);
 }
+bool __fastcall on_break_add(void* manager,void*,uintptr_t object,void* velocity,uint32_t a,uint32_t b) {
+    if(signal_debris.capture(object))return true;
+    return reinterpret_cast<bool(__thiscall*)(void*,uintptr_t,void*,uint32_t,uint32_t)>(original_break_add)(manager,object,velocity,a,b);
+}
+bool install_break_debris() {
+    // CObject::ObjectDamage effects 200/202: mov ecx,g_breakMan; push esi; call BreakManager::Add.
+    const uint8_t before[]={0xB9,0x40,0x42,0xBB,0x00,0x56};
+    if(std::memcmp(reinterpret_cast<const void*>(0x5A0F70),before,sizeof(before)))return false;
+    return install_call(0x5A0F76,reinterpret_cast<ScriptProcess>(&on_break_add),original_break_add);
+}
 bool install_map_lights() {
     // CEntity::PreRender: num2dfx gate, ECX=self, no stack arguments. Keep
     // other entities on the current target, including another plugin's hook.
@@ -2342,6 +2364,7 @@ bool install_hook() {
         }
     }
     const bool storage=install_campaign_storage();
+    if(!install_break_debris())log("Traffic-light break call differs; SA's own break effect applies");
     if(setting(L"OriginalMapRenderRules")==L"1" && !install_map_lights())
         log("Converted traffic-light PreRender call differs; native signal adapter unavailable");
     const bool startup=install_call(startup_process_call,&on_startup_scripts,original_startup_process);

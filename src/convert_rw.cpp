@@ -308,10 +308,12 @@ void convert_dff(rw::StreamFile& in,rw::StreamFile& out) {
             if(name==near_atomic_name) {if(near)throw std::runtime_error("Duplicate requested near atomic");near=a;}
             if(name==damaged_atomic_name) {if(damaged)throw std::runtime_error("Duplicate requested damaged atomic");damaged=a;}
         }
-        if(all.size()!=2 || !near || !damaged || near==damaged) {
+        if(all.size()<2 || all.size()>3 || !near || !damaged || near==damaged) {
             clump->destroy();
-            throw std::runtime_error("Damaged conversion requires exactly the two explicitly named source atomics");
+            throw std::runtime_error("Damaged conversion requires the two explicitly named source atomics (and at most one far LOD)");
         }
+        // A third atomic is the model's far LOD; SA keeps only near and damaged.
+        for(auto a:all) if(a!=near && a!=damaged) {clump->removeAtomic(a);a->destroy();}
         auto rename_frame=[](rw::Frame* frame,const std::string& name) {
             if(name.size()>23)throw std::runtime_error("RenderWare atomic name exceeds 23 bytes");
             auto target=gta::getNodeName(frame);
