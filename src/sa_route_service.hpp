@@ -818,7 +818,14 @@ private:
                !sa_vehicle_reference_live(*vehicle,&(*ref)->cell))return false;
             return commit_source_plan(plan,actor,cleanup);
         }
-        last_diagnostic_="RestorePreviousObjective selected a goal without an implemented native consumer";
+        // Passive goals (WAIT_ON_FOOT, WAIT_ON_FOOT_FOR_COP, WAIT_IN_CAR): the source objective is only a wait, and
+        // SA's idle/seated state after the finished entry task already is that wait. Recording the restored
+        // objective is what the script's later checks (and the next SetObjective) read; no task is created.
+        // Without this a paramedic that finished entering the ambulance was never released and the hospital
+        // sequence stopped there.
+        if(destination==1 || destination==2 || destination==6)return commit_source_plan(plan,actor,cleanup);
+        last_diagnostic_="RestorePreviousObjective selected a goal without an implemented native consumer (objective "+
+            std::to_string(int(destination))+")";
         return false;
     }
     bool exit_current_vehicle(ObjectiveActor actor,const RouteVehicleGoalStep& step,bool cleanup,
