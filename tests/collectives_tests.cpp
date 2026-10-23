@@ -151,7 +151,8 @@ int main(){try{
             case 0x06A2:{const auto p=car_speed[call.inputs[0]];for(size_t i=0;i<3;++i)r.values[i]=bits(p[i]);return r;}
             case 0x046C:r.values[0]=driver_of.count(call.inputs[0])?driver_of[call.inputs[0]]:-1;return r;
             case 0x01EA:r.values[0]=max_passengers;return r;
-            case 0x0432:{const auto key=call.inputs[0]*16+call.inputs[1];r.values[0]=seat_ped.count(key)?seat_ped[key]:-1;return r;}
+            case 0x0431:r.condition=!seat_ped.count(call.inputs[0]*16+call.inputs[1]);return r;
+            case 0x0432:{const auto key=call.inputs[0]*16+call.inputs[1];if(!seat_ped.count(key))throw std::runtime_error("Native passenger query on empty seat");r.values[0]=seat_ped[key];return r;}
             case 0x01BD:r.values[0]=game_timer;return r;
             case 0x0643:{const int slot=call.inputs.size()==2?valid_handle(call.inputs[0]):-1;
                 if(slot<0 || !pool.open[size_t(slot)] || pool.active!=slot || call.inputs[1]!=1){++violations;r.executed=false;return r;}

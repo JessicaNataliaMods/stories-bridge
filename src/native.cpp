@@ -508,8 +508,14 @@ NativeResult NativeAdapter::leave_all_occupants(int32_t car) {
     if(!add(execute({0x046C,{car},{},0,1}),true)){result.diagnostic="Driver snapshot is unavailable";return result;}
     const auto seats=execute({0x01EA,{car},{},0,1});
     if(!seats.executed || seats.values[0]<0 || seats.values[0]>8){result.diagnostic="Passenger capacity is unavailable";return result;}
-    for(int32_t seat=0;seat<seats.values[0];++seat)
+    for(int32_t seat=0;seat<seats.values[0];++seat){
+        // SA 0432 dereferences the passenger slot: unlike an optional query it
+        // cannot be called for an empty seat (common after a taxi explodes).
+        const auto free=execute({0x0431,{car,seat},{},0,0,true});
+        if(!free.executed){result.diagnostic="Passenger seat occupancy is unavailable";return result;}
+        if(free.condition)continue;
         if(!add(execute({0x0432,{car,seat},{},0,1}),false)){result.diagnostic="Passenger snapshot is unavailable";return result;}
+    }
     if(occupants.empty()){result.executed=true;return result;} // original loop has nothing to do
     const auto clock=execute({0x01BD,{},{},0,1});
     if(!clock.executed){result.diagnostic="Native game clock is unavailable";return result;}
