@@ -28,10 +28,8 @@ ALIASES = {
     'WOMAN_walkfatold': 'WALK_fatold', 'WOMAN_walkpro': 'WOMAN_walksexy',
     'roadcross_old': 'roadcross', 'roadcross_female': 'roadcross', 'roadcross_gang': 'roadcross',
     'Turn_L': 'turn_180', 'Turn_R': 'turn_180', 'SHOT_partial_B': 'SHOT_partial', 'JUMP_launch_R': 'JUMP_launch',
-    # Fists: the original punch/kick set stands in for the SA combo steps (nearest move; SA hit timing is kept).
-    'FightA_1': 'PUNCHR', 'FightA_2': 'L_hook', 'FightA_3': 'R_hook', 'FightA_M': 'Frontkick', 'FightA_G': 'KICK_floor',
-    'HitA_1': 'Hit_L_hook', 'HitA_2': 'Hit_R_hook', 'HitA_3': 'Hit_uppercut',
-    'FightShF': 'FIGHTsh_F', 'FightSh_FWD': 'FIGHTsh_F', 'FightShB': 'FIGHTsh_back', 'FightSh_BWD': 'FIGHTsh_back',
+    # Fists and kicks stay SA: the SA fight code moves the ped by the animation and times hits by it,
+    # so the original punch/kick set (other lengths, root travel) slid and sped up (tried in v125).
     # The original has no driving skill: the skill and speed variants share one animation.
     'CAR_LB_pro': 'CAR_LB', 'CAR_LB_weak': 'CAR_LB', 'CAR_sit_pro': 'CAR_sit', 'CAR_sit_weak': 'CAR_sit',
     'Drive_L_pro': 'Drive_L', 'Drive_L_pro_slow': 'Drive_L', 'Drive_L_slow': 'Drive_L',
@@ -43,7 +41,7 @@ ALIASES = {
 
 # SA task code that opens doors, sits, jumps and lands waits for fixed times of
 # these animations: they keep the SA length (see lcs_ifp.convert_block).
-TIMED_BY_SA = re.compile(r'(car_|bike_|drive|kart_|seat_|train_|door_|jump_|fall_|ev_|fight|hita_)', re.IGNORECASE)
+TIMED_BY_SA = re.compile(r'(car_|bike_|drive|kart_|seat_|train_|door_|jump_|fall_|ev_)', re.IGNORECASE)
 
 
 def digest(data):
