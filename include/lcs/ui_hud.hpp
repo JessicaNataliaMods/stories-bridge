@@ -42,7 +42,7 @@ struct CombatLayout {
 };
 // Hud.cpp DrawWeaponIcon/DrawAmmo and the wanted stars (DrawWanted).
 CombatLayout layout_weapon_and_wanted(const PlayerHudInputs&);
-// LCS radar geometry (Radar.h/Hud.cpp, PS2 canvas): the map is a 94x76 box 40 units from the left
+// LCS radar geometry (Radar.h FIX_RADAR/Hud.cpp, PS2 canvas): the map is an 82x82 box 40 units from the left
 // and 40 from the bottom; the disc frame grows 6 units around it and carries a black copy 2 units lower.
 struct RadarLayout {
     float left=0,top=0,width=0,height=0;                       // map box in pixels

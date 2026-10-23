@@ -58,6 +58,7 @@ ANIMATIONS_ENABLED = False
 # only at the top skill level, so every skill row of every gun that can aim
 # (CANAIM, 0x1) gets MOVEAIM and MOVEFIRE (0x30). (The original LCS only allowed it for the Colt45,
 # Tec9 and silenced Ingram; this is a deliberate user-requested change.)
+MIN_ACCURACY = 1.2
 ANIMATED_GROUPS = {"colt45": "PISTOL", "python": "DESERT_EAGLE", "shotgun": "SHOTGUN", "buddy": "SPAS12",
                    "uzi": "MP5", "rifle": "M4", "flame": "FTHROWER", "grenade": "GRENADE"}
 
@@ -189,7 +190,14 @@ def convert_weapon_dat(sa_text, original_text, models, sa_model_names, animation
             fields[25] = template[25]
             fields[18:25] = loops
         if len(fields) in (26, 30) and fields[0] == '$' and fields[2] == 'INSTANT_HIT' and int(fields[25], 16) & 0x1:
-            fields[25] = '%X' % (int(fields[25], 16) | 0x30)
+            # ONLYFREEAIM (0x8) instead of CANAIM, like the minigun: shots follow the crosshair, not the arm;
+            # the skill-less LCS has no 'bad' animation group variants either.
+            fields[25] = '%X' % ((int(fields[25], 16) & ~0x1) | 0x38)
+            if fields[8].endswith('bad'):
+                fields[8] = fields[8][:-3]
+            # LCS has no weapon skill: accuracy (column R, which also sizes SA's crosshair
+            # ring) is never worse than the best SA skill level.
+            fields[16] = number(max(float(fields[16]), MIN_ACCURACY))
         output.append('\t'.join(fields))
     return '\r\n'.join(output) + '\r\n'
 

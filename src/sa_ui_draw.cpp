@@ -51,7 +51,7 @@ constexpr WeaponIcon weapon_icons[]={
     {25,"chromegun","chromegun"},{26,"sawnoff","buddyshot"},{27,"shotgspa","shotgspa"},{28,"micro_uzi","uzi"},
     {29,"mp5lng","mp5k"},{30,"ak47","ak47"},{31,"m4","m4"},{32,"tec9","tec9"},{33,"cuntgun","m60"},
     {34,"sniper","sniper"},{35,"rocketla","rocketla"},{36,"rocketla","rocketla"},{37,"flame","flame"},
-    {38,"minigun","minigun"},{39,"satchel","bomb"},{40,"","gren_rem"},{43,"camera","camera"}};
+    {38,"minigun","minigun"},{39,"satchel","grenade"},{40,"","gren_rem"},{43,"camera","camera"}};
 std::map<int,void*> weapon_textures;       // loaded icon per type (nullptr: unavailable)
 std::map<std::string,void*> weapon_dictionaries;
 template<class Call> bool guarded(Call const& call){__try{call();return true;}__except(EXCEPTION_EXECUTE_HANDLER){return false;}}
@@ -163,7 +163,7 @@ bool sa_ui_load(const std::filesystem::path& directory,std::string& diagnostic){
     hud_textures.clear();weapon_textures.clear();weapon_dictionaries.clear();
     // directory is <package>/models/lcs; the weapon TXDs live in <package>/weapons.
     weapons_directory=directory.parent_path().parent_path()/L"weapons";
-    for(const char* name:{"bar_inside1","bar_inside2","bar_inside1dark","bar_inside2dark","bar_outline","radardisc","radardiscback","hudnumbers","fist"}){
+    for(const char* name:{"bar_inside1","bar_inside2","bar_inside1dark","bar_inside2dark","bar_outline","radardisc","radardiscback","hudnumbers","fist","sitesniper","viewfinder_128"}){
         if(auto* texture=find_named(hud_dictionary,name))hud_textures[name]=texture;
     }
     ready=true;
@@ -198,6 +198,38 @@ bool sa_ui_draw_weapon_icon(int type,float left,float top,float right,float bott
     const RwImVertex v[4]={{left,top,0,0,colour,0,0},{right,top,0,0,colour,1,0},{left,bottom,0,0,colour,0,1},{right,bottom,0,0,colour,1,1}};
     if(!submit(raster_of(texture),v,4)){faulted=true;return false;}
     return true;
+}
+// Hud.cpp DrawCrossHairs, sniper/camera branch: one quarter of the sight texture drawn mirrored
+// into each screen quadrant (sniper 210x210 units, camera viewfinder 256x192, on 640x448).
+// Only drawn for the sniper rifle in SA's first-person sniper mode and the camera in its
+// camera mode; every other weapon keeps SA's own crosshair.
+bool sa_ui_draw_scope(){
+    if(!sa_ui_ready())return false;
+    int weapon=-1,mode=-1;
+    const bool read=guarded([&]{
+        const auto ped=*reinterpret_cast<const uintptr_t*>(native_entity_address(0xB7CD98));
+        if(!ped)return;
+        const int slot=*reinterpret_cast<const int8_t*>(ped+0x718);
+        if(slot<0 || slot>=13)return;
+        weapon=*reinterpret_cast<const int32_t*>(ped+0x5A0+uintptr_t(slot)*0x1C);
+        const auto camera=*reinterpret_cast<const uint8_t*>(native_entity_address(0xB6F081));
+        mode=*reinterpret_cast<const uint16_t*>(native_entity_address(0xB6F1A8)+uintptr_t(camera)*0x238);
+    });
+    if(!read)return false;
+    const bool sniper=weapon==34 && (mode==7 || mode==0x33);
+    const bool camera=weapon==43 && (mode==0x2D || mode==0x2E);
+    if(!sniper && !camera)return false;
+    float width=0,height=0;
+    if(!sa_ui_screen(width,height))return false;
+    const char* name=camera?"viewfinder_128":"sitesniper";
+    if(hud_textures.find(name)==hud_textures.end())return false;
+    const ui::Screen screen{width,height};
+    const float xo=screen.ps2(camera?256.f:210.f),yo=screen.ps2(camera?192.f:210.f),cx=width/2,cy=height/2;
+    const ui::Rgba white{255,255,255,255};
+    return sa_ui_draw_sprite(name,cx-xo,cy-yo,cx,cy,white,0.01f,0.01f,1.0f,1.0f) &&
+           sa_ui_draw_sprite(name,cx,cy-yo,cx+xo,cy,white,0.99f,0.01f,0.01f,1.0f) &&
+           sa_ui_draw_sprite(name,cx-xo,cy,cx,cy+yo,white,0.01f,0.99f,1.0f,0.01f) &&
+           sa_ui_draw_sprite(name,cx,cy,cx+xo,cy+yo,white,0.99f,0.99f,0.01f,0.01f);
 }
 bool sa_ui_screen(float& width,float& height){
     bool ok=false;

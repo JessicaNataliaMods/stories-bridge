@@ -1,6 +1,7 @@
 #include "lcs/task_observer_host.hpp"
 #include "lcs/route_native_backend.hpp"
 #include "lcs/route_scripts.hpp"
+#include "sa_ui_draw.hpp"
 #include "sa_route_service.hpp"
 #include "lcs/cop_native_translation.hpp"
 #include "lcs/route_vehicle_native.hpp"
@@ -1936,6 +1937,24 @@ bool install_radar_stubs(){
     return install_call(0x58A823,&on_radar_disc_a,original_radar_disc_a) && install_call(0x58A8CD,&on_radar_disc_b,original_radar_disc_b) &&
            install_call(0x58A977,&on_radar_disc_c,original_radar_disc_c) && install_call(0x58AA25,&on_radar_disc_d,original_radar_disc_d);
 }
+// CPlayerPed::GetWeaponRadiusOnScreen (0x609CD0) sizes SA's third-person crosshair from
+// the weapon accuracy and grows it while the fire button is held, so assault rifles end
+// up with a huge ring. The LCS crosshair has a fixed size: the function returns a constant.
+const float fixed_crosshair_radius=0.4f;
+bool install_fixed_crosshair_radius(){
+    auto* code=reinterpret_cast<uint8_t*>(0x609CD0);
+    static const uint8_t prologue[]={0x56,0x8B,0xF1,0x0F,0xBE,0x86,0x18,0x07,0x00,0x00};
+    __try{if(std::memcmp(code,prologue,sizeof(prologue)))return false;}__except(EXCEPTION_EXECUTE_HANDLER){return false;}
+    DWORD old_protection;
+    if(!VirtualProtect(code,7,PAGE_EXECUTE_READWRITE,&old_protection))return false;
+    const uint32_t constant=uint32_t(reinterpret_cast<uintptr_t>(&fixed_crosshair_radius));
+    code[0]=0xD9;code[1]=0x05;std::memcpy(code+2,&constant,4);code[6]=0xC3;   // fld dword ptr [constant]; ret
+    FlushInstructionCache(GetCurrentProcess(),code,7);
+    DWORD ignored;VirtualProtect(code,7,old_protection,&ignored);
+    return true;
+}
+ScriptProcess original_crosshairs=nullptr;
+void __cdecl on_crosshairs(){if(!lcs::sa_ui_draw_scope())original_crosshairs();}
 bool install_player_info_stubs(){
     return install_call(0x58EE9A,&on_health_a,original_health_a) && install_call(0x58EF0D,&on_health_b,original_health_b) &&
            install_call(0x58F131,&on_armour_a,original_armour_a) && install_call(0x58F1AD,&on_armour_b,original_armour_b) &&
@@ -2128,6 +2147,10 @@ bool install_hook() {
         const bool radar=lcs::sa_radar_install(radar_message) && install_radar_stubs();
         log(radar?std::string("LCS HUD: radar geometry and disc installed"):"LCS HUD: radar stays with SA ("+radar_message+")");
     }
+    if(mission_hud && setting(L"Mode")==L"Campaign" && setting(L"LcsHud")!=L"0")
+        log(install_fixed_crosshair_radius()?"LCS HUD: crosshair size fixed":"LCS HUD: SA crosshair size function differs; crosshair keeps SA's growth");
+    if(mission_hud && setting(L"Mode")==L"Campaign" && setting(L"LcsHud")!=L"0")
+        log(install_call(0x58FBBF,&on_crosshairs,original_crosshairs)?"LCS HUD: sniper/camera sights installed":"LCS HUD: SA crosshair call site differs; sniper/camera sights stay with SA");
     // Wrap the parent HUD call: DrawMissionTimers is skipped in widescreen,
     // while the source credits roll must still reach the shared font flush.
     if(lcs::sa_credits_render_profile())install_call(0x53E4FF,&on_credits_hud,original_credits_hud);

@@ -23,4 +23,6 @@ bool sa_ui_draw_weapon_icon(int sa_weapon_type,float left,float top,float right,
 // SA's built-in player, north and waypoint slots retain their identities.
 bool sa_ui_apply_radar_sprites();
 bool sa_ui_screen(float& width,float& height);
+// Draws the LCS sniper scope / camera viewfinder when SA is in that mode; false leaves SA's crosshair.
+bool sa_ui_draw_scope();
 }

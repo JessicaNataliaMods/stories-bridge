@@ -80,11 +80,19 @@ int main(){try{
     Screen rs;rs.width=1920.f;rs.height=1080.f;
     const auto radar=layout_radar(rs);
     const float u2=rs.height/448.f;
-    check(near(radar.left,40.f*u2) && near(radar.width,94.f*u2) && near(radar.height,76.f*u2) && near(radar.top+radar.height,rs.height-40.f*u2),"The radar box is 94x76, 40 units from the left and bottom");
+    check(near(radar.left,40.f*u2) && near(radar.width,82.f*u2) && near(radar.height,82.f*u2) && near(radar.top+radar.height,rs.height-40.f*u2),"The corrected radar box is 82x82, 40 units from the left and bottom");
     check(near(radar.disc_right-radar.disc_left,radar.width+12.f*u2) && near(radar.disc_bottom-radar.disc_top,radar.height+12.f*u2) && near(radar.shadow_offset,2.f*u2),"The disc frame grows 6 units on each side and its shadow sits 2 units lower");
     float sx=0,sy=0;radar.to_screen(0.f,0.f,sx,sy);
     check(near(sx,radar.left+radar.width/2.f) && near(sy,radar.top+radar.height/2.f),"Radar centre maps to the middle of the box");
     radar.to_screen(1.f,1.f,sx,sy);check(near(sx,radar.left+radar.width) && near(sy,radar.top),"Radar space (1,1) is the top right corner");
     radar.to_screen(-1.f,-1.f,sx,sy);check(near(sx,radar.left) && near(sy,radar.top+radar.height),"Radar space (-1,-1) is the bottom left corner");
-    std::cout<<"PASS: LCS player HUD layout (health, armour, money, clock, weapon, ammunition, stars)\n";return 0;
+    for(float aspect:{4.f/3.f,16.f/9.f,3440.f/1440.f}){
+        Screen screen;screen.height=1440.f;screen.width=screen.height*aspect;
+        const auto r=layout_radar(screen);
+        float cx,cy,ex,ey,nx,ny;r.to_screen(0,0,cx,cy);r.to_screen(1,0,ex,ey);r.to_screen(0,1,nx,ny);
+        check(near(ex-cx,cy-ny),"Radar world axes have equal pixel scale at 4:3, 16:9 and ultrawide");
+        check(near(r.disc_right-r.disc_left,r.disc_bottom-r.disc_top),"Radar disc and map remain circular across aspects");
+        check(near(screen.psp_x(20),screen.psp_y(20)),"Other PSP HUD elements retain uniform XY scale");
+    }
+    std::cout<<"PASS: LCS player HUD and circular radar across 4:3, 16:9 and ultrawide\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -122,8 +122,10 @@ CombatLayout layout_weapon_and_wanted(const PlayerHudInputs& in){
 
 RadarLayout layout_radar(const Screen& s){
     RadarLayout r;
-    r.left=s.ps2(40.f);r.width=s.ps2(94.f);r.height=s.ps2(76.f);
-    r.top=s.ps2_from_bottom(40.f+76.f);
+    // Radar.h FIX_RADAR uses 82x82; 94x76 is the old distorted layout.
+    // Uniform pixel scaling keeps the map, mask and disc circular at any aspect.
+    r.left=s.ps2(40.f);r.width=s.ps2(82.f);r.height=s.ps2(82.f);
+    r.top=s.ps2_from_bottom(40.f+82.f);
     const float grow=s.ps2(6.f);
     r.disc_left=r.left-grow;r.disc_right=r.left+r.width+grow;
     r.disc_top=r.top-grow;r.disc_bottom=r.top+r.height+grow;
