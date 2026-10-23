@@ -4,10 +4,12 @@ Only the subset used by the converted LCS ferry is supported (non-native,
 single morph target, no skin).  Extension chunks other than BinMesh are kept
 verbatim.
 """
+import math
 import struct
 from rwtree import parse
 
 FLAG_TRISTRIP, FLAG_POSITIONS, FLAG_TEXTURED, FLAG_PRELIT, FLAG_NORMALS, FLAG_LIGHT, FLAG_MODULATE, FLAG_TEXTURED2 = 1, 2, 4, 8, 16, 32, 64, 128
+BREAKABLE_PLUGIN = 0x253F2FD
 
 
 def chunk(ident, ver, payload):
@@ -149,3 +151,213 @@ def encode_geometry(g, binmesh=None, drop_unused_materials=False):
     ml = chunk(8, g.mat_ver, ms + b''.join(g.materials))
     ext_payload = chunk(0x50E, g.ext_ver, binmesh if binmesh is not None else build_binmesh(g)) + b''.join(g.ext_other)
     return chunk(0xF, ver, struct_chunk + ml + chunk(3, g.ext_ver, ext_payload))
+
+
+def _walk(nodes):
+    for node in nodes:
+        yield node
+        yield from _walk(node.get('kids', ()))
+
+
+def _rw_roots(raw):
+    from rwtree import parse
+
+    if len(raw) < 12:
+        raise ValueError('Truncated RenderWare DFF')
+    root_end = struct.unpack_from('<I', raw, 4)[0] + 12
+    if root_end > len(raw) or any(raw[root_end:]):
+        raise ValueError('Invalid RenderWare DFF bounds or nonzero padding')
+    roots = parse(raw, 0, root_end)
+    if len(roots) != 1 or roots[0]['id'] != 16:
+        raise ValueError('Expected one bounded RenderWare Clump')
+    return roots, root_end
+
+
+def _render_chunk_tree(raw, node, additions):
+    """Rebuild container lengths while leaving every leaf payload untouched."""
+    if 'kids' not in node:
+        a, b = node['body']
+        payload = raw[a:b]
+    else:
+        a, b = node['body']
+        cursor = a
+        parts = []
+        for child in node['kids']:
+            if child['off'] != cursor:
+                raise ValueError('Container has unparsed bytes between chunks')
+            parts.append(_render_chunk_tree(raw, child, additions))
+            cursor = child['body'][1]
+        if cursor != b:
+            raise ValueError('Container has trailing unparsed bytes')
+        payload = b''.join(parts)
+        payload += b''.join(additions.get(node['off'], ()))
+    ident, _, ver = struct.unpack_from('<3I', raw, node['off'])
+    return struct.pack('<3I', ident, len(payload), ver) + payload
+
+
+def _patch_geometry_extensions(raw, additions):
+    """Append plugin chunks to geometry Extension chunks without RW re-encoding.
+
+    `additions` maps geometry indexes to lists of complete plugin chunks. Only
+    ancestor chunk sizes and the target Extension payload change.
+    """
+    roots, root_end = _rw_roots(raw)
+    geometries = [n for n in _walk(roots) if n['id'] == 15]
+    if any(index < 0 or index >= len(geometries) for index in additions):
+        raise ValueError('Geometry index outside DFF')
+    ext_additions = {}
+    for index, chunks in additions.items():
+        geometry = geometries[index]
+        extensions = [n for n in geometry.get('kids', ()) if n['id'] == 3]
+        if len(extensions) != 1:
+            raise ValueError('Geometry must have exactly one Extension chunk')
+        extension = extensions[0]
+        present = [n for n in extension.get('kids', ())]
+        existing_ids = [n['id'] for n in present]
+        for plugin in chunks:
+            if len(plugin) < 12:
+                raise ValueError('Truncated plugin chunk')
+            plugin_id, plugin_size, _ = struct.unpack_from('<3I', plugin)
+            if plugin_size != len(plugin) - 12:
+                raise ValueError('Plugin chunk length mismatch')
+            if plugin_id in existing_ids:
+                existing = next(n for n in present if n['id'] == plugin_id)
+                a, b = existing['off'], existing['body'][1]
+                if raw[a:b] != plugin:
+                    raise ValueError('Refusing to replace a different existing geometry plugin')
+                continue
+            existing_ids.append(plugin_id)
+            ext_additions.setdefault(extension['off'], []).append(plugin)
+    if not ext_additions:
+        return raw
+    output = []
+    cursor = 0
+    for root in roots:
+        if root['off'] != cursor:
+            raise ValueError('DFF has unparsed bytes between top-level chunks')
+        output.append(_render_chunk_tree(raw, root, ext_additions))
+        cursor = root['body'][1]
+    if cursor != root_end:
+        raise ValueError('DFF has trailing unparsed bytes')
+    return b''.join(output) + raw[root_end:]
+
+
+def _breakable_plugin(raw, geometry_node, position_to_object=True):
+    g = decode_geometry(raw, geometry_node)
+    if not 0 < g.nv <= 0xFFFF or not 0 < g.nt <= 0xFFFF:
+        raise ValueError('Breakable geometry needs 1..65535 vertices and faces')
+    if not g.materials or len(g.materials) > 0xFFFF:
+        raise ValueError('Breakable geometry has no materials or too many materials')
+    if not g.uvs and any(material_info(raw, node)['textured'] for node in g.mat_nodes):
+        raise ValueError('Textured breakable geometry has no UV coordinates')
+
+    materials = [material_info(raw, node) for node in g.mat_nodes]
+    if len(materials) != len(g.materials):
+        raise ValueError('Breakable material list mismatch')
+    for triangle in g.tris:
+        if len(triangle) != 4:
+            raise ValueError('Malformed breakable triangle')
+        v1, v2, v3, material = triangle
+        if max(v1, v2, v3) >= g.nv or material >= len(materials):
+            raise ValueError('Breakable triangle index outside geometry')
+
+    header = [0] * 13
+    header[0] = int(bool(position_to_object))
+    header[1] = g.nv
+    header[5] = g.nt
+    header[8] = len(materials)
+    payload = struct.pack('<I13I', 1, *header)
+    colors = g.colors if g.colors is not None else [(255, 255, 255, 255)] * g.nv
+    uvs = g.uvs[0] if g.uvs else [(0.0, 0.0)] * g.nv
+    for index, vertex in enumerate(g.pos):
+        if any(not math.isfinite(value) for value in (*vertex, *uvs[index])):
+            raise ValueError('Breakable geometry has a nonfinite vertex or UV')
+        payload += struct.pack('<3f', *vertex)
+    for uv in uvs:
+        payload += struct.pack('<2f', *uv)
+    for color in colors:
+        payload += struct.pack('<4B', *color)
+    for v1, v2, v3, _material in g.tris:
+        payload += struct.pack('<3H', v1, v2, v3)
+    for _v1, _v2, _v3, material in g.tris:
+        payload += struct.pack('<H', material)
+
+    for key in ('name', 'mask'):
+        for material in materials:
+            name = material[key] or ''
+            try:
+                encoded = name.encode('ascii')
+            except UnicodeEncodeError as exc:
+                raise ValueError('Breakable texture names must be ASCII') from exc
+            if len(encoded) > 31:
+                raise ValueError('Breakable texture name exceeds 31 bytes')
+            payload += encoded + bytes(32 - len(encoded))
+    for material in materials:
+        props = (material['amb'], material['spec'], material['diff'])
+        if any(not math.isfinite(value) for value in props):
+            raise ValueError('Breakable material has nonfinite surface properties')
+        payload += struct.pack('<3f', *props)
+
+    extension = next((n for n in geometry_node.get('kids', ()) if n['id'] == 3), None)
+    if extension is None:
+        raise ValueError('Geometry has no Extension chunk')
+    return chunk(BREAKABLE_PLUGIN, extension['ver'], payload)
+
+
+def inject_breakable(raw, geometry_indexes=None, position_to_object=True):
+    """Attach Rockstar's registered Breakable geometry plugin to source meshes.
+
+    The plugin stream layout follows librwgta's registered ID_BREAKABLE
+    (0x253F2FD): positions, first UV set, vertex RGBA, triangle indices,
+    per-face material indices, texture/mask names and source surface props.
+    No geometry is generated or re-encoded. Existing plugins are preserved;
+    an existing nonidentical Breakable plugin is an error.
+    """
+    roots, _root_end = _rw_roots(raw)
+    geometries = [n for n in _walk(roots) if n['id'] == 15]
+    selected = list(range(len(geometries))) if geometry_indexes is None else list(geometry_indexes)
+    if len(set(selected)) != len(selected):
+        raise ValueError('Duplicate geometry index')
+    additions = {}
+    for index in selected:
+        if not 0 <= index < len(geometries):
+            raise ValueError('Geometry index outside DFF')
+        plugin = _breakable_plugin(raw, geometries[index], position_to_object)
+        ext = next((n for n in geometries[index].get('kids', ()) if n['id'] == 3), None)
+        if ext is None:
+            raise ValueError('Geometry has no Extension chunk')
+        existing = next((n for n in ext.get('kids', ()) if n['id'] == BREAKABLE_PLUGIN), None)
+        if existing is not None:
+            a, b = existing['off'], existing['body'][1]
+            if raw[a:b] != plugin:
+                raise ValueError('Refusing to replace a different existing Breakable plugin')
+            continue
+        additions[index] = [plugin]
+    if not additions:
+        return raw
+    return _patch_geometry_extensions(raw, additions)
+
+
+def geometry_plugins(raw, geometry_index, plugin_ids):
+    """Return exact plugin chunk bytes for one Geometry, keyed by plugin ID."""
+    roots, _root_end = _rw_roots(raw)
+    geometries = [n for n in _walk(roots) if n['id'] == 15]
+    if not 0 <= geometry_index < len(geometries):
+        raise ValueError('Geometry index outside DFF')
+    extensions = [n for n in geometries[geometry_index].get('kids', ()) if n['id'] == 3]
+    if len(extensions) != 1:
+        raise ValueError('Geometry must have exactly one Extension chunk')
+    result = {}
+    for node in extensions[0].get('kids', ()):
+        if node['id'] in plugin_ids:
+            a, b = node['off'], node['body'][1]
+            if node['id'] in result:
+                raise ValueError('Duplicate geometry plugin ID')
+            result[node['id']] = raw[a:b]
+    return result
+
+
+def copy_geometry_plugins(source, target, plugin_ids, source_geometry=0, target_geometry=0):
+    """Copy selected plugin chunks verbatim between geometry indexes."""
+    plugins = geometry_plugins(source, source_geometry, set(plugin_ids))
+    return _patch_geometry_extensions(target, {target_geometry: list(plugins.values())}) if plugins else target

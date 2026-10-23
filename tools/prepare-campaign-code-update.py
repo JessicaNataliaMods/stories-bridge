@@ -639,6 +639,11 @@ def prepare(base, output, version, notes, refresh, original_data):
             kept.append('LcsHud=1')  # docs/lcs-hud.md: gameplay HUD only
         if version >= 107 and not any(line.startswith('LcsMenuFonts=') for line in kept):
             kept.append('LcsMenuFonts=1')  # independent native frontend font switch
+        if version >= 116 and not any(line.startswith('LcsWeaponSounds=') for line in kept):
+            kept.append('LcsWeaponSounds=1')  # docs/audio.md: 0 keeps SA gun sounds
+        for key in ('LcsVehicleHorns', 'LcsVehicleSirens', 'LcsVehicleDoors', 'LcsVehicleEngines', 'LcsInterfaceSounds'):
+            if version >= 116 and not any(line.startswith(key+'=') for line in kept):
+                kept.append(key+'=1')  # docs/audio.md: 0 keeps the SA sound of that kind
         if kept != ini.splitlines():
             if ini_path.stat().st_nlink != 1:
                 raise ValueError('Mutable INI must not share an inode with a rollback')

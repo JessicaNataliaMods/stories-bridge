@@ -2,6 +2,8 @@
 #include "vm.hpp"
 #include "continuous_sound.hpp"
 #include "source_audio_random.hpp"
+#include "weapon_audio.hpp"
+#include <unordered_map>
 #include <optional>
 #include <memory>
 #include <mutex>
@@ -27,7 +29,7 @@ class AudioArchive {
     mutable std::vector<std::optional<AudioRecord>> layouts_;
     bool ps2_mode_=false;
     std::vector<uint8_t> ps2_bytes(uint32_t index) const;
-    Ps2Layout ps2_layout(uint32_t index,const std::vector<uint8_t>& bytes) const;
+    Ps2Layout ps2_layout(uint32_t index,const std::vector<uint8_t>& bytes,uint32_t assumed_frequency=0) const;
 public:
     struct Ps2Audio {};
     explicit AudioArchive(const std::filesystem::path& directory,const std::string& suffix="");
@@ -37,6 +39,10 @@ public:
     static std::vector<std::string> mission_names();
     AudioSample sample(const std::string& name) const;
     AudioSample sample(uint32_t index) const;
+    // The 27 headerless engine-bank records carry no source rate: the game code that plays them always
+    // supplies an absolute rate, so the caller states the rate its PCM is nominally played at.
+    AudioSample sample(uint32_t index,uint32_t assumed_frequency) const;
+    AudioRecord record(uint32_t index,uint32_t assumed_frequency) const;
     const AudioRecord& record(uint32_t index) const;
     AudioSample announcement(int32_t index) const;
     AudioSample frontend_effect(int32_t script_sound) const;
@@ -56,6 +62,8 @@ class AudioAdapter {
     bool announcement_started_=false;
     uint8_t one_shot_counter_=0; // AudioManager's per-queued-sample counter
     SourceAudioRandom audio_random_;
+    std::unordered_map<uint32_t,AudioSample> world_samples_; // decoded once, reused by every world one-shot
+    const AudioSample* world_sample(uint32_t index);
     // AudioLogic::Initialise and ProcessMissionAudio own these source values.
     // PreloadMissionAudio clears the per-slot phone marker; none of the
     // currently implemented script audio operations sets it to true.
@@ -67,6 +75,11 @@ public:
     std::function<std::optional<std::array<float,3>>()> listener;
     std::function<bool(const AudioSample&)> play_effect;
     std::function<bool(const AudioSample&,AudioMix)> play_positioned_effect;
+    // World one-shots that must not stall the game thread (gun shots): the device is opened elsewhere. When set it
+    // replaces play_positioned_effect for them and is assumed to accept the sound.
+    std::function<void(AudioSample,AudioMix)> post_world_effect;
+    // LcsOneShotRangePercent: shrinks the audible range of world one-shots (the original ranges are far larger than SA's).
+    float one_shot_range_scale=1.0f;
     std::function<std::optional<SpatialListener>()> spatial_listener;
     std::function<bool(size_t,AudioMix)> set_mix;
     explicit AudioAdapter(const AudioArchive& archive):archive_(archive){}
@@ -76,6 +89,14 @@ public:
     // False means the sound could not be produced (missing backend/listener, bad
     // position or a refused device); out of range is a genuine silent success.
     bool play_car_jerk(const std::array<float,3>& position);
+    // A world one-shot of ProcessPedOneShots. silent: the original produces no
+    // voice (out of range or zero volume), so SA must not play its own sound
+    // either. refused: the sound could not be produced (backend, listener or
+    // sample missing, or no free voice); the caller keeps the SA native sound.
+    enum class WorldSound {played,silent,refused};
+    // effects_scale: SA's SFX menu volume (master * fader), applied to the voice mix.
+    WorldSound play_weapon_shot(const WeaponShotSpec&,const std::array<float,3>& position,float effects_scale=1.0f);
+    WorldSound play_weapon_reload(const WeaponReloadSpec&,const std::array<float,3>& position,float effects_scale=1.0f);
     bool tick_announcements(bool eligible);
     // cAudioManager::ShouldDuckMissionAudio: a started mission speech slot
     // that has not finished. The radio is held at volume 25 meanwhile.

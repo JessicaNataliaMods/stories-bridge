@@ -82,13 +82,89 @@ Limitações atuais:
 - As posições das estações não são gravadas no save; recomeçam das posições de jogo novo ao carregar.
 - Enquanto uma estação do LCS toca, a música de ambiente `CITY` do script também fica sem som (no LCS rádio e ambiente dividem o mesmo stream).
 
+## Sons de armas
+
+Com `LcsWeaponSounds=1` (padrão), o tiro e a recarga de armas de fogo tocam a amostra do LCS da arma original que foi convertida naquele tipo do SA; com `0` o SA toca o som dele e nenhum gancho é instalado. Falta de áudio no pacote, perfil do exe diferente ou falta de voz livre também mantêm o som do SA (o log registra o motivo).
+
+O SA decide o som por tipo de arma em `CAEWeaponAudioEntity::WeaponFire` (`0x504F80`) e `WeaponReload` (`0x503690`), ambos `thiscall(tipo, ped, evento)`. A ponte troca as quatro chamadas existentes (`0x4E6A3D`/`0x4E6A5B` na `CAEPedWeaponAudioEntity::AddAudioEvent`, que serve jogador e NPCs, e `0x4DFAC6`/`0x4DFAD6` no despachante de armas de veículo). O perfil confere os bytes das duas funções e o destino das quatro chamadas antes de instalar.
+
+**Atribuição:** o tipo do SA identifica a arma do LCS porque a conversão dá um tipo próprio a cada arma (docs/weapons.md; a mesma tabela `WEAPON_TYPES` de `tools/weapon_slots.py` e `native.cpp`, que `tests/weapon_slot_contracts.py` compara com `include/lcs/weapon_audio.hpp`). `tests/weapon_audio_tests.cpp` prova, com a pasta AUDIO real, que cada um dos 14 tipos tem exatamente uma arma dona, que não há segundo dono não documentado e que as amostras decodificam como áudio de verdade.
+
+| Tipo do SA | Arma do LCS | Tiro (índice SFX, taxa) |
+| --- | --- | --- |
+| 22 pistola | Colt45 | `COLT45` L/R, taxa da amostra |
+| 24 Desert Eagle | Python | `PYTHON` L/R |
+| 25 escopeta | Shotgun | `SHOTGUN` L/R |
+| 26 cano serrado | Stubby | `SHOTGUN` L/R |
+| 27 SPAS-12 | Spas12 | `SPAS12` L/R |
+| 28 Micro Uzi | Uzi | `UZI` L/R |
+| 23 pistola silenciada | Ingram silenciada | `TEC` L/R a 34000 Hz |
+| 29 MP5 | MP5 | `MP5` L/R |
+| 30 AK-47 | Ruger | `RUGER` L/R |
+| 31 M4 | M4 | `RUGER` L/R a 43150 Hz |
+| 32 Tec-9 | Tec9 | `TEC` L/R a 17000 Hz |
+| 33 rifle do campo | M60 | `M60` L/R |
+| 34 sniper | SniperRifle | `SNIPER` L/R a 25472 Hz |
+| 35 lança-foguetes | RocketLauncher | `ROCKET` (mono) |
+
+As regras são as de `cAudioManager::ProcessPedOneShots` (`SOUND_WEAPON_SHOT_FIRED`/`SOUND_WEAPON_RELOAD`): alcance de 120 m (recarga 30 m), volume do evento por arma (`table[i]%m+b`), `ComputeVolume` com queda quadrática depois de 1/5 do alcance, variação de taxa (`RandomDisplacement`) e, a menos de 20% do alcance, o par L/R tocado em 2D (esquerdo no canal esquerdo, direito no direito); mais longe só a amostra esquerda, posicionada. O par vira uma única voz estéreo.
+
+Fica como no SA, por serem sons contínuos ou de outro sistema: lança-chamas (37), minigun (38), spray, extintor, câmera, armas brancas e granadas, a cauda/eco do tiro (`SOUND_WEAPON_AK47_BULLET_ECHO`), impacto de bala e o som de projéteis. O laser scope usa o tipo do sniper e portanto o som do sniper. O lança-foguetes também é "estéreo" no original, mas `SFX_ROCKET_LEFT` é seguido por `SFX_ROCKET_RELOAD` (um espaço reservado mudo de 728 bytes na mídia retail), então o disparo toca mono e a recarga do lança-foguetes é silenciosa como no original.
+
+Limites: as vozes de efeito são compartilhadas (8 simultâneas); sem voz livre o SA toca o próprio som daquele tiro.
+
+## Sons de veículos
+
+Quatro chaves independentes (padrão `1`; `0` mantém o som do SA daquele tipo e não instala o gancho): `LcsVehicleHorns`, `LcsVehicleSirens`, `LcsVehicleDoors`, `LcsVehicleEngines`. Só os 87 veículos convertidos são tocados; qualquer outro modelo, som sem voz livre ou erro mantém o som do SA.
+
+**Atribuição ao modelo certo.** O som segue o veículo *original* que o slot do SA representa, não o modelo do SA: o slot vem de `data/lcs/native-equivalents.tsv` (a mesma ligação do conversor) e a linha de som é `aVehicleSettings[modelo LCS − 130]` do reLCS, copiada pelo CMake sem transcrição (87 linhas e 24 pares de motor, o configure falha se mudarem). `tests/vehicle_audio_tests.cpp` confere: 87 slots distintos, uma linha por veículo, e provas independentes de que a ordem das linhas é a dos modelos (ambulância com `AMBULANCE_SI`, polícia/enforcer/FBI/bombeiro com `POLICE_SIREN_SLOW`, Mr. Whoopee com a música do sorveteiro, ônibus com porta de ônibus, Faggio/Pizzaboy com o motor de scooter, Angel com o V-twin, PCJ-600 com a moto esportiva, Stinger com o motor Porsche). O teste ainda decodifica todas as amostras usadas e imprime a tabela completa "veículo LCS → slot SA → buzina, sirene, porta, banco de motor".
+
+| Chave | Gancho no SA | O que toca |
+| --- | --- | --- |
+| `LcsVehicleHorns` | `PlayHornOrSiren` (0x4F99D0, chamada em 0x500366) | buzina em loop da linha (amostra e taxa), 40 m, volume 80; o alarme usa a mesma buzina |
+| `LcsVehicleSirens` | idem | sirene da linha (110 m, volume 80); com buzina apertada, `SIREN_FAST` (exceto bombeiro e Mr. Whoopee; FBI a 12668 Hz) |
+| `LcsVehicleDoors` | `AddAudioEvent` (0x4F6420, desvio de entrada) eventos 0x4E..0x59 | abrir/fechar porta, capô e porta-malas: `OLD/NEW/TRUCK_DOOR` ou `AIR_BRAKES` (ônibus), 50 m, volumes 117..126/122..126 como no original |
+| `LcsVehicleEngines` | `ProcessPlayerVehicleEngine` (0x4FBB10) e `ProcessDummyVehicleEngine` (0x501480), 4 chamadas; `AddAudioEvent` 0x67 | motor em loop (marcha lenta com pedal < 0,02, senão a amostra de aceleração), taxa 14000..27000 Hz, volume 75..90 (120 no jogador), 50 m; partida `CAR_STARTER` |
+
+O perfil confere os bytes das funções do SA e o destino de cada chamada antes de instalar; o desvio de `AddAudioEvent` só entra se o prólogo for exatamente `push -1; jmp 0x40727C`. Posições e velocidades vêm do próprio `tVehicleParams` do SA (velocidade, `m_MaxVelocity`, marcha pela tabela de câmbio, pedal suavizado `m_GasPedalAudioRevs`), com os deslocamentos conferidos no exe.
+
+Limites desta fase: o motor usa o modelo de motor "de IA" do LCS para todos (também o jogador, sem a troca de marcha detalhada do `ProcessPlayersVehicleEngine`); buzina, sirene e motor ficam com o SA quando faltam vozes (40 vozes próprias para veículos); banco de motor com amostra de marcha lenta silenciosa no retail (RC e carrinho de golfe) fica sem marcha lenta como no original; derrapagem, ruído de pista, marcha à ré, chuva e danos continuam do SA. Aviões, helicópteros e barcos usam o motor do SA.
+
+## Sons de interface
+
+Chave `LcsInterfaceSounds` (padrão `1`; `0` mantém os sons de menu, pickups e HUD do SA e não instala nada). O SA envia todo som de interface por `CAudioEngine::ReportFrontendAudioEvent` (0x506EA0), que repassa a `CAEFrontendAudioEntity::AddAudioEvent`. A ponte redireciona as 90 chamadas dessa função (lista conferida por decodificação do exe; a função em si não é alterada) e toca a amostra que o `cAudioManager::ProcessFrontEnd` do LCS toca para o evento equivalente, em uma saída própria, a volume 127 vezes o volume de efeitos do menu.
+
+| Evento do SA | Som do LCS |
+| --- | --- |
+| selecionar / voltar / destacar opção | `FE_SELECT` / `FE_BACK` / `FE_HIGHLIGHT` |
+| erro de menu | `FE_ERROR` (esquerdo e direito) |
+| início do menu, info, aviso na tela | `FE_INFO` (esquerdo e direito) |
+| dinheiro, vida, adrenalina, colete, repintura | `MONEY` (esquerdo e direito) |
+| arma pega/comprada, bomba colocada | `WEAPON` esquerdo, direito e centro |
+| garagem recusa (sem dinheiro, carro quente, já com bomba) | `WEAPON` a 5382 Hz |
+| coletável, droga, parte de missão, contagem 3-2-1 | `PART_MISSION_COMPLETE` esquerdo, direito e centro |
+| largada "go" | `GO` |
+| tique do cronômetro | `TIMER` |
+| clique do rádio ligar / desligar | `RADIO_CLICK` a 32000 / 28509 Hz |
+| sniper / foguete sem poder atirar | `ERROR_FIRE_RIFLE` / `ERROR_FIRE_ROCKET_LAUNCHER` |
+| bala passando | `BULLET_PASS_1/2` com pan 20 ou 107 |
+| teste de áudio | `FE_NOISE_BURST_1..3` |
+
+Pickups e jingles de missão que chegam a menos de 100 ms do anterior são descartados, como o `ProcessFrontEnd` faz com cinco quadros. Continuam com o SA: música de carregamento, scanner da polícia, amplificador, frenesi, sintonia do rádio (já tratada pela rádio do LCS) e travamento de míssil. `tests/interface_audio_tests.cpp` confere os 35 eventos mapeados e que todas as amostras decodificam.
+
 ## Opções do `.ini`
 
 | Chave | Padrão | Efeito |
 | --- | --- | --- |
 | `LcsRadio` | `1` | `0` mantém as rádios do SA |
+| `LcsWeaponSounds` | `1` | `0` mantém o tiro e a recarga de armas do SA |
+| `LcsVehicleHorns` | `1` | `0` mantém a buzina do SA |
+| `LcsVehicleSirens` | `1` | `0` mantém as sirenes do SA |
+| `LcsVehicleDoors` | `1` | `0` mantém os sons de porta/capô/porta-malas do SA |
+| `LcsVehicleEngines` | `1` | `0` mantém o motor e a partida do SA |
+| `LcsInterfaceSounds` | `1` | `0` mantém os sons de menu, pickups e HUD do SA |
 
-Sons de veículos, armas e pedestres do LCS ainda não estão implementados; cada um receberá a sua chave quando existir, e desligá-la manterá o som do SA.
+Sons de pedestres do LCS ainda não estão implementados; terão a sua chave quando existirem, e desligá-la manterá o som do SA.
 
 ## Validação
 

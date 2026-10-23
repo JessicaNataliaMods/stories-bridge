@@ -44,6 +44,21 @@ class ArchiveContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 map_effects.entries(stream)
 
+    def test_complete_geometry_replacement_is_bounded_and_replayable(self):
+        original_dff = struct.pack('<3I', 16, 3, 0x1803ffff)+b'old'
+        replacement = struct.pack('<3I', 16, 7, 0x1803ffff)+b'newmesh'
+        archive = struct.pack('<4sI', b'VER2', 1)+struct.pack('<IHH24s', 1, 1, 0, b'prop.dff')
+        archive += bytes(2048-len(archive))+original_dff+bytes(2048-len(original_dff))
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)/'world.img'
+            target.write_bytes(archive)
+            self.assertEqual(len(map_effects.rewrite_archive(target, {}, {'prop.dff':replacement})), 1)
+            self.assertEqual(map_effects.rewrite_archive(target, {}, {'prop.dff':replacement}), [])
+            with target.open('rb') as stream:
+                sector, size, _ = map_effects.entries(stream)[0]
+                stream.seek(sector*2048)
+                self.assertEqual(map_effects.dff_bytes(stream.read(size*2048)), replacement)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -20,6 +20,7 @@
 
 namespace fs=std::filesystem;
 bool atomic_only=false;
+bool atomic_damage=false;
 bool white_map=false;
 fs::path map_lighting;
 fs::path vehicle_wheel;
@@ -33,6 +34,9 @@ float vehicle_class_wheel_size=0.0f;
 fs::path ped_reference;
 float vehicle_wheel_scale=0;
 std::string selected_atomic;
+std::string damage_model_name;
+std::string near_atomic_name;
+std::string damaged_atomic_name;
 void map_inventory(const fs::path& input,bool effects_only=false) {
     for(const auto& e:fs::directory_iterator(input)) {
         auto ext=e.path().extension().string();if(ext!=".dff" && ext!=".txd")continue;
@@ -291,7 +295,32 @@ void convert_dff(rw::StreamFile& in,rw::StreamFile& out) {
     if(!rw::findChunk(&in,rw::ID_CLUMP,&header.length,&header.version)) throw std::runtime_error("No RenderWare clump");
     auto clump=rw::Clump::streamRead(&in);
     if(!clump) throw std::runtime_error("Cannot decode RenderWare clump");
-    if(atomic_only || !selected_atomic.empty()) {
+    if(atomic_damage) {
+        if(damage_model_name.empty() || near_atomic_name.empty() || damaged_atomic_name.empty() ||
+           damage_model_name.size()>19 || damage_model_name.find_first_of("/\\")!=std::string::npos ||
+           near_atomic_name==damaged_atomic_name)
+            throw std::runtime_error("Invalid damaged-atomic names; model base must fit the SA _dam name");
+        std::vector<rw::Atomic*> all;
+        rw::Atomic *near=nullptr,*damaged=nullptr;
+        FORLIST(link,clump->atomics) {
+            auto a=rw::Atomic::fromClump(link);all.push_back(a);
+            const std::string name=gta::getNodeName(a->getFrame());
+            if(name==near_atomic_name) {if(near)throw std::runtime_error("Duplicate requested near atomic");near=a;}
+            if(name==damaged_atomic_name) {if(damaged)throw std::runtime_error("Duplicate requested damaged atomic");damaged=a;}
+        }
+        if(all.size()!=2 || !near || !damaged || near==damaged) {
+            clump->destroy();
+            throw std::runtime_error("Damaged conversion requires exactly the two explicitly named source atomics");
+        }
+        auto rename_frame=[](rw::Frame* frame,const std::string& name) {
+            if(name.size()>23)throw std::runtime_error("RenderWare atomic name exceeds 23 bytes");
+            auto target=gta::getNodeName(frame);
+            std::memset(target,0,24);
+            std::memcpy(target,name.data(),name.size());
+        };
+        rename_frame(near->getFrame(),damage_model_name);
+        rename_frame(damaged->getFrame(),damage_model_name+"_dam");
+    } else if(atomic_only || !selected_atomic.empty()) {
         std::vector<rw::Atomic*> all;
         rw::Atomic* selected=nullptr;int best=INT_MAX;
         FORLIST(link,clump->atomics) {
@@ -418,15 +447,17 @@ int main(int argc,char** argv) {
         const bool merge=argc==5 && std::string(argv[2])=="--merge-txd";
         const bool named=argc==5 && std::string(argv[3])=="--atomic-name";
         const bool lit_map=argc==5 && std::string(argv[3])=="--atomic-white";
-        if(argc!=3 && !(argc==4 && (std::string(argv[3])=="--atomic"||std::string(argv[3])=="--atomic-white")) && !car && !dodo_plane && !boat && !class_vehicle && !ped && !merge && !named && !lit_map) throw std::runtime_error("Usage: lcs-convert-rw INPUT OUTPUT [--atomic | --atomic-white [LIGHTING.psl] | --atomic-name NAME | --sa-boat COLLISION.col | --sa-bike COLLISION.col | --sa-generic-boat COLLISION.col | --sa-heli COLLISION.col WHEEL_SIZE | --sa-ambient-plane COLLISION.col WHEEL_SIZE | --sa-train COLLISION.col | --sa-car WHEEL.dff SCALE [COLLISION.col] | --sa-dodo-plane WHEEL.dff SCALE COLLISION.col | --sa-ped NATIVE_PED.dff]; OWN.txd --merge-txd SHARED.txd OUTPUT.txd");
+        const bool damaged=argc==8 && std::string(argv[3])=="--atomic-damage";
+        if(argc!=3 && !(argc==4 && (std::string(argv[3])=="--atomic"||std::string(argv[3])=="--atomic-white")) && !car && !dodo_plane && !boat && !class_vehicle && !ped && !merge && !named && !lit_map && !damaged) throw std::runtime_error("Usage: lcs-convert-rw INPUT OUTPUT [--atomic | --atomic-white [LIGHTING.psl] | --atomic-name NAME | --atomic-damage MODEL NEAR_ATOMIC DAMAGED_ATOMIC LIGHTING.psl | --sa-boat COLLISION.col | --sa-bike COLLISION.col | --sa-generic-boat COLLISION.col | --sa-heli COLLISION.col WHEEL_SIZE | --sa-ambient-plane COLLISION.col WHEEL_SIZE | --sa-train COLLISION.col | --sa-car WHEEL.dff SCALE [COLLISION.col] | --sa-dodo-plane WHEEL.dff SCALE COLLISION.col | --sa-ped NATIVE_PED.dff]; OWN.txd --merge-txd SHARED.txd OUTPUT.txd");
         vehicle_dodo_plane=dodo_plane;
         if(class_vehicle){vehicle_class=std::string(argv[3]).substr(5);vehicle_class_collision=argv[4];}
         if(heli||ambient_plane)vehicle_class_wheel_size=std::stof(argv[5]);
         if(ped)ped_reference=argv[4];
-        white_map=(argc==4||lit_map)&&std::string(argv[3])=="--atomic-white";
+        white_map=((argc==4||lit_map)&&std::string(argv[3])=="--atomic-white")||damaged;
         vehicle_boat=boat;
         if(boat)vehicle_boat_collision=argv[4];
         atomic_only=(argc==4 && (std::string(argv[3])=="--atomic" || std::string(argv[3])=="--atomic-white"))||lit_map;if(lit_map)map_lighting=argv[4];if(named)selected_atomic=argv[4];if(car||dodo_plane){vehicle_wheel=argv[4];vehicle_wheel_scale=std::stof(argv[5]);if(argc==7)vehicle_car_collision=argv[6];}
+        if(damaged){atomic_damage=true;damage_model_name=argv[4];near_atomic_name=argv[5];damaged_atomic_name=argv[6];map_lighting=argv[7];}
         fs::path input=argv[1],output=argv[2];
         bool info=std::string(argv[2])=="--info" || std::string(argv[2])=="--texture-index" || std::string(argv[2])=="--validate" || std::string(argv[2])=="--validate-actors" || std::string(argv[2])=="--validate-col" || std::string(argv[2])=="--validate-sa-car" || std::string(argv[2])=="--validate-sa-boat" || std::string(argv[2])=="--validate-sa-bike" || std::string(argv[2])=="--validate-sa-generic-boat" || std::string(argv[2])=="--validate-sa-heli" || std::string(argv[2])=="--map-inventory";
         info=info || std::string(argv[2])=="--validate-sa-dodo-plane" || std::string(argv[2])=="--validate-sa-train" || std::string(argv[2])=="--validate-sa-ambient-plane" || std::string(argv[2])=="--validate-sa-rhino-muzzle" || std::string(argv[2])=="--map-effects-inventory";

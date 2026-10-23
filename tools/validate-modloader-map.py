@@ -3,8 +3,11 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import struct
 import importlib.util
+import subprocess
+import tempfile
 from traffic_profile import audit as path_audit
 from native_collisions import retained_definitions, validate as validate_native_collisions
 from gameplay_ped_profile import validate as validate_gameplay_peds
@@ -12,6 +15,108 @@ from bootstrap_player_exports import export_player_globals
 import weapon_slots
 import weapon_animations
 from map_effects import expected_effects, inject_dff
+from rwgeom import inject_breakable
+
+
+def file_sha256(path):
+    with pathlib.Path(path).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def expected_damage(package):
+    """Validate the pinned source report and index damage transforms by asset."""
+    manifest_path = package/'metadata/map-damage.json'
+    campaign_path = package/'metadata/campaign.json'
+    if not campaign_path.is_file():
+        if manifest_path.exists():
+            raise ValueError('Map damage manifest has no campaign pin')
+        return {}, {}, None
+    campaign = json.loads(campaign_path.read_text())
+    pin = campaign.get('mapDamage')
+    if pin is None:
+        if manifest_path.exists():
+            raise ValueError('Map damage manifest is not pinned by the campaign')
+        return {}, {}, None
+    if pin.get('manifest') != 'metadata/map-damage.json' or \
+            not manifest_path.is_file() or file_sha256(manifest_path) != pin.get('sha256'):
+        raise ValueError('Map damage manifest is missing or not pinned by the campaign')
+    report = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if report.get('format') != 1 or report.get('gameExecuted') is not False:
+        raise ValueError('Invalid map damage report scope')
+    inputs = report.get('inputs')
+    if not isinstance(inputs, dict):
+        raise ValueError('Map damage input provenance is missing')
+    try:
+        streamed_source = pathlib.Path(inputs['streamedSource'])
+        converter = pathlib.Path(inputs['converter'])
+        lighting = pathlib.Path(inputs['lighting'])
+        lighting_sha = inputs['lightingSha256']
+    except (KeyError, TypeError) as error:
+        raise ValueError('Map damage input paths are incomplete') from error
+    if not all(path.is_absolute() for path in (streamed_source, converter, lighting)):
+        raise ValueError('Map damage input paths must be absolute')
+    if not isinstance(lighting_sha, str) or not re.fullmatch(r'[0-9a-f]{64}', lighting_sha):
+        raise ValueError('Invalid map damage lighting hash')
+    if not lighting.is_file() or file_sha256(lighting) != lighting_sha:
+        raise ValueError('Map damage lighting input changed')
+
+    damage_by_asset = {}
+    source_rows = report.get('damageAtomicBySourceModel', {})
+    if not isinstance(source_rows, dict):
+        raise ValueError('Invalid damaged-atomic inventory')
+    for key, row in source_rows.items():
+        if not isinstance(row, dict):
+            raise ValueError('Invalid damaged-atomic record')
+        source_name = row.get('sourceModel')
+        target_name = row.get('targetAsset')
+        if not isinstance(source_name, str) or source_name.casefold() != str(key).casefold() or \
+                not isinstance(target_name, str) or not re.fullmatch(r'[A-Za-z0-9_]+', source_name) or \
+                not re.fullmatch(r'[A-Za-z0-9_]+', target_name):
+            raise ValueError('Unsafe or inconsistent damaged-atomic identity')
+        for field in ('nearSourceAtomic', 'damagedSourceAtomic'):
+            value = row.get(field)
+            if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_]+', value):
+                raise ValueError('Invalid damaged-atomic source frame name')
+        source_sha = row.get('sourceSha256')
+        if not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{64}', source_sha):
+            raise ValueError('Invalid damaged-atomic source hash')
+        source_dff = streamed_source/(source_name+'.dff')
+        if not source_dff.is_file() or file_sha256(source_dff) != source_sha:
+            raise ValueError('Original streamed damage DFF changed: '+source_name)
+        asset_key = target_name.lower()+'.dff'
+        if asset_key in damage_by_asset:
+            raise ValueError('Multiple damage transforms resolve to one target asset')
+        damage_by_asset[asset_key] = (row, source_dff)
+    if damage_by_asset and not converter.is_file():
+        raise ValueError('Native map converter recorded for damage is missing')
+    if damage_by_asset and not streamed_source.is_dir():
+        raise ValueError('Streamed source directory recorded for damage is missing')
+    if report.get('convertedDamagePairs') != len(damage_by_asset):
+        raise ValueError('Damaged-atomic report count differs from its inventory')
+
+    breakable_by_asset = {}
+    breakable_rows = report.get('breakableBySourceModel', {})
+    if not isinstance(breakable_rows, dict):
+        raise ValueError('Invalid breakable geometry inventory')
+    for key, row in breakable_rows.items():
+        if not isinstance(row, dict):
+            raise ValueError('Invalid breakable geometry record')
+        source_name = row.get('sourceModel')
+        target_name = row.get('targetAsset')
+        if not isinstance(source_name, str) or source_name.casefold() != str(key).casefold() or \
+                not isinstance(target_name, str) or not re.fullmatch(r'[A-Za-z0-9_]+', source_name) or \
+                not re.fullmatch(r'[A-Za-z0-9_]+', target_name):
+            raise ValueError('Unsafe or inconsistent breakable geometry identity')
+        if str(row.get('pluginId', '')).lower() != '0x253f2fd' or \
+                not isinstance(row.get('geometries'), int) or row['geometries'] < 1:
+            raise ValueError('Invalid breakable plugin geometry record')
+        asset_key = target_name.lower()+'.dff'
+        if asset_key in breakable_by_asset:
+            raise ValueError('Multiple breakable records resolve to one target asset')
+        breakable_by_asset[asset_key] = row
+    if report.get('breakableModels') != len(breakable_by_asset):
+        raise ValueError('Breakable report count differs from its inventory')
+    return damage_by_asset, breakable_by_asset, (converter, lighting)
 
 
 def collision_records(path):
@@ -608,6 +713,7 @@ def validate_campaign(package, map_report):
 def validate(package, source):
     report = json.loads((package / 'metadata/map-preview.json').read_text())
     effects = expected_effects(package)
+    damage_by_asset, breakable_by_asset, damage_inputs = expected_damage(package)
     game = pathlib.Path(report['gameDirectory'])
     native_objects = validate_native_collisions(package, game, retained_definitions(game))
     models = report['modelAliases']
@@ -640,30 +746,49 @@ def validate(package, source):
                 expected[name.lower()] = file
     archive = package / 'models/lcs/world.img'
     checked = set()
-    with archive.open('rb') as stream:
-        signature, count = struct.unpack('<4sI', stream.read(8))
-        if signature != b'VER2' or count != len(expected):
-            raise ValueError('IMG directory count/signature mismatch')
-        entries = [struct.unpack('<IHH24s', stream.read(32)) for _ in range(count)]
-        intervals = []
-        minimum = ((8 + count * 32 + 2047) // 2048) * 2048
-        for sector, size, compressed_size, rawname in entries:
-            name = rawname.split(b'\0')[0].decode('ascii').lower()
-            start, length = sector * 2048, (compressed_size or size) * 2048
-            if name not in expected or name in checked or start < minimum or start + length > archive.stat().st_size:
-                raise ValueError('Invalid IMG entry: ' + name)
-            checked.add(name)
-            original = expected[name].read_bytes()
-            if name in effects:
-                original = inject_dff(original, effects[name])
-            stream.seek(start)
-            converted = stream.read(length)
-            if converted[:len(original)] != original or any(converted[len(original):]):
-                raise ValueError('Native DFF/TXD bytes changed during packaging: ' + name)
-            intervals.append((start, start + length))
-        ordered = sorted(intervals)
-        if any(a[1] > b[0] for a, b in zip(ordered, ordered[1:])):
-            raise ValueError('IMG entry regions overlap')
+    with tempfile.TemporaryDirectory(prefix='.map-damage-', dir=package/'metadata') as damage_work:
+        with archive.open('rb') as stream:
+            signature, count = struct.unpack('<4sI', stream.read(8))
+            if signature != b'VER2' or count != len(expected):
+                raise ValueError('IMG directory count/signature mismatch')
+            entries = [struct.unpack('<IHH24s', stream.read(32)) for _ in range(count)]
+            intervals = []
+            minimum = ((8 + count * 32 + 2047) // 2048) * 2048
+            for sector, size, compressed_size, rawname in entries:
+                name = rawname.split(b'\0')[0].decode('ascii').lower()
+                start, length = sector * 2048, (compressed_size or size) * 2048
+                if name not in expected or name in checked or start < minimum or start + length > archive.stat().st_size:
+                    raise ValueError('Invalid IMG entry: ' + name)
+                checked.add(name)
+                original = expected[name].read_bytes()
+                if name in damage_by_asset:
+                    if not name.endswith('.dff') or damage_inputs is None:
+                        raise ValueError('Damaged-atomic record does not target a DFF')
+                    damage_row, source_dff = damage_by_asset[name]
+                    converter, lighting = damage_inputs
+                    converted_path = pathlib.Path(damage_work)/(damage_row['targetAsset']+'.dff')
+                    command = [str(converter.resolve()), str(source_dff.resolve()),
+                               str(converted_path.resolve()), '--atomic-damage',
+                               damage_row['targetAsset'], damage_row['nearSourceAtomic'],
+                               damage_row['damagedSourceAtomic'], str(lighting.resolve())]
+                    result = subprocess.run(command, capture_output=True, text=True, check=False)
+                    if result.returncode or not converted_path.is_file():
+                        raise ValueError('Native converter could not reproduce damaged atomic: '+name)
+                    original = converted_path.read_bytes()
+                if name in effects:
+                    original = inject_dff(original, effects[name])
+                if name in breakable_by_asset:
+                    original = inject_breakable(original)
+                stream.seek(start)
+                converted = stream.read(length)
+                if converted[:len(original)] != original or any(converted[len(original):]):
+                    raise ValueError('Native DFF/TXD bytes changed during packaging: ' + name)
+                intervals.append((start, start + length))
+            ordered = sorted(intervals)
+            if any(a[1] > b[0] for a, b in zip(ordered, ordered[1:])):
+                raise ValueError('IMG entry regions overlap')
+    if set(damage_by_asset) - checked or set(breakable_by_asset) - checked:
+        raise ValueError('Damage geometry references an asset absent from the map archive')
     before = list(collision_records(source / 'world.col'))
     after = list(collision_records(package / 'models/lcs/world.col'))
     if len(before) != len(after) or len(after) != report['collisions']:
@@ -749,6 +874,8 @@ def validate(package, source):
                   modelBindings=len(bindings), placementTransformsAndLodLinksPreserved=placements,
                   radarTilesPreserved=len(radar), waterPreserved=True, originalRenderRulesPreserved=True, gameExecuted=False,
                   completeGame=False, nativeNavigation=navigation, nativeObjectCollisions=native_objects)
+    result['nativeDamageAtomicModels'] = len(damage_by_asset)
+    result['nativeBreakableModels'] = len(breakable_by_asset)
     result['gameplayPeds'] = validate_gameplay_peds(package, game)
     result['campaign'] = validate_campaign(package, report)
     (package / 'metadata/package-validation.json').write_text(json.dumps(result, indent=2), encoding='utf-8')

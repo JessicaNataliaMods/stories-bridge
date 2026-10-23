@@ -3,7 +3,7 @@
 This development build exports verified assets and an explicit coverage report.
 It refuses to mark a package complete or install it while source links remain.
 """
-import argparse, collections, hashlib, json, pathlib, struct, subprocess
+import argparse, collections, hashlib, json, math, pathlib, struct, subprocess
 import importlib.util
 from ps2_input import extract_iso
 from ps2_world import Game, Level, Chunk
@@ -15,6 +15,7 @@ from ps2_layout import export_review
 from ps2_geometry_audit import validate as validate_geometry
 from ps2_lighting import export_lighting
 from ps2_effects import export_assets as export_effects
+from map_damage import export_damage
 from ps2_paths import export_paths
 from ps2_player import export_player
 from ps2_peds import export_peds
@@ -176,9 +177,19 @@ def main():
             if length>size:raise ValueError('Original asset exceeds stream entry')
             return Chunk(raw[:length],f'original stream {index}')
         for model,m in g.models.items():
-            if m['type'] not in (1,3) or not m['name'] or not m['streamSize'] or model in models:continue
+            if m['type'] not in (1,3) or not m['name'] or not m['streamSize']:continue
+            is_map_model = model in models
+            if is_map_model:
+                atomics=m.get('atomics',0);distances=m.get('draw',())
+                if m.get('flags',0)&0x10 or atomics not in (2,3) or len(distances)<atomics:continue
+                if any(not math.isfinite(float(value)) for value in distances[:atomics]):continue
+                marks_damage=(float(distances[0])>=float(distances[1]) if atomics==2 else
+                    not (float(distances[0])<float(distances[1]) and
+                         float(distances[1])<float(distances[2])))
+                if not marks_damage:continue
             source=streamed/(m['name']+'.mdl');source.write_bytes(read_chunk(model).data)
             native=streamed/(m['name']+'.dff');run(rsl,source,native)
+            if is_map_model:continue
             run(rw,native,assets/(m['name']+'.dff'),'--atomic-white',intermediate/'map-lighting.psl')
             models[model]=dict(name=m['name'],txd=m['txd'],kind='original MDL')
         radar_source=a.output/'radar-source';radar_source.mkdir()
@@ -186,6 +197,12 @@ def main():
             if not name.upper().startswith('RADAR'):continue
             source=streamed/(name+'.tex');source.write_bytes(read_chunk(4900+txslot).data)
             run(rsl,source,radar_source/(name+'.txd'))
+    # The verified PS2 source input set has GAME.DTZ and GTA3PS2.IMG, but no
+    # standalone DATA/OBJECT.DAT. Do not guess breakable candidates from model
+    # names or the hash catalogue; export only source-proven damaged atomics.
+    damage = export_damage(
+        g, models, assets, streamed, rw, intermediate/'map-lighting.psl',
+        a.output/'damage-validation.json')
     effects = export_effects(g, models, assets, a.output/'effects-validation.json')
     print(run(writer,'--radar',radar_source,a.output/'radar'),flush=True)
     water=export_water(g,a.output/'water.dat')
@@ -221,7 +238,8 @@ def main():
                           fallbackNames=0),
         nativeMaterialValidation=material_validation,
         nativePixelValidation=pixel_validation,
-        nativeGeometryValidation=geometry_validation,nativeLighting=lighting,nativeEffects=effects,
+        nativeGeometryValidation=geometry_validation,nativeLighting=lighting,nativeDamage=damage,
+        nativeEffects=effects,
         placedModelsNotExported=missing,unresolvedSourceLinks=links['unresolved'],
         prototypeFramesWithoutEntityBinding=links.get('prototypeLinks',[]),
         remaining='Source link review, null/collision-only objects, LOD/IPL/profile packaging and engine verification')

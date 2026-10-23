@@ -23,13 +23,15 @@ class ObjectDataContracts(unittest.TestCase):
         self.assertEqual(row[10], '1')
 
     def test_damage_enums_are_translated(self):
-        self.assertEqual(objects.translate_object_data(self.source('1'), 'authored_alias')[8], '200')
+        self.assertEqual(objects.translate_object_data(self.source('1'), 'authored_alias')[8], '0')
         donor = (*self.source('1'), '0', '0')
-        self.assertEqual(objects.translate_object_data(self.source('1'), 'authored_alias', donor)[8], '200')
+        self.assertEqual(objects.translate_object_data(self.source('1'), 'authored_alias', donor)[8], '0')
         row = objects.translate_object_data(self.source('3'), 'authored_alias')
-        self.assertEqual(row[8], '200')
-        row = objects.translate_object_data(self.source('50'), 'authored_alias')
-        self.assertEqual(row[8], '20')
+        self.assertEqual(row[8], '0')
+        self.assertEqual(objects.translate_object_data(self.source('3'), 'authored_alias', damaged_atomic_available=True)[8], '1')
+        for mode in ('50', '60', '70', '80', '100'):
+            self.assertEqual(objects.translate_object_data(self.source(mode), 'authored_alias')[8], '0')
+            self.assertEqual(objects.translate_object_data(self.source(mode), 'authored_alias', breakable_effect=200)[8], '200')
 
     def test_unknown_damage_is_not_silently_static(self):
         with self.assertRaises(ValueError):

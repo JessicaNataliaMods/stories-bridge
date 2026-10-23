@@ -41,6 +41,7 @@ class SaMapTrafficLights final {
 public:
     bool configure(const std::filesystem::path& model_bindings) {
         model_id_ = 0;
+        signal_passes_=0;
         bridge_models_.clear();
         std::ifstream input(model_bindings);
         if (!input) return false;
@@ -80,20 +81,17 @@ public:
     }
 
     uint16_t model_id() const noexcept { return model_id_; }
+    uint64_t signal_passes() const noexcept { return signal_passes_; }
 
     bool handles_model(uint16_t model_id) const noexcept {
         return model_id_ != 0 && model_id == model_id_;
     }
 
     // Call from the per-entity CEntity::ProcessLightsForEntity dispatch. If
-    // this returns true, the caller must skip that model's generic 2DFX pass:
-    // DisplayActualLight selects the visible lamp using SA's orientation and
-    // LightForCars1/2_Visual phase functions. Its 2DFX records come from the
-    // converted DFF's native Geometry plugin, so this adapter stores no map
-    // coordinates or extracted game data. Do not reject a null CPlaceable
-    // matrix: the retail GetMatrix() used by DisplayActualLight lazily allocates
-    // one from the entity placement, as it does for SA's own traffic lights.
-    bool process_entity(uintptr_t entity) const noexcept {
+    // this returns true, the native pass was already called with the active
+    // signal phase. Geometry and light parameters remain the original LCS
+    // records; phase/orientation and light rendering remain native SA.
+    bool process_entity(uintptr_t entity, uintptr_t native_process_lights) const noexcept {
         if (!entity || model_id_ == 0) return false;
 
         uint16_t model_id = 0;
@@ -110,14 +108,58 @@ public:
         if(bridge_models_.count(model_id))return !sa_lcs_bridge_lights_flashing();
         if (!handles_model(model_id)) return false;
 
-        using DisplayActualLight = void(__cdecl*)(uintptr_t);
-        reinterpret_cast<DisplayActualLight>(sa_map_traffic_lights_display_actual_light)(entity);
-        return true;
+        if(!native_process_lights)return false;
+        // DisplayActualLight hardcodes the SA lamp's corona size/brightness.
+        // Keep the LCS light records' sizes, textures, ranges and colours, and
+        // select their enabled phase with SA's own orientation/timer functions.
+        // Shared model effects are restored before processing another entity.
+        uintptr_t effects[6]{};
+        uint16_t saved[6]{};
+        unsigned changed=0;
+        bool handled=false;
+        __try {
+            const auto info=*reinterpret_cast<const uintptr_t*>(0xA9B0C8+4*model_id);
+            if(!info || *reinterpret_cast<const uint8_t*>(info+0x0D)!=6)return false;
+            using Direction=int(__cdecl*)(uintptr_t);
+            using Phase=uint8_t(__cdecl*)();
+            using Effect=uintptr_t(__thiscall*)(uintptr_t,int);
+            const auto direction=reinterpret_cast<Direction>(0x49D580)(entity);
+            const auto state=reinterpret_cast<Phase>(direction==1?0x49D350:0x49D3A0)();
+            const auto matrix=*reinterpret_cast<const uintptr_t*>(entity+0x14);
+            if(!matrix)return false; // FindTrafficLightType allocates it natively.
+            const auto* forward=reinterpret_cast<const float*>(matrix+0x10);
+            const auto* camera_forward=reinterpret_cast<const float*>(0xB6F9AC);
+            const bool same_direction=forward[0]*camera_forward[0]+forward[1]*camera_forward[1]+
+                forward[2]*camera_forward[2]>0.0f;
+            for(unsigned i=0;i<6;++i) {
+                effects[i]=reinterpret_cast<Effect>(0x4C4C70)(info,static_cast<int>(i));
+                if(!effects[i] || *reinterpret_cast<const uint8_t*>(effects[i]+0x0C)!=0)return false;
+                saved[i]=*reinterpret_cast<const uint16_t*>(effects[i]+0x24);
+            }
+            __try {
+                for(unsigned i=0;i<6;++i) {
+                    const auto* rgb=reinterpret_cast<const uint8_t*>(effects[i]+0x10);
+                    const unsigned colour=rgb[0]>200?(rgb[1]>100?1:2):0;
+                    const bool front=*reinterpret_cast<const float*>(effects[i]+4)>0.0f;
+                    *reinterpret_cast<uint16_t*>(effects[i]+0x24)=
+                        (saved[i]&~uint16_t(0x60))|(colour==state && front!=same_direction?0x60:0);
+                    ++changed;
+                }
+                reinterpret_cast<void(__thiscall*)(uintptr_t)>(native_process_lights)(entity);
+                if(signal_passes_!=UINT64_MAX)++signal_passes_;
+                handled=true;
+            } __finally {
+                for(unsigned i=0;i<changed;++i)
+                    *reinterpret_cast<uint16_t*>(effects[i]+0x24)=saved[i];
+            }
+        } __except(1) {return false;}
+        return handled;
     }
 
 private:
     uint16_t model_id_ = 0;
     std::set<uint16_t> bridge_models_;
+    mutable uint64_t signal_passes_=0;
 };
 
 } // namespace lcs

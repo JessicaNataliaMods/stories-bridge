@@ -18,4 +18,13 @@ assert pe.read(0x535FD2, 2) == b'\x33\xc0'
 calls = {instruction.operands[0].imm for instruction in pe.instructions(0x49DAB0, 0x700)
          if instruction.mnemonic == 'call' and instruction.operands[0].type == native.X86_OP_IMM}
 assert {0x49D520, 0x49D4D0, 0x49D350, 0x49D3A0}.issubset(calls)
+direction_calls = {i.operands[0].imm for i in pe.instructions(0x49D580, 32)
+                   if i.mnemonic == 'call' and i.operands[0].type == native.X86_OP_IMM}
+assert 0x49D520 in direction_calls
+display = list(pe.instructions(0x49DAB0, 0x240))
+# Match the native front/back filter's camera-forward storage and matrix axis.
+assert any('0xb6f9ac' in i.op_str for i in display)
+assert any('0xb6f9b0' in i.op_str for i in display)
+assert any('0xb6f9b4' in i.op_str for i in display)
+assert any(i.mnemonic == 'call' and i.op_str == '0x4c4c70' for i in display)
 print('PASS: native visible-entity thiscall boundary and orientation/visual signal phases; game not executed')

@@ -15,3 +15,10 @@ shared = {target: names for target, names in targets.items() if len(names) > 1}
 allowed = {'brassknuckle', 'gun_dildo2', 'golfclub', 'nitestick', 'bat', 'sniper', 'minigun'}
 assert set(shared) <= allowed, shared
 print('PASS: original weapon types and models map to their own SA slots; gameExecuted=false')
+
+# The gun-sound table (include/lcs/weapon_audio.hpp) routes SA weapon types to the
+# original weapon converted onto them: its copy of the table must match too.
+header = (root / 'include/lcs/weapon_audio.hpp').read_text(encoding='utf-8')
+copy = re.search(r'lcs_to_sa_weapon_type\{([^}]*)\}', header)[1]
+assert [int(value) for value in copy.split(',')] == weapon_slots.WEAPON_TYPES, 'weapon_audio.hpp weapon types differ from tools/weapon_slots.py'
+print('PASS: weapon sound table agrees with the slot plan; gameExecuted=false')

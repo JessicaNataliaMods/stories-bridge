@@ -103,7 +103,7 @@ std::vector<uint8_t> AudioArchive::ps2_bytes(uint32_t index) const {
     if(!raw.read(reinterpret_cast<char*>(bytes.data()),std::streamsize(bytes.size())))throw std::runtime_error("Truncated original PS2 sample");
     return bytes;
 }
-AudioArchive::Ps2Layout AudioArchive::ps2_layout(uint32_t index,const std::vector<uint8_t>& bytes) const {
+AudioArchive::Ps2Layout AudioArchive::ps2_layout(uint32_t index,const std::vector<uint8_t>& bytes,uint32_t assumed_frequency) const {
     // VAG samples: 48-byte big-endian header, then one omitted lead frame.
     // Headerless samples begin at their loop-start frame. Playback ends after
     // the first end-flag frame (bit 0); a repeat flag (bit 1) on it loops from
@@ -118,7 +118,9 @@ AudioArchive::Ps2Layout AudioArchive::ps2_layout(uint32_t index,const std::vecto
         const auto big=[&](size_t at){return uint32_t(bytes[at])<<24|uint32_t(bytes[at+1])<<16|uint32_t(bytes[at+2])<<8|bytes[at+3];};
         if(big(12)!=bytes.size()-48 || big(16)!=source.frequency)throw std::runtime_error("Original VAG header differs from its bank index");
     }
-    if(!source.frequency || source.frequency>192000)
+    // A headerless record's rate field is not a sample rate (zero or out of range): only then may the caller supply one.
+    const auto frequency=source.frequency && source.frequency<=192000?source.frequency:assumed_frequency;
+    if(!frequency || frequency>192000)
         throw std::runtime_error("Original PS2 sample "+std::to_string(index)+" has no source frequency (headerless engine bank)");
     uint32_t first=vag?1:frames;
     if(!vag)for(uint32_t frame=0;frame<frames;++frame)if(flags(frame)&4){first=frame;break;}
@@ -126,7 +128,7 @@ AudioArchive::Ps2Layout AudioArchive::ps2_layout(uint32_t index,const std::vecto
     for(uint32_t frame=first;frame<frames;++frame)if(flags(frame)&1){terminal=frame;break;}
     if(first>=frames || terminal>=frames)throw std::runtime_error("Original PS2 sample has no playable frame range");
     Ps2Layout layout{first,terminal-first+1,{}};
-    layout.record.size=layout.frames*56;layout.record.frequency=source.frequency;
+    layout.record.size=layout.frames*56;layout.record.frequency=frequency;
     if(flags(terminal)&2) {
         uint32_t start=terminal+1;
         for(uint32_t frame=first;frame<=terminal;++frame)if(flags(frame)&4){start=frame;break;}
@@ -155,6 +157,18 @@ AudioSample AudioArchive::sample(uint32_t index) const {
     std::ifstream raw(raw_,std::ios::binary);raw.seekg(record.offset);
     if(!raw.read(reinterpret_cast<char*>(result.pcm.data()),record.size))throw std::runtime_error("Truncated mission audio PCM");
     return result;
+}
+AudioSample AudioArchive::sample(uint32_t index,uint32_t assumed_frequency) const {
+    if(!ps2_mode_ || !assumed_frequency)return sample(index);
+    const auto bytes=ps2_bytes(index);const auto layout=ps2_layout(index,bytes,assumed_frequency);
+    const size_t data=bytes.size()>=64 && !std::memcmp(bytes.data(),"VAGp",4)?48:0;
+    AudioSample result;result.frequency=layout.record.frequency;
+    result.pcm=decode_spu2_voice(bytes.data()+data+16*size_t(layout.first),layout.frames);
+    return result;
+}
+AudioRecord AudioArchive::record(uint32_t index,uint32_t assumed_frequency) const {
+    if(!ps2_mode_ || !assumed_frequency)return record(index);
+    return ps2_layout(index,ps2_bytes(index),assumed_frequency).record;
 }
 const AudioRecord& AudioArchive::record(uint32_t index) const {
     if(ps2_mode_) {
@@ -264,6 +278,92 @@ bool AudioAdapter::play_car_jerk(const std::array<float,3>& position) {
     for(size_t i=0;i+1<effect.pcm.size();i+=2){int16_t value;std::memcpy(&value,effect.pcm.data()+i,2);value=int16_t(int(value)*int(volume)/127);std::memcpy(effect.pcm.data()+i,&value,2);}
     const auto positioned_mix=mission_audio_mix(position,*listener_state);
     return play_positioned_effect(effect,{127,positioned_mix.pan});
+}
+const AudioSample* AudioAdapter::world_sample(uint32_t index) {
+    const auto found=world_samples_.find(index);
+    if(found!=world_samples_.end())return &found->second;
+    try {return &world_samples_.emplace(index,archive_.sample(index)).first->second;}
+    catch(const std::exception&) {return nullptr;}
+}
+namespace {
+// ComputeVolume: full volume inside range/5, then a squared linear fall-off (uint8, capped at 127).
+unsigned world_one_shot_volume(unsigned emitting,float range,float distance) {
+    const float minimum=range/5.0f;
+    if(!(minimum>distance))emitting=std::min<unsigned>(127,uint8_t(float(emitting)*std::pow((range-distance)/(range-minimum),2.0f)));
+    return emitting;
+}
+uint8_t world_effect_gain(float effects_scale) {
+    return uint8_t(std::clamp(std::isfinite(effects_scale)?effects_scale:1.0f,0.0f,1.0f)*127.0f+0.5f);
+}
+void scale_mono_pcm(std::vector<uint8_t>& pcm,unsigned volume) {
+    for(size_t i=0;i+1<pcm.size();i+=2){int16_t value;std::memcpy(&value,pcm.data()+i,2);value=int16_t(int(value)*int(volume)/127);std::memcpy(pcm.data()+i,&value,2);}
+}
+}
+AudioAdapter::WorldSound AudioAdapter::play_weapon_shot(const WeaponShotSpec& spec,const std::array<float,3>& position,float effects_scale) {
+    if(!play_positioned_effect || !spatial_listener)return WorldSound::refused;
+    for(const auto value:position)if(!std::isfinite(value))return WorldSound::refused;
+    const auto listener_state=spatial_listener();
+    if(!listener_state)return WorldSound::refused;
+    float squared=0;
+    for(size_t axis=0;axis<3;++axis){
+        if(!std::isfinite(listener_state->position[axis]) || !std::isfinite(listener_state->right[axis]))return WorldSound::refused;
+        const float delta=position[axis]-listener_state->position[axis];squared+=delta*delta;
+    }
+    const float range=weapon_shot_max_distance*one_shot_range_scale;
+    if(!(squared<range*range))return WorldSound::silent;
+    const auto* left=world_sample(spec.left_sample);
+    if(!left || left->channels!=1 || !left->frequency)return WorldSound::refused;
+    const AudioSample* right=nullptr;
+    const float distance=std::sqrt(squared);
+    const bool close_stereo=spec.stereo && distance<weapon_stereo_distance_fraction*range;
+    if(close_stereo){
+        right=world_sample(spec.left_sample+1);
+        if(!right || right->channels!=1 || right->frequency!=left->frequency)return WorldSound::refused;
+    }
+    audio_random_.regenerate(); // Event-owned variation, as in play_car_jerk.
+    const int32_t frequency=spec.fixed_frequency?spec.fixed_frequency+audio_random_.displacement(spec.fixed_jitter)
+        :int32_t(left->frequency)+audio_random_.displacement(left->frequency>>5);
+    const unsigned emitting=spec.volume_modulus?audio_random_.table(spec.volume_table)%spec.volume_modulus+spec.volume_base:spec.volume_base;
+    const unsigned volume=world_one_shot_volume(emitting,range,distance);
+    if(volume==0 || frequency<=0)return WorldSound::silent;
+    AudioSample effect;effect.frequency=uint32_t(frequency);
+    uint8_t pan=63;
+    if(close_stereo){
+        // The original queues LEFT at pan 0 and RIGHT at pan 127, both 2D: one interleaved frame is L,R.
+        effect.channels=2;effect.pcm.assign(std::max(left->pcm.size(),right->pcm.size())*2,0);
+        for(size_t i=0;i+1<left->pcm.size();i+=2)std::memcpy(effect.pcm.data()+i*2,left->pcm.data()+i,2);
+        for(size_t i=0;i+1<right->pcm.size();i+=2)std::memcpy(effect.pcm.data()+i*2+2,right->pcm.data()+i,2);
+    } else {
+        effect.channels=1;effect.pcm=left->pcm;
+        pan=mission_audio_mix(position,*listener_state).pan;
+    }
+    scale_mono_pcm(effect.pcm,volume); // interleaved 16-bit values scale the same way
+    if(post_world_effect){post_world_effect(std::move(effect),{world_effect_gain(effects_scale),pan});return WorldSound::played;}
+    return play_positioned_effect(effect,{world_effect_gain(effects_scale),pan})?WorldSound::played:WorldSound::refused;
+}
+AudioAdapter::WorldSound AudioAdapter::play_weapon_reload(const WeaponReloadSpec& spec,const std::array<float,3>& position,float effects_scale) {
+    if(!play_positioned_effect || !spatial_listener)return WorldSound::refused;
+    for(const auto value:position)if(!std::isfinite(value))return WorldSound::refused;
+    const auto listener_state=spatial_listener();
+    if(!listener_state)return WorldSound::refused;
+    float squared=0;
+    for(size_t axis=0;axis<3;++axis){
+        if(!std::isfinite(listener_state->position[axis]) || !std::isfinite(listener_state->right[axis]))return WorldSound::refused;
+        const float delta=position[axis]-listener_state->position[axis];squared+=delta*delta;
+    }
+    const float range=weapon_reload_max_distance*one_shot_range_scale;
+    if(!(squared<range*range))return WorldSound::silent;
+    const auto* sample=world_sample(spec.sample);
+    if(!sample || sample->channels!=1 || !sample->frequency)return WorldSound::refused;
+    audio_random_.regenerate();
+    const int32_t frequency=(spec.fixed_frequency?spec.fixed_frequency:int32_t(sample->frequency))+audio_random_.displacement(300);
+    const unsigned volume=world_one_shot_volume(weapon_reload_volume,range,std::sqrt(squared));
+    if(volume==0 || frequency<=0)return WorldSound::silent;
+    AudioSample effect;effect.channels=1;effect.frequency=uint32_t(frequency);effect.pcm=sample->pcm;
+    scale_mono_pcm(effect.pcm,volume);
+    const AudioMix mix{world_effect_gain(effects_scale),mission_audio_mix(position,*listener_state).pan};
+    if(post_world_effect){post_world_effect(std::move(effect),mix);return WorldSound::played;}
+    return play_positioned_effect(effect,mix)?WorldSound::played:WorldSound::refused;
 }
 bool AudioAdapter::handles(uint16_t opcode) {
     switch(opcode) {

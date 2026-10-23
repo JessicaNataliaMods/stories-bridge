@@ -57,8 +57,11 @@ def dff_bytes(data):
     return data[:length]
 
 
-def rewrite_archive(path, effects):
+def rewrite_archive(path, effects, replacements=None):
     """Rewrite one private IMG atomically, preserving every untouched entry."""
+    replacements = replacements or {}
+    if set(effects) & set(replacements):
+        raise ValueError('Choose effects or complete replacement for each archive entry')
     temporary = path.with_name(path.name+'.effects-new')
     if temporary.exists():
         raise ValueError('Unfinished effects archive already exists')
@@ -67,15 +70,17 @@ def rewrite_archive(path, effects):
         rows = entries(source)
         payloads = {}
         for sector, size, name in rows:
-            if name.lower() not in effects:
+            if name.lower() not in effects and name.lower() not in replacements:
                 continue
             source.seek(sector*2048)
             original = dff_bytes(source.read(size*2048))
-            converted = inject_dff(original, effects[name.lower()])
+            converted = replacements[name.lower()] if name.lower() in replacements else inject_dff(original, effects[name.lower()])
+            if name.lower() in replacements and dff_bytes(converted) != converted:
+                raise ValueError('Replacement DFF must have no IMG padding')
             payloads[name.lower()] = converted
             if converted != original:
                 changed.append(dict(name=name, beforeSha256=hashlib.sha256(original).hexdigest(), afterSha256=hashlib.sha256(converted).hexdigest()))
-        if set(payloads) != set(effects):
+        if set(payloads) != set(effects) | set(replacements):
             raise ValueError('An effect model is absent from the map archive')
         if not changed:
             return []

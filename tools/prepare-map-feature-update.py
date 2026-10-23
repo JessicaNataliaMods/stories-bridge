@@ -9,8 +9,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tempfile
 
 import map_effects
+import map_damage
 from gameplay_ped_profile import validate as validate_peds
 from native_collisions import retained_definitions
 import weapon_slots
@@ -90,7 +92,7 @@ def reconcile_resource_records(package):
     return campaign['preservedAssetBookkeeping']
 
 
-def prepare(base, output, original, rom, names, asi, version, asset_cache=None):
+def prepare(base, output, original, rom, names, asi, version, asset_cache=None, map_source=None, converter=None):
     base, output = base.resolve(), output.resolve()
     if output.exists() or base == output or base in output.parents or output in base.parents:
         raise ValueError('Choose a new separate private staging directory')
@@ -130,9 +132,37 @@ def prepare(base, output, original, rom, names, asi, version, asset_cache=None):
     spec.loader.exec_module(objects)
     preview = json.loads((output/'metadata/map-preview.json').read_text())
     game = Path(preview['gameDirectory'])
-    physics = objects.mount(output, original, game/'data/object.dat')
+    if not map_source or not converter:
+        raise ValueError('Map feature update requires source damage geometry and its converter')
+    source_game = map_effects.Game(rom, names)
+    model_records = {}
+    for line in (output/'data/lcs/model-bindings.tsv').read_text().splitlines():
+        source_id, runtime_id, source_name, alias = line.split('\t')
+        model_records[int(source_id)] = dict(name=alias)
+    source_rows = objects.read_object_data(original/'DATA/OBJECT.DAT', 11)
+    fragment_sources = {name for name, row in source_rows.items() if int(row[8]) in (50, 60, 70, 80, 100)}
+    with tempfile.TemporaryDirectory(prefix='.map-damage-', dir=output) as temporary:
+        assets = Path(temporary)
+        selected = {row['name'].lower()+'.dff' for model_id, row in model_records.items()
+                    if map_damage._source_damage(source_game.models[model_id]) is None or
+                    source_game.models[model_id].get('name', '').lower() in fragment_sources}
+        with (output/'models/lcs/world.img').open('rb') as archive:
+            for sector, size, name in map_effects.entries(archive):
+                if name.lower() in selected:
+                    archive.seek(sector*2048)
+                    (assets/name).write_bytes(map_effects.dff_bytes(archive.read(size*2048)))
+        damage = map_damage.export_damage(source_game, model_records, assets,
+            map_source/'streamed-source', converter, map_source/'intermediate/map-lighting.psl',
+            output/'metadata/map-damage.json', breakable_names=fragment_sources)
+        replacements = {name.lower()+'.dff':(assets/(name+'.dff')).read_bytes() for name in damage['replacementAssets']}
+        map_effects.rewrite_archive(output/'models/lcs/world.img', {}, replacements)
+    physics = objects.mount(output, original, game/'data/object.dat',
+        damaged_atomic_names=damage['damageAtomicBySourceModel'],
+        breakable_names=damage['breakableBySourceModel'],
+        breakable_effects={name:200 for name in damage['breakableBySourceModel']})
     effects = map_effects.mount(output, rom, names)
     campaign = json.loads((output/'metadata/campaign.json').read_text())
+    campaign['mapDamage'] = dict(manifest='metadata/map-damage.json', sha256=map_effects.digest(output/'metadata/map-damage.json'))
     campaign['mapEffects'] = dict(manifest='metadata/map-effects.json', sha256=map_effects.digest(output/'metadata/map-effects.json'))
     changed = {'LcsSaBridge.asi', 'models/lcs/world.img', 'data/lcs/world.ide',
                'data/object.dat', 'data/lcs/door-bindings.tsv', 'metadata/garage-doors.json'}
@@ -147,7 +177,7 @@ def prepare(base, output, original, rom, names, asi, version, asset_cache=None):
     (output/'metadata/map-preview.json').write_text(json.dumps(preview, indent=2)+'\n')
     reconcile_resource_records(output)
     return dict(stage=str(output), version=version, sharedAssets=preserved,
-                physics=physics, effects=effects, gameExecuted=False)
+                physics=physics, effects=effects, damage=damage, gameExecuted=False)
 
 
 if __name__ == '__main__':
@@ -156,5 +186,7 @@ if __name__ == '__main__':
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--version', type=int, required=True)
     parser.add_argument('--asset-cache', type=Path, help='Existing local stage; only byte-identical assets may be shared')
+    parser.add_argument('--map-source', type=Path, required=True)
+    parser.add_argument('--converter', type=Path, required=True)
     args = parser.parse_args()
     print(json.dumps(prepare(**vars(args)), indent=2))
