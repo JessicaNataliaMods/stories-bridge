@@ -11,6 +11,7 @@ from gameplay_ped_profile import validate as validate_gameplay_peds
 from bootstrap_player_exports import export_player_globals
 import weapon_slots
 import weapon_animations
+from map_effects import expected_effects, inject_dff
 
 
 def collision_records(path):
@@ -28,7 +29,7 @@ def validate_campaign(package, map_report):
     if map_report['mode'] != 'Campaign':
         return dict(enabled=False)
     campaign=json.loads((package/'metadata/campaign.json').read_text())
-    if campaign.get('version',0)>=75:
+    if campaign.get('version',0)>=75 or campaign.get('garageDoors'):
         spec=importlib.util.spec_from_file_location('mounted_garage_doors',pathlib.Path(__file__).with_name('mount-campaign-garage-doors.py'))
         doors=importlib.util.module_from_spec(spec);spec.loader.exec_module(doors)
         doors.audit(package)
@@ -403,7 +404,12 @@ def validate_campaign(package, map_report):
                 # a fleet mounted after that step pins the current file directly.
                 weapons_step=campaign['weaponEquivalents94']
                 entity_rows=[line for line in (package/row['relative']).read_text(encoding='ascii').splitlines() if not line.endswith('\tobject')]
-                if row['afterSha256'].lower()!=weapons_step['beforeSha256'] or digest(package/row['relative'])!=campaign['equivalentSha256'] or \
+                # The fleet can have been regenerated after the weapon step.
+                # Its historical whole-file hash then need not equal the
+                # earlier weapon input hash. Every vehicle row was checked
+                # against the pinned source above; preserve the weapon step's
+                # exact non-object rows and validate the object rows below.
+                if digest(package/row['relative'])!=campaign['equivalentSha256'] or \
                    hashlib.sha256('\n'.join(entity_rows).encode('ascii')).hexdigest()!=weapons_step['entityRowsSha256']:
                     raise ValueError('Fleet bindings changed beyond the weapon slot rows')
                 continue
@@ -438,7 +444,12 @@ def validate_campaign(package, map_report):
                 raise ValueError('Weapon visual does not match script model binding')
             if slotted and weapon_slots.WEAPON_TARGETS[slot['selectedOriginal'].lower()]!=slot['nativeName']:
                 raise ValueError('Weapon slot differs from the packaged slot plan')
-            sums={'.dff':row['dffSHA256'],'.txd':row['txdSHA256']}
+            visual_row=row
+            if slot.get('visualOriginal'):
+                if weapon_slots.VISUAL_SOURCE_OVERRIDES.get(slot['selectedOriginal'].lower())!=slot['visualOriginal']:
+                    raise ValueError('Unsupported separate weapon visual source')
+                visual_row=by_name[slot['visualOriginal']]
+            sums={'.dff':visual_row['dffSHA256'],'.txd':visual_row['txdSHA256']}
             if slot.get('assembly'):
                 # Rebuild the minigun body+barrel clump from the converted sources.
                 barrel=by_name[slot['assembly']['barrel']]
@@ -596,6 +607,7 @@ def validate_campaign(package, map_report):
 
 def validate(package, source):
     report = json.loads((package / 'metadata/map-preview.json').read_text())
+    effects = expected_effects(package)
     game = pathlib.Path(report['gameDirectory'])
     native_objects = validate_native_collisions(package, game, retained_definitions(game))
     models = report['modelAliases']
@@ -642,6 +654,8 @@ def validate(package, source):
                 raise ValueError('Invalid IMG entry: ' + name)
             checked.add(name)
             original = expected[name].read_bytes()
+            if name in effects:
+                original = inject_dff(original, effects[name])
             stream.seek(start)
             converted = stream.read(length)
             if converted[:len(original)] != original or any(converted[len(original):]):

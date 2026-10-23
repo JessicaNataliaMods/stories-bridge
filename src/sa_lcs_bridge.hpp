@@ -72,6 +72,7 @@ bool sa_lcs_bridge_profile_matches();
 // These functions only touch the three bridge buildings owned by that map.
 NativeResult sa_lcs_bridge_set_state(int32_t state);
 bool sa_lcs_bridge_tick();
+bool sa_lcs_bridge_lights_flashing();
 void sa_lcs_bridge_cleanup();
 
 }

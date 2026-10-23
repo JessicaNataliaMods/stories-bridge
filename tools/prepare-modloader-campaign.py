@@ -160,6 +160,20 @@ def prepare(args):
                   animationStorage=dict(nativeBlocks=animation_storage['nativeBlocks'],automaticStreamingBlocks=0,
                                         sha256=digest(animation_directory/'storage.json')))
     (output/'metadata/campaign.json').write_text(json.dumps(campaign,indent=2))
+    # ObjectInfo must exist before SA loads the IPL: otherwise movable props
+    # become CBuildings and cannot enter the native object physics consumer.
+    spec=importlib.util.spec_from_file_location('map_objects',ROOT/'tools/mount-campaign-garage-doors.py')
+    map_objects=importlib.util.module_from_spec(spec);spec.loader.exec_module(map_objects)
+    map_objects.mount(output,args.data,args.game/'data/object.dat')
+    import map_effects
+    map_effects.mount(output,args.rom,ROOT/'vendor/librwgta/librwgta-master/tools/storiesconv/hashes.inc')
+    campaign=json.loads((output/'metadata/campaign.json').read_text())
+    campaign['mapEffects']=dict(manifest='metadata/map-effects.json',sha256=digest(output/'metadata/map-effects.json'))
+    changed_map_resources={'models/lcs/world.img','data/lcs/world.ide','data/object.dat',
+                           'data/lcs/door-bindings.tsv','metadata/garage-doors.json'}
+    for row in campaign['originalResources']+campaign['preservedApprovedResources']:
+        if row['relative'] in changed_map_resources:row['sha256']=digest(output/row['relative'])
+    (output/'metadata/campaign.json').write_text(json.dumps(campaign,indent=2))
     (output/'LEIA.txt').write_text('Campanha experimental LCS sobre mapa/personagens aprovados. Nova partida.\n'
         'A intro e os objetivos usam o MAIN.SCM original. O jogo inteiro ainda requer implementacao e testes.\n'
         'Diagnosticos: LcsSaBridge.log nesta pasta. Nao distribuir este pacote de assets; distribuir somente o conversor.\n')

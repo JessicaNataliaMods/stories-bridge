@@ -33,7 +33,7 @@ with zipfile.ZipFile(resources/'python/python312.zip','w',compression=zipfile.ZI
 for name in ('msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','vcruntime140.dll','msvcp140_atomic_wait.dll'):
     copy(args.crt/name,out/name);copy(args.crt/name,resources/'build/Release'/name)
 scripts=('convert-ps2-map.py','ps2_world.py','ps2_export.py','ps2_input.py','ps2_water.py','ps2_names.py','ps2_visibility.py','ps2_layout.py','ps2_lighting.py','ps2_geometry_audit.py','ps2_paths.py','ps2_player.py','ps2_peds.py','ps2_weapons.py','prepare-weapon-models.py','prepare-campaign-vehicles.py','vehicle_config_fields.py','vehicle_config.py','mount-campaign-vehicles.py','validate-sa-paths.py','validate-ps2-map.py','validate-ps2-texture-pixels.py','validate-ps2-layout.py','validate-ps2-player.py')
-scripts += ('vehicle_source_collision.py', 'ferrylib.py', 'rwgeom.py', 'rwtree.py', 'split_ferry_doors.py')
+scripts += ('vehicle_source_collision.py', 'ferrylib.py', 'rwgeom.py', 'rwtree.py', 'split_ferry_doors.py', 'ps2_effects.py')
 for name in scripts:copy(root/'tools'/name,resources/'tools'/name)
 copy(root/'tools/ped_rig_audit.py',resources/'tools/ped_rig_audit.py')
 copy(root/'local/metadata/ps2-source-revision.json',resources/'local/metadata/ps2-source-revision.json')

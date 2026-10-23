@@ -428,6 +428,11 @@ bool sa_lcs_bridge_tick() {
     }
 }
 
+bool sa_lcs_bridge_lights_flashing() {
+    // CBridge::ShouldLightsBeFlashing: all source states except fully down.
+    return bridge.configured && bridge.current != state_down;
+}
+
 void sa_lcs_bridge_cleanup() {
     if (!bridge.configured || !sa_lcs_bridge_profile_matches()) return;
     __try {

@@ -116,9 +116,12 @@ def remount_weapons(output, campaign, game):
         if selected is None:
             raise ValueError('Shared weapon target needs a canonical original: ' + target)
         row = by_name[selected]
-        dff, txd = source_bytes(row, '.dff', 'dffSHA256'), source_bytes(row, '.txd', 'txdSHA256')
+        visual_name=slots_module.VISUAL_SOURCE_OVERRIDES.get(row['originalName'].lower())
+        visual_row=by_name[visual_name] if visual_name else row
+        dff, txd = source_bytes(visual_row, '.dff', 'dffSHA256'), source_bytes(visual_row, '.txd', 'txdSHA256')
         slot = dict(nativeModel=sa_ids[target], nativeName=target, selectedOriginal=row['originalName'],
                     originalModel=row['originalModelId'], aliases=sorted(set(names) - {selected}))
+        if visual_name:slot['visualOriginal']=visual_name
         if target == 'minigun':
             barrel = by_name['minigun2']
             dff = slots_module.assemble_minigun(dff, source_bytes(barrel, '.dff', 'dffSHA256'))

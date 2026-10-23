@@ -59,6 +59,10 @@ ANIMATIONS_ENABLED = False
 # (CANAIM, 0x1) gets MOVEAIM and MOVEFIRE (0x30). (The original LCS only allowed it for the Colt45,
 # Tec9 and silenced Ingram; this is a deliberate user-requested change.)
 MIN_ACCURACY = 1.2
+# The held/thrown remote charge uses the grenade body. LCS's model named
+# "bomb" is the separate detonator, which is not the charge being thrown.
+# Keep script/weapon identity independent from this explicit visual choice.
+VISUAL_SOURCE_OVERRIDES = {'bomb': 'grenade'}
 ANIMATED_GROUPS = {"colt45": "PISTOL", "python": "DESERT_EAGLE", "shotgun": "SHOTGUN", "buddy": "SPAS12",
                    "uzi": "MP5", "rifle": "M4", "flame": "FTHROWER", "grenade": "GRENADE"}
 

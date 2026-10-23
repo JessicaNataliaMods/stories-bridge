@@ -33,7 +33,7 @@ float vehicle_class_wheel_size=0.0f;
 fs::path ped_reference;
 float vehicle_wheel_scale=0;
 std::string selected_atomic;
-void map_inventory(const fs::path& input) {
+void map_inventory(const fs::path& input,bool effects_only=false) {
     for(const auto& e:fs::directory_iterator(input)) {
         auto ext=e.path().extension().string();if(ext!=".dff" && ext!=".txd")continue;
         rw::StreamFile in;if(!in.open(e.path().string().c_str(),"rb"))throw std::runtime_error("Cannot open map asset");
@@ -44,6 +44,17 @@ void map_inventory(const fs::path& input) {
             FORLIST(link,c->atomics) {
                 auto g=rw::Atomic::fromClump(link)->geometry;
                 if(!g || (g->numVertices && !g->colors))throw std::runtime_error(name+": missing vertex prelight");
+                if(effects_only) {
+                    const auto count=gta::getNum2dEffects(g);
+                    const auto effects=gta::get2dEffects(g);
+                    for(int i=0;i<count;++i) {
+                        const auto& fx=effects[i];
+                        if(fx.type!=gta::ET_LIGHT)throw std::runtime_error("Unexpected map effect type");
+                        std::cout<<"F\t"<<name<<'\t'<<i<<'\t'<<fx.attr.l.flags<<'\t'<<int(fx.attr.l.flashiness)
+                                 <<'\t'<<int(fx.attr.l.col.red)<<'\t'<<int(fx.attr.l.col.green)<<'\t'<<int(fx.attr.l.col.blue)<<'\n';
+                    }
+                    continue;
+                }
                 for(int i=0;i<g->matList.numMaterials;++i) {
                     auto m=g->matList.materials[i];
                     if(!m || m->color.red!=255 || m->color.green!=255 || m->color.blue!=255)throw std::runtime_error(name+": nonwhite map material");
@@ -418,7 +429,7 @@ int main(int argc,char** argv) {
         atomic_only=(argc==4 && (std::string(argv[3])=="--atomic" || std::string(argv[3])=="--atomic-white"))||lit_map;if(lit_map)map_lighting=argv[4];if(named)selected_atomic=argv[4];if(car||dodo_plane){vehicle_wheel=argv[4];vehicle_wheel_scale=std::stof(argv[5]);if(argc==7)vehicle_car_collision=argv[6];}
         fs::path input=argv[1],output=argv[2];
         bool info=std::string(argv[2])=="--info" || std::string(argv[2])=="--texture-index" || std::string(argv[2])=="--validate" || std::string(argv[2])=="--validate-actors" || std::string(argv[2])=="--validate-col" || std::string(argv[2])=="--validate-sa-car" || std::string(argv[2])=="--validate-sa-boat" || std::string(argv[2])=="--validate-sa-bike" || std::string(argv[2])=="--validate-sa-generic-boat" || std::string(argv[2])=="--validate-sa-heli" || std::string(argv[2])=="--map-inventory";
-        info=info || std::string(argv[2])=="--validate-sa-dodo-plane" || std::string(argv[2])=="--validate-sa-train" || std::string(argv[2])=="--validate-sa-ambient-plane" || std::string(argv[2])=="--validate-sa-rhino-muzzle";
+        info=info || std::string(argv[2])=="--validate-sa-dodo-plane" || std::string(argv[2])=="--validate-sa-train" || std::string(argv[2])=="--validate-sa-ambient-plane" || std::string(argv[2])=="--validate-sa-rhino-muzzle" || std::string(argv[2])=="--map-effects-inventory";
         if(!info && fs::exists(output)) throw std::runtime_error("Output already exists");
         rw::Engine::init(); gta::attachPlugins(); rw::Engine::open(nullptr); rw::Engine::start();
         rw::Texture::setLoadTextures(false);
@@ -429,6 +440,7 @@ int main(int argc,char** argv) {
         }
         if(info) {
             if(std::string(argv[2])=="--map-inventory")map_inventory(input);
+            else if(std::string(argv[2])=="--map-effects-inventory")map_inventory(input,true);
             else if(std::string(argv[2])=="--texture-index") texture_index(input);
             else if(std::string(argv[2])=="--validate")validate_assets(input);
             else if(std::string(argv[2])=="--validate-actors")validate_assets(input,true);

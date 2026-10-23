@@ -42,6 +42,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "lcs/collectives.hpp"
 #include "sa_gameplay.hpp"
 #include "sa_world_preview.hpp"
+#include "sa_map_traffic_lights.hpp"
 #include "sa_lcs_bridge.hpp"
 #include "sa_world_sectors.hpp"
 #include "sa_allowed_collision.hpp"
@@ -127,6 +128,8 @@ std::optional<lcs::CampaignCheckpoint> pending_campaign_load, pending_campaign_s
 std::string campaign_load_diagnostic;
 std::filesystem::path pending_native_save;
 std::unique_ptr<lcs::SaWorldPreview> world_preview;
+lcs::SaMapTrafficLights map_traffic_lights;
+ScriptProcess original_map_lights=nullptr;
 // Original ADD_POINT keeps its previous location process-wide across scripts.
 lcs::ScriptMarkers::ProcessState marker_process;
 std::unique_ptr<lcs::SaPlayerSkins> player_skins;
@@ -1531,7 +1534,7 @@ void retire_campaign_world() {
     // alone is insufficient: LOAD/New Game can clear and set it again between
     // two Process callbacks, retaining stale handles and a halted VM otherwise.
     campaign.reset();
-    world_preview.reset();player_skins.reset();gameplay_skins.reset();
+    world_preview.reset();map_traffic_lights=lcs::SaMapTrafficLights{};player_skins.reset();gameplay_skins.reset();
     reported_fast_vehicles.clear();
     last_lane_sample=0;road_switches_reported=false;
     bindings.clear();equivalent_bindings.clear();marker_process={};
@@ -1617,6 +1620,8 @@ void observe_world() {
             }
             if(setting(L"OriginalMapRenderRules")==L"1") {
                 world_preview=std::make_unique<lcs::SaWorldPreview>(std::filesystem::path(directory));
+                if(!map_traffic_lights.configure(std::filesystem::path(directory)/L"model-bindings.tsv"))
+                    throw std::runtime_error("Cannot resolve converted traffic-light model identity");
                 log("Original island/atomic LOD ranges active; source physical buildings use normal collision sectors; CULLNONE at converted atomic draw callbacks (including road pass)");
             }
             if(setting(L"Mode")==L"Campaign" || setting(L"Mode")==L"FirstMission") {
@@ -2088,6 +2093,19 @@ bool install_campaign_storage() {
     const bool load=install_call(lcs::SACampaignSaveProfile::generic_load_call,reinterpret_cast<ScriptProcess>(&lcs::sa_campaign_generic_load_call),original_campaign_load,&bind_campaign_target);
     return save && load && lcs::sa_campaign_save_hooks_ready();
 }
+void __fastcall on_map_lights(void* entity,void*) {
+    if(!map_traffic_lights.process_entity(reinterpret_cast<uintptr_t>(entity)))
+        reinterpret_cast<void(__thiscall*)(void*)>(original_map_lights)(entity);
+}
+bool install_map_lights() {
+    // CEntity::PreRender: num2dfx gate, ECX=self, no stack arguments. Keep
+    // other entities on the current target, including another plugin's hook.
+    const uint8_t before[]={0x8B,0xD8,0x8A,0x47,0x0D,0x84,0xC0,0x89,0x5C,0x24,0x20,0x74,0x07,0x8B,0xCE};
+    if(std::memcmp(reinterpret_cast<const void*>(0x535FBE),before,sizeof(before)))return false;
+    const uint8_t after[]={0x33,0xC0};
+    if(std::memcmp(reinterpret_cast<const void*>(0x535FD2),after,sizeof(after)))return false;
+    return install_call(0x535FCD,reinterpret_cast<ScriptProcess>(&on_map_lights),original_map_lights);
+}
 bool install_hook() {
     if(original_process && original_startup_process && original_phone_phase && original_audio_main && original_audio_menu && original_mission_hud && original_marker_phase && original_marker_shutdown && original_world_shutdown && original_world_restart && lcs::sa_remote_door_policy_calls_healthy() && lcs::sa_sniper_query_calls_healthy() && lcs::sa_campaign_save_hooks_ready())return true;
     const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -2110,6 +2128,8 @@ bool install_hook() {
         }
     }
     const bool storage=install_campaign_storage();
+    if(setting(L"OriginalMapRenderRules")==L"1" && !install_map_lights())
+        log("Converted traffic-light PreRender call differs; native signal adapter unavailable");
     const bool startup=install_call(startup_process_call,&on_startup_scripts,original_startup_process);
     const bool loop=install_call(process_call,&on_game_process,original_process);
     const bool world_shutdown=install_call(0x53C9BC,&on_world_shutdown,original_world_shutdown);

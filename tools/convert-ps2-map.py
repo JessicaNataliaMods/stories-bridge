@@ -14,6 +14,7 @@ from ps2_visibility import assemblies,select_layers,key as visibility_key
 from ps2_layout import export_review
 from ps2_geometry_audit import validate as validate_geometry
 from ps2_lighting import export_lighting
+from ps2_effects import export_assets as export_effects
 from ps2_paths import export_paths
 from ps2_player import export_player
 from ps2_peds import export_peds
@@ -185,6 +186,7 @@ def main():
             if not name.upper().startswith('RADAR'):continue
             source=streamed/(name+'.tex');source.write_bytes(read_chunk(4900+txslot).data)
             run(rsl,source,radar_source/(name+'.txd'))
+    effects = export_effects(g, models, assets, a.output/'effects-validation.json')
     print(run(writer,'--radar',radar_source,a.output/'radar'),flush=True)
     water=export_water(g,a.output/'water.dat')
     collision_models=[m for m in g.models.values() if m['type'] in (1,3) and m['name'] and m['id'] in g.collisions]
@@ -219,7 +221,7 @@ def main():
                           fallbackNames=0),
         nativeMaterialValidation=material_validation,
         nativePixelValidation=pixel_validation,
-        nativeGeometryValidation=geometry_validation,nativeLighting=lighting,
+        nativeGeometryValidation=geometry_validation,nativeLighting=lighting,nativeEffects=effects,
         placedModelsNotExported=missing,unresolvedSourceLinks=links['unresolved'],
         prototypeFramesWithoutEntityBinding=links.get('prototypeLinks',[]),
         remaining='Source link review, null/collision-only objects, LOD/IPL/profile packaging and engine verification')
