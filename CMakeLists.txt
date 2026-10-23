@@ -493,12 +493,12 @@ if(BUILD_TESTING)
       endforeach()
     endif()
   endif()
-  if(ASSET_VALIDATION_PYTHON AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/out/gameplay-animations-v3/manifest.json")
+  if(ASSET_VALIDATION_PYTHON AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/out/gameplay-animations-v4/manifest.json")
     add_test(NAME original_gameplay_animation_records COMMAND "${ASSET_VALIDATION_PYTHON}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/gameplay_animation_tests.py" "${CMAKE_CURRENT_SOURCE_DIR}/out/gameplay-animations-v3")
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/out/named-animations/manifest.json")
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/gameplay_animation_tests.py" "${CMAKE_CURRENT_SOURCE_DIR}/out/gameplay-animations-v4")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/out/named-animations-v2/manifest.json")
       add_test(NAME original_named_animation_records COMMAND "${ASSET_VALIDATION_PYTHON}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/named_animation_tests.py" "${CMAKE_CURRENT_SOURCE_DIR}/out/named-animations")
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/named_animation_tests.py" "${CMAKE_CURRENT_SOURCE_DIR}/out/named-animations-v2")
     endif()
   endif()
   if(ASSET_VALIDATION_PYTHON AND EXISTS "${STORIES_PRIVATE_ROOT}/originals/lcs-ps2/CHK/PS2/GAME.DTZ")
@@ -538,8 +538,10 @@ if(BUILD_TESTING)
   if(ASSET_VALIDATION_PYTHON)
     add_test(NAME campaign_private_animation_storage COMMAND "${ASSET_VALIDATION_PYTHON}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/campaign_animation_storage_tests.py"
-      "${CMAKE_CURRENT_SOURCE_DIR}/out/campaign-copy4-v21/data/lcs/animations"
-      "${CMAKE_CURRENT_SOURCE_DIR}/out/gameplay-animations-v3" "${CMAKE_CURRENT_SOURCE_DIR}/out/named-animations")
+      "${CMAKE_CURRENT_SOURCE_DIR}/out/campaign-copy4-v124/data/lcs/animations"
+      "${CMAKE_CURRENT_SOURCE_DIR}/out/gameplay-animations-v4" "${CMAKE_CURRENT_SOURCE_DIR}/out/named-animations-v2")
+    add_test(NAME original_ped_animation_retarget COMMAND "${ASSET_VALIDATION_PYTHON}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/lcs_ifp_tests.py")
   endif()
   add_executable(lcs-campaign-package-tests tests/campaign_package_tests.cpp)
   target_link_libraries(lcs-campaign-package-tests PRIVATE lcs_core)

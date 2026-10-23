@@ -130,6 +130,7 @@ def validate(package,source,validation_build=None):
            'metadata/lcs-source/DATA/MAIN.SCM.bin','data/gta.dat',
            'data/lcs/animations/storage.json','data/lcs/animations/index.tsv',
            'data/lcs/animations/LG00.ifp.bin','data/lcs/animations/named/LN00.ifp.bin']
+    if campaign.get('pedAnimations124'):paths.append('anim/ped.ifp')
     if campaign.get('version',0)>=27:paths.append('metadata/lcs-source/DATA/WEAPON.DAT.bin')
     if campaign.get('version',0)>=32:paths.append('data/script/main.scm')
     if 57<=campaign.get('version',0)<90:paths.append('metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin')

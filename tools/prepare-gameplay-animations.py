@@ -1,10 +1,14 @@
-"""Prepare the original mission gesture blocks together; never execute GTA."""
+"""Prepare the original mission gesture blocks together; never execute GTA.
+
+Every block is retargeted to the SA frame tree (tools/lcs_ifp.py: the original
+thighs hang from Spine, SA's from Pelvis) before it is tagged."""
 import hashlib, json, re, struct, subprocess
 from pathlib import Path
+import lcs_ifp
 
 root = Path(__file__).resolve().parents[1]
 relcs = root / 'local/references/res-relcs' / 'src'
-out = root / 'out' / 'gameplay-animations-v3'
+out = root / 'out' / 'gameplay-animations-v4'
 manager = (relcs / 'animation' / 'AnimManager.cpp').read_text()
 ped = (relcs / 'peds' / 'Ped.cpp').read_text()
 enum = re.search(r'enum eWaitState\s*\{(.*?)\};', (relcs / 'peds' / 'Ped.h').read_text(), re.S)[1]
@@ -112,6 +116,7 @@ for block in blocks:
     selected.write_bytes(select_animations(source.read_bytes(), {b[1] for b in bindings.values() if b[0] == block}))
     if block == 'ped':
         selected.write_bytes(native_sequence_layout(selected.read_bytes()))
+    selected.write_bytes(lcs_ifp.retarget_anpk(selected.read_bytes())[0])
     report = run('lcs-ifp-inspect', selected, '--bindings')
     mapping = []
     for anim, name, tag, frames in re.findall(r'binding animation=(\S+) name=(.+) bone_tag=(-?\d+) keyframes=(\d+)', report):

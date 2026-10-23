@@ -264,6 +264,18 @@ def validate_campaign(package, map_report):
         for row in storage['files']:
             if digest(animation_directory/row['path'])!=row['sha256']:
                 raise ValueError('Private mission animation changed')
+    if campaign.get('pedAnimations124'):
+        # anim/ped.ifp must be exactly what the converter makes from the original block and the game's SA block.
+        step=campaign['pedAnimations124']
+        root=pathlib.Path(__file__).resolve().parents[1]
+        spec=importlib.util.spec_from_file_location('prepare_ped_animations',root/'tools/prepare-ped-animations.py')
+        ped_tool=importlib.util.module_from_spec(spec);spec.loader.exec_module(ped_tool)
+        regenerated,_=ped_tool.build((root/step['originalSource']).read_bytes(),(pathlib.Path(map_report['gameDirectory'])/'anim/ped.ifp').read_bytes())
+        if hashlib.sha256(regenerated).hexdigest()!=step['sha256'] or digest(package/step['block'])!=step['sha256'] or step['gameExecuted']:
+            raise ValueError('Converted ped animation block differs from its sources')
+        for key in ('gestureSources','namedSources'):
+            if digest(pathlib.Path(step[key]['directory'])/'manifest.json')!=step[key]['manifestSha256']:
+                raise ValueError('Prepared mission animation sources changed')
     if campaign.get('nativeStartupValidated'):
         proof_file=package/'metadata/campaign-startup-validation.json'
         if digest(proof_file)!=campaign.get('startupValidationSha256'):raise ValueError('Campaign startup proof missing or changed')
@@ -603,7 +615,7 @@ def validate_campaign(package, map_report):
                 expected_blocks['anim/weapons/'+block+'.ifp']=hashlib.sha256(data).hexdigest()
             if {row['relative']:row['sha256'] for row in step['blocks']}!=expected_blocks or \
                any(digest(package/relative)!=sha for relative,sha in expected_blocks.items()) or \
-               {path.relative_to(package).as_posix() for path in (package/'anim').rglob('*.ifp')}!=set(expected_blocks):
+               {path.relative_to(package).as_posix() for path in (package/'anim').rglob('*.ifp')}-{'anim/ped.ifp'}!=set(expected_blocks):
                 raise ValueError('Converted weapon animation blocks differ from their sources')
         for row in weapons['files']:
             if expected.get(row['relative'])!=row['sha256'] or digest(package/row['relative'])!=row['sha256']:
