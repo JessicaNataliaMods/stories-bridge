@@ -1598,6 +1598,12 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         if(!text_ready || !execute || !execute(call).executed){thread.diagnostic="Native message template/replacement playback failed";return StepResult::unsupported;}
         return StepResult::continued;
     }
+    if(opcode==COMMAND_CHAR_LOOK_AT_CHAR_ALWAYS || opcode==COMMAND_PLAYER_LOOK_AT_CHAR_ALWAYS || opcode==COMMAND_CHAR_LOOK_AT_PLAYER_ALWAYS) {
+        // Reported: SA's look-at task tilts the heads of mission characters far up, mainly in scripted cutscenes.
+        // The LCS look-at objectives are consumed without a native task; the animation keeps driving the head.
+        vm.parameter(thread);vm.parameter(thread);
+        return StepResult::continued;
+    }
     if(opcode==COMMAND_SET_CHARS_CHATTING) {
         const auto first=vm.parameter(thread),second=vm.parameter(thread),duration=vm.parameter(thread);
         if(!world_ready || !execute || !play_wait_animation || duration<0){thread.diagnostic="Original paired chat backend unavailable or invalid duration";return StepResult::unsupported;}
@@ -1610,7 +1616,7 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         // IDLE_chat association instead of misinterpreting that parameter.
         for(const auto actor:{first,second}) {
             const auto partner=actor==first?second:first;
-            for(const NativeCall& task:std::vector<NativeCall>{{0x05BA,{actor,duration}},{0x0639,{actor,partner}},{0x05BF,{actor,partner,duration}}}) {
+            for(const NativeCall& task:std::vector<NativeCall>{{0x05BA,{actor,duration}},{0x0639,{actor,partner}}}) {
                 if(!execute(task).executed){thread.diagnostic="Native paired chat task failed";return StepResult::unsupported;}
             }
             if(!play_wait_animation(actor,19,duration,true)){thread.diagnostic="Original paired chat animation unavailable";return StepResult::unsupported;}

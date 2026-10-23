@@ -186,7 +186,7 @@ int IsAiming(void* ped){
 void (*log_callback)(const char*)=nullptr;
 void Log(const char* fmt,...){
     if(!log_callback)return;
-    char buffer[384];va_list ap;va_start(ap,fmt);std::vsnprintf(buffer,sizeof(buffer),fmt,ap);va_end(ap);
+    char buffer[1600];va_list ap;va_start(ap,fmt);std::vsnprintf(buffer,sizeof(buffer),fmt,ap);va_end(ap);
     log_callback(buffer);
 }
 
@@ -320,6 +320,62 @@ void ApplyHandCorrection(void* ped){
     }
 }
 
+
+// Read-only pose telemetry for converted pedestrians (no behaviour change): a few peds per half second
+// get one "Ped pose" line with the skeleton as it is when drawn, after animation and IK. Offsets: CPed
+// +0x14 matrix pointer (pos at +0x30, forward at +0x10), +0x22 model index, +0x44 move speed, +0x530 ped state.
+u32 diag_window=0,diag_in_window=0;
+void LogBone(char* out,size_t size,RpHAnimHierarchyLite* h,int id,const char* label,const Vec3& origin){
+    const int index=reinterpret_cast<HAnimIndexFn>(native_entity_address(addr_hanim_index))(h,id);
+    if(index<0 || index>=h->numNodes){std::snprintf(out,size," %s=none",label);return;}
+    const RwMatrixLite& m=h->pMatrixArray[index];
+    std::snprintf(out,size," %s p(%.3f,%.3f,%.3f) r(%.2f,%.2f,%.2f) u(%.2f,%.2f,%.2f) a(%.2f,%.2f,%.2f)",label,
+                  m.pos.x-origin.x,m.pos.y-origin.y,m.pos.z-origin.z,m.right.x,m.right.y,m.right.z,m.up.x,m.up.y,m.up.z,m.at.x,m.at.y,m.at.z);
+}
+void DiagnosePed(void* ped){
+    const u32 now=GetTickCount();
+    if(now-diag_window>=500){diag_window=now;diag_in_window=0;}
+    if(diag_in_window>=6)return;
+    u8* base=reinterpret_cast<u8*>(ped);
+    const u32 state=*reinterpret_cast<u32*>(base+0x530);
+    if(state!=1)return;   // PED_IDLE-like live state; dead/ragdoll peds are not of interest
+    u8* xform=*reinterpret_cast<u8**>(base+0x14);
+    RpHAnimHierarchyLite* h=GetHierarchy(ped);
+    if(!xform || !h)return;
+    ++diag_in_window;
+    const Vec3 pos=*reinterpret_cast<Vec3*>(xform+0x30),forward=*reinterpret_cast<Vec3*>(xform+0x10);
+    const Vec3 speed=*reinterpret_cast<Vec3*>(base+0x44);
+    const u32 type=*reinterpret_cast<u32*>(base+ped_type);
+    char line[1400];
+    int n=std::snprintf(line,sizeof(line),"Ped pose: ped=%08X model=%u type=%u pos(%.2f,%.2f,%.2f) fwd(%.2f,%.2f) speed=%.2f nodes=%d",
+        u32(uintptr_t(ped)),unsigned(*reinterpret_cast<unsigned short*>(base+0x22)),type,pos.x,pos.y,pos.z,forward.x,forward.y,
+        std::sqrt(speed.x*speed.x+speed.y*speed.y),h->numNodes);
+    static const struct{int id;const char* label;}bones[]={{0,"root"},{1,"pelvis"},{2,"spine"},{4,"neck"},{5,"head"},{43,"footL"},{53,"footR"}};
+    for(const auto& b:bones){
+        if(n<0 || n>=int(sizeof(line))-200)break;
+        LogBone(line+n,sizeof(line)-size_t(n),h,b.id,b.label,pos);
+        n=int(std::strlen(line));
+    }
+    Log("%s",line);
+    // Associations of the ped's clump (layout as used by sa_gameplay.cpp: link at +4, hierarchy +0x14,
+    // blend +0x18, time +0x20, speed +0x24, id +0x2C, flags +0x2E; the hierarchy starts with the name hash).
+    char anims[900];int a=std::snprintf(anims,sizeof(anims),"Ped anim: ped=%08X model=%u",u32(uintptr_t(ped)),
+        unsigned(*reinterpret_cast<unsigned short*>(base+0x22)));
+    const u32 clump=*reinterpret_cast<u32*>(base+0x18);const u32 offset=*reinterpret_cast<u32*>(0xB5F878);
+    if(clump && offset<=4096){
+        const u32 data=*reinterpret_cast<u32*>(clump+offset);
+        u32 link=data?*reinterpret_cast<u32*>(data):0;
+        for(int count=0;link && count<12 && a<int(sizeof(anims))-90;++count){
+            const u32 assoc=link-4;const u32 hier=*reinterpret_cast<u32*>(assoc+0x14);
+            a+=std::snprintf(anims+a,sizeof(anims)-size_t(a)," [hash=%08X id=%d fl=%04X bl=%.2f t=%.2f sp=%.2f]",hier?*reinterpret_cast<u32*>(hier):0u,
+                int(*reinterpret_cast<short*>(assoc+0x2C)),unsigned(*reinterpret_cast<unsigned short*>(assoc+0x2E)),
+                *reinterpret_cast<float*>(assoc+0x18),*reinterpret_cast<float*>(assoc+0x20),*reinterpret_cast<float*>(assoc+0x24));
+            link=*reinterpret_cast<u32*>(link);
+        }
+    }
+    Log("%s",anims);
+}
+
 int VtableIndex(void* ped){
     const u32 v=*reinterpret_cast<u32*>(ped);
     for(int i=0;i<vtable_count;++i)if(v==vtables[i])return i;
@@ -345,6 +401,7 @@ void ReportException(void* ped){
 }
 void __fastcall HookRender(void* ped,void*){
     __try{ApplyHandCorrection(ped);}__except(ExceptionFilter(GetExceptionInformation())){ReportException(ped);}
+    __try{DiagnosePed(ped);}__except(EXCEPTION_EXECUTE_HANDLER){}
     const int i=VtableIndex(ped);
     PedVirtualFn prev=i>=0?prev_render[i]:prev_render[0];
     if(prev)prev(ped);
