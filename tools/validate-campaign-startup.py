@@ -55,7 +55,7 @@ def validate(package,source,validation_build=None):
         commands.append((validation_build/'Release/lcs-wander-path-tests.exe',[]))
     if campaign.get('version',0)>=57:
         commands.extend([(validation_build/'Release/lcs-ending-tune-transport-tests.exe',[]),
-                         (validation_build/'Release/lcs-owned-audio-output-tests.exe',[]),
+                         (validation_build/'Release/lcs-owned-audio-output-tests.exe',[ORIGINAL_AUDIO/'MUSIC/CITY.VB']),
                          (validation_build/'Release/lcs-ending-tune-source-tests.exe',
                           [ORIGINAL_AUDIO/'MUSIC/FINALE.VB' if campaign.get('version',0)>=90 else package/'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_ending_tune_contracts.py',
