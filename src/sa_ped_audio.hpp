@@ -61,6 +61,6 @@ public:
 // The provider is installed in the game module's initialization path; it must
 // return nullptr until the campaign-owned audio archive and mixer are ready.
 bool sa_ped_audio_profile_matches();
-bool sa_ped_audio_install(std::function<SaPedAudio*()> provider);
+bool sa_ped_audio_install(std::function<SaPedAudio*()> provider,bool mute_native_player=false);
 
 } // namespace lcs

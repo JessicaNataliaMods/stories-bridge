@@ -80,6 +80,11 @@ void decode_source_voice_ranges(const char* audio_directory) {
 
 int main(int argc, char** argv) {
     try {
+        const lcs::SaPedVoiceProfile player{0,true},npc{4,false};
+        check(lcs::mute_native_player_speech(player,true,false),"Unmapped native CJ gameplay voice is silent");
+        check(!lcs::mute_native_player_speech(player,true,true),"Accepted Toni replacement remains audible");
+        check(!lcs::mute_native_player_speech(npc,true,false),"NPC native fallback remains audible");
+        check(!lcs::mute_native_player_speech(player,false,false),"Explicit mute option off restores native policy");
         check(argc <= 2, "Usage: ped_audio_tests [original PS2 AUDIO directory]");
         using lcs::SaPedSpeechContext;
         using lcs::SaPedVoiceProfile;

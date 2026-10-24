@@ -60,6 +60,11 @@ struct SaPedVoiceProfile {
     uint32_t actor_seed = 0;
 };
 
+// Native CJ fallback only; accepted Toni replacement remains audible.
+inline bool mute_native_player_speech(const SaPedVoiceProfile& ped,bool enabled,bool replaced) {
+    return enabled && !replaced && ped.has_player_data && ped.ped_type<=1;
+}
+
 struct LcsPedVoiceRange {
     uint32_t first_sample = 0;
     uint8_t count = 0;

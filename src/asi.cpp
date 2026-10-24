@@ -2713,8 +2713,8 @@ bool install_hook() {
     if(setting(L"Mode")==L"Campaign" && setting(L"LcsVehicleSurfaceSounds")!=L"0")
         if(!(vehicle_surface_hooks_installed=lcs::sa_vehicle_surface_audio_install([](){return campaign?campaign->vehicle_surface_audio.get():nullptr;})))
             log("LCS vehicle surface audio profile differs; native sounds retained");
-    if(setting(L"Mode")==L"Campaign" && setting(L"LcsPedSounds")!=L"0") {
-        ped_sound_hooks_installed=lcs::sa_ped_audio_install([](){return campaign?campaign->ped_audio.get():nullptr;});
+    if(setting(L"Mode")==L"Campaign" && (setting(L"LcsPedSounds")!=L"0" || setting(L"LcsMuteCjSpeech")!=L"0")) {
+        ped_sound_hooks_installed=lcs::sa_ped_audio_install([](){return campaign?campaign->ped_audio.get():nullptr;},setting(L"LcsMuteCjSpeech")!=L"0");
         if(!ped_sound_hooks_installed)log("Original LCS ped sounds unavailable: SA speech profile differs; native voices retained");
     }
     const bool mission_hud=lcs::sa_hud_render_profile() && install_call(0x58FBEE,&on_mission_hud,original_mission_hud);

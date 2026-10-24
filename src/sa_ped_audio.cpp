@@ -37,6 +37,7 @@ constexpr uint8_t source_ped_comment_volume_behind_wall = 31;
 using PedAudioProvider = std::function<SaPedAudio*()>;
 PedAudioProvider ped_audio_provider;
 bool hook_installed = false;
+bool mute_native_player_fallback = false;
 
 struct NativeVector { float x, y, z; };
 
@@ -269,14 +270,17 @@ uint16_t __fastcall add_say_event_hook(void* self, void*, uint16_t audio_event,
     const auto accepted = reinterpret_cast<AddSayEvent>(add_say_event_target)(
         self, audio_event, context, delay_ms, probability, override_silence,
         force_audible, frontend);
-    if (accepted == 0xFFFF || !ped_audio_provider) return accepted;
+    if (accepted == 0xFFFF) return accepted;
+    bool replaced=false;
     try {
-        auto* audio = ped_audio_provider();
-        if (audio)
-            audio->replace_if_ready(self, audio_event, context, delay_ms,
-                                    force_audible != 0, frontend != 0);
-    } catch (...) {
-        // A replacement failure leaves the already accepted native event intact.
+        if(ped_audio_provider)if(auto* audio=ped_audio_provider())
+            replaced=audio->replace_if_ready(self,audio_event,context,delay_ms,
+                                             force_audible!=0,frontend!=0);
+    }catch(...){}
+    if(mute_native_player_fallback && !replaced) {
+        SaPedVoiceProfile profile;std::array<float,3> position{};float volume=0;
+        if(read_speech_entity(self,profile,position,volume) &&
+           mute_native_player_speech(profile,true,replaced))set_speech_volume(self,-1000.0f);
     }
     return accepted;
 }
@@ -489,11 +493,12 @@ bool sa_ped_audio_profile_matches() {
 #endif
 }
 
-bool sa_ped_audio_install(std::function<SaPedAudio*()> provider) {
+bool sa_ped_audio_install(std::function<SaPedAudio*()> provider,bool mute_native_player) {
 #if defined(_WIN32) && defined(_M_IX86)
     if (!provider || hook_installed || !sa_ped_audio_profile_matches()) return false;
     try {
         ped_audio_provider = std::move(provider);
+        mute_native_player_fallback = mute_native_player;
     } catch (...) {
         return false;
     }
@@ -505,7 +510,7 @@ bool sa_ped_audio_install(std::function<SaPedAudio*()> provider) {
     hook_installed = true;
     return true;
 #else
-    (void)provider;
+    (void)provider;(void)mute_native_player;
     return false;
 #endif
 }
