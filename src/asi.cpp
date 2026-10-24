@@ -35,6 +35,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "sa_lcs_radio.hpp"
 #include "sa_weapon_audio.hpp"
 #include "sa_vehicle_audio.hpp"
+#include "sa_vehicle_horn_dispatch.hpp"
 #include "sa_interface_audio.hpp"
 #include "sa_audio_jobs.hpp"
 #include "sa_audio_mixer.hpp"
@@ -2296,10 +2297,11 @@ void __fastcall on_vehicle_horn_siren(void* self,void*,int32_t horn,int32_t sire
     SlowSoundCall timing("vehicle horn/siren");
     try {if(auto* sounds=vehicle_sounds_ready())sounds->horn_siren(self,(horn&0xFF)!=0,(siren&0xFF)!=0,(fast&0xFF)!=0,params,taken_horn,taken_siren);}
     catch(...) {taken_horn=taken_siren=false;}
-    if(taken_horn && taken_siren)return;
-    // SA keeps whichever of the two the LCS sounds did not take over.
-    reinterpret_cast<void(__thiscall*)(void*,int32_t,int32_t,int32_t,void*)>(original_horn_siren)(
-        self,taken_horn?0:(horn&0xFF),taken_siren?0:(siren&0xFF),taken_siren?0:(fast&0xFF),params);
+    lcs::dispatch_vehicle_horn_siren(horn,siren,fast,taken_horn,taken_siren,
+        [&](int32_t native_horn,int32_t native_siren,int32_t native_fast){
+            reinterpret_cast<void(__thiscall*)(void*,int32_t,int32_t,int32_t,void*)>(original_horn_siren)(
+                self,native_horn,native_siren,native_fast,params);
+        });
 }
 template<ScriptProcess* Original,bool Player> void __fastcall on_vehicle_engine(void* self,void*,void* params) {
     SlowSoundCall timing("vehicle engine");

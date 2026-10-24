@@ -142,16 +142,30 @@ const SaVehicleSounds::Asset* SaVehicleSounds::asset(uint32_t sample,uint32_t as
         return &assets_.emplace(cache_key,std::move(value)).first->second;   // node-based map: the pointer stays valid
     } catch(const std::exception&) {return nullptr;}
 }
+uint64_t SaVehicleSounds::next_slot_revision() {
+    if(++slot_revision_==0)++slot_revision_;
+    return slot_revision_;
+}
 void SaVehicleSounds::publish(uint64_t id,uint32_t sample,uint32_t assumed_rate,uint32_t frequency,uint8_t volume,uint8_t pan) {
     std::lock_guard<std::mutex> guard(slot_mutex_);
     auto& slot=slots_[id];
-    if(slot.sample!=sample || slot.assumed_rate!=assumed_rate) {slot.ready=false;slot.failed=false;slot.silent=false;}
+    const bool restart=!slot.want;
+    const bool sample_changed=slot.sample!=sample || slot.assumed_rate!=assumed_rate;
+    if(restart || sample_changed) {
+        slot.revision=next_slot_revision();
+        slot.ready=false;slot.failed=false;slot.silent=false;
+        mixer_->release_loop(id);
+    }
     slot.want=true;slot.sample=sample;slot.assumed_rate=assumed_rate;slot.frequency=frequency;slot.volume=volume;slot.pan=pan;slot.touched=GetTickCount();
 }
 void SaVehicleSounds::release(uint64_t id) {
     std::lock_guard<std::mutex> guard(slot_mutex_);
     const auto found=slots_.find(id);
-    if(found!=slots_.end())found->second.want=false;
+    if(found==slots_.end() || !found->second.want)return;
+    auto& slot=found->second;
+    slot.want=false;slot.revision=next_slot_revision();
+    slot.ready=false;slot.failed=false;slot.silent=false;
+    mixer_->release_loop(id);
 }
 bool SaVehicleSounds::ready(uint64_t id) {
     std::lock_guard<std::mutex> guard(slot_mutex_);
@@ -165,9 +179,8 @@ bool SaVehicleSounds::failed(uint64_t id) {
 }
 // Worker thread: resolves assets and publishes loops to the shared PCM mixer.
 void SaVehicleSounds::tick() {
-    struct Desired {uint64_t id;uint32_t sample,rate,frequency;uint8_t volume,pan;};
+    struct Desired {uint64_t id;uint32_t sample,rate;uint64_t revision;};
     std::vector<Desired> desired;
-    std::vector<uint64_t> released;
     const uint32_t now=GetTickCount();
     {
         std::lock_guard<std::mutex> guard(slot_mutex_);
@@ -175,27 +188,35 @@ void SaVehicleSounds::tick() {
             auto& slot=it->second;
             const bool alive=slot.want && now-slot.touched<400;
             if(!alive) {
-                released.push_back(it->first);
+                mixer_->release_loop(it->first);
                 it=slots_.erase(it);continue;
             }
             if(!slot.failed && !slot.silent)
-                desired.push_back({it->first,slot.sample,slot.assumed_rate,slot.frequency,slot.volume,slot.pan});
+                desired.push_back({it->first,slot.sample,slot.assumed_rate,slot.revision});
             ++it;
         }
     }
-    for(const auto id:released)mixer_->release_loop(id);
     for(const auto& request:desired) {
         const auto* a=asset(request.sample,request.rate);
+        std::lock_guard<std::mutex> guard(slot_mutex_);
+        const auto found=slots_.find(request.id);
+        if(found==slots_.end())continue;
+        auto& slot=found->second;
+        if(!slot.want || slot.revision!=request.revision || slot.sample!=request.sample || slot.assumed_rate!=request.rate)continue;
+        if(GetTickCount()-slot.touched>=400) {
+            slot.want=false;slot.revision=next_slot_revision();
+            slot.ready=false;slot.failed=false;slot.silent=false;
+            mixer_->release_loop(request.id);
+            slots_.erase(found);
+            continue;
+        }
         bool accepted=false,silent=false;
         if(a) {
             silent=a->silent;
             if(silent) mixer_->release_loop(request.id);
-            else accepted=mixer_->publish_loop(request.id,a->pcm,a->begin,a->end,request.frequency,request.volume,request.pan);
+            else accepted=mixer_->publish_loop(request.id,a->pcm,a->begin,a->end,slot.frequency,slot.volume,slot.pan);
         }
-        std::lock_guard<std::mutex> guard(slot_mutex_);
-        const auto found=slots_.find(request.id);
-        if(found==slots_.end() || found->second.sample!=request.sample || found->second.assumed_rate!=request.rate)continue;
-        auto& slot=found->second;
+        if(!a || (!silent && !accepted))mixer_->release_loop(request.id);
         slot.silent=silent;
         slot.ready=silent || accepted;
         slot.failed=!a || (!silent && !accepted);

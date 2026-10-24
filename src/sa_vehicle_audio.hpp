@@ -54,7 +54,7 @@ class SaVehicleSounds {
     enum Kind : uint64_t {horn_loop=0,siren_loop=1,engine_idle_loop=2,engine_rev_loop=3};
     // A looping voice wanted by the game thread and kept up to date by the worker.
     struct Slot {
-        bool want=false;uint32_t sample=0,assumed_rate=0,frequency=0;uint8_t volume=0,pan=63;uint32_t touched=0;   // game thread writes
+        bool want=false;uint32_t sample=0,assumed_rate=0,frequency=0;uint8_t volume=0,pan=63;uint32_t touched=0;uint64_t revision=0; // game thread writes
         bool ready=false,failed=false,silent=false;                                                              // worker status
     };
     struct Entry {
@@ -74,6 +74,7 @@ class SaVehicleSounds {
     float range_scale_=1.0f;
     std::mutex slot_mutex_;
     std::unordered_map<uint64_t,Slot> slots_;
+    uint64_t slot_revision_=0;                         // slot_mutex_: unique across erase/recreate
     std::mutex asset_mutex_;
     std::unordered_map<uint64_t,Asset> assets_;
     SourceAudioRandom random_;                              // worker only
@@ -84,6 +85,7 @@ class SaVehicleSounds {
     }
     void publish(uint64_t key,uint32_t sample,uint32_t assumed_rate,uint32_t frequency,uint8_t volume,uint8_t pan);
     void release(uint64_t key);
+    uint64_t next_slot_revision();
     bool ready(uint64_t key);
     bool failed(uint64_t key);
     void tick();                                            // worker thread

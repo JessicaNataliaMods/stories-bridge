@@ -207,3 +207,9 @@ O backend das falas de missao, NEWS, CITY e sons de script aplica ganho, pan e v
 O mixer de efeitos mantem doze blocos de 10 ms (120 ms), em vez da fila anterior de apenas 30 ms. A saida so inicia apos o preenchimento completo e os blocos devolvidos sao repostos na ordem de submissao. Essa reserva pode acrescentar ate 120 ms de latencia. O teste do Runtime real, com WinMM simulado, mantem a sequencia PCM sem underruns em quatro atrasos de callback de 60 ms. Isso valida a fila offline; nao e observacao de reproducao dentro do jogo.
 
 Os testes de isolamento verificam os bytes PCM recebidos pelo driver simulado, a independencia de ganho entre vozes, velocidade/loops, pausa, conclusao real e retencao segura de buffers quando o driver recusa liberacao. Nenhum teste abre dispositivo de audio.
+
+### Encerramento de buzinas e sirenes
+
+O gancho chama `PlayHornOrSiren` em todos os frames, inclusive quando os dois canais foram assumidos pelo LCS. Cada canal assumido recebe zero no consumidor nativo, permitindo encerrar a voz SA iniciada durante o carregamento do sample; pular a chamada deixava esse fallback tocando junto do LCS e sem receber o comando de parar. `vehicle_horn_dispatch_tests.cpp` cobre a transicao de fallback para LCS, cancelamento e posse independente dos canais.
+
+Cada pedido de loop tem uma revisao unica entre recriacoes do slot. O worker revalida essa revisao e o pedido ativo depois de decodificar, usando o volume/frequencia/pan mais recentes. Cancelamento e publicacao sao serializados junto ao estado do mixer; um pedido atrasado nao pode recriar um loop cancelado nem apagar uma geracao mais nova.
