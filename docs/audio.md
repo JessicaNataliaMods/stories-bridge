@@ -121,7 +121,7 @@ Os eventos de disparo da minigun mantêm `MINIGUN_FIRE_LEFT` e reproduzem `MINIG
 
 ## Sons de veículos
 
-Quatro chaves independentes (padrão `1`; `0` mantém o som do SA daquele tipo e não instala o gancho): `LcsVehicleHorns`, `LcsVehicleSirens`, `LcsVehicleDoors`, `LcsVehicleEngines`. Só os 87 veículos convertidos são tocados; qualquer outro modelo, som sem voz livre ou erro mantém o som do SA.
+Quatro chaves independentes (padrão `0` no `.ini` gerado; `0` mantém o som do SA daquele tipo e não instala o gancho): `LcsVehicleHorns`, `LcsVehicleSirens`, `LcsVehicleDoors`, `LcsVehicleEngines`. Só os 87 veículos convertidos são tocados; qualquer outro modelo, som sem voz livre ou erro mantém o som do SA.
 
 **Atribuição ao modelo certo.** O som segue o veículo *original* que o slot do SA representa, não o modelo do SA: o slot vem de `data/lcs/native-equivalents.tsv` (a mesma ligação do conversor) e a linha de som é `aVehicleSettings[modelo LCS − 130]` do reLCS, copiada pelo CMake sem transcrição (87 linhas e 24 pares de motor, o configure falha se mudarem). `tests/vehicle_audio_tests.cpp` confere: 87 slots distintos, uma linha por veículo, e provas independentes de que a ordem das linhas é a dos modelos (ambulância com `AMBULANCE_SI`, polícia/enforcer/FBI/bombeiro com `POLICE_SIREN_SLOW`, Mr. Whoopee com a música do sorveteiro, ônibus com porta de ônibus, Faggio/Pizzaboy com o motor de scooter, Angel com o V-twin, PCJ-600 com a moto esportiva, Stinger com o motor Porsche). O teste ainda decodifica todas as amostras usadas e imprime a tabela completa "veículo LCS → slot SA → buzina, sirene, porta, banco de motor".
 
@@ -164,14 +164,14 @@ Pickups e jingles de missão que chegam a menos de 100 ms do anterior são desca
 | --- | --- | --- |
 | `LcsRadio` | `1` | `0` mantém as rádios do SA |
 | `LcsWeaponSounds` | `1` | `0` mantém o tiro e a recarga de armas do SA |
-| `LcsVehicleHorns` | `1` | `0` mantém a buzina do SA |
-| `LcsVehicleSirens` | `1` | `0` mantém as sirenes do SA |
-| `LcsVehicleDoors` | `1` | `0` mantém os sons de portas do SA |
-| `LcsVehicleEngines` | `1` | `0` mantém o motor e a partida do SA |
+| `LcsVehicleHorns` | `0` | `0` mantém a buzina do SA |
+| `LcsVehicleSirens` | `0` | `0` mantém as sirenes do SA |
+| `LcsVehicleDoors` | `0` | `0` mantém os sons de portas do SA |
+| `LcsVehicleEngines` | `0` | `0` mantém o motor e a partida do SA |
 | `LcsInterfaceSounds` | `1` | `0` mantém os sons de menu, pickups e HUD do SA |
 | `LcsSilentLoading` | `1` | filtra somente o início da música de carregamento do SA; `0` restaura essa música |
 | `LcsPedSounds` | `1` | substitui contextos de voz comprovados; `0` mantém as vozes SA |
-| `LcsVehicleSurfaceSounds` | `1` | ruído de pista, derrapagem e ré nos veículos convertidos; `0` mantém o SA |
+| `LcsVehicleSurfaceSounds` | `0` | ruído de pista, derrapagem e ré nos veículos convertidos; `0` mantém o SA |
 
 ### Vozes de pedestres
 

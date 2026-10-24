@@ -645,7 +645,8 @@ def prepare(base, output, version, notes, refresh, original_data):
             kept.append('LcsWeaponSounds=1')  # docs/audio.md: 0 keeps SA gun sounds
         for key in ('LcsVehicleHorns', 'LcsVehicleSirens', 'LcsVehicleDoors', 'LcsVehicleEngines', 'LcsInterfaceSounds', 'LcsPedSounds', 'LcsVehicleSurfaceSounds'):
             if version >= 116 and not any(line.startswith(key+'=') for line in kept):
-                kept.append(key+'=1')  # docs/audio.md: 0 keeps the SA sound of that kind
+                default = '0' if key.startswith('LcsVehicle') else '1'
+                kept.append(key+'='+default)  # Vehicle replacements remain opt-in pending audio revision.
         if version >= 116 and not any(line.startswith('LcsSilentLoading=') for line in kept):
             kept.append('LcsSilentLoading=1')  # PS2 has no loading-screen tune
         if kept != ini.splitlines():
