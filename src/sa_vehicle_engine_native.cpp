@@ -273,6 +273,8 @@ bool any_muted(const EntityState& state) noexcept {
 
 } // namespace
 
+void reset() noexcept {entity_states.clear();}
+
 bool profile_matches() {
 #if defined(_WIN32) && defined(_M_IX86)
     constexpr uint8_t player_signature[]{

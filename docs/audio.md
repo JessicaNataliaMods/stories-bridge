@@ -217,3 +217,9 @@ Cada pedido de loop tem uma revisao unica entre recriacoes do slot. O worker rev
 ### Tiros ambientes distantes do SA
 
 Na campanha ativa, a chamada dedicada de `CAudioEngine::Service` para `ServiceAmbientGunFire` e filtrada. Os eventos de armas, NPCs atirando e recargas continuam nos consumidores existentes. O destino do CALL e validado antes de instalar o gancho; fora da campanha, o gerador nativo continua sendo chamado. O teste isolado confere o roteamento e le o perfil do executavel somente como dados.
+
+### Motor: estado nativo e pitch
+
+O processador de motor SA continua executando em todos os frames antes de ler marcha/rotacao para os loops LCS. A marcha vem do campo real do veiculo, em vez de ser inferida pela velocidade. O contato das rodas usa os campos nativos de carro/moto. As frequencias absolutas dos loops continuam na curva LCS adaptada; esta correcao nao abaixa arbitrariamente o pitch dos arquivos.
+
+Quando o LCS aceita o motor, apenas os slots de motor nativos correspondentes recebem ganho silencioso; buzina, sirene, danos e outros efeitos ficam fora desse filtro. Antes do proximo processamento SA, o ganho anterior e restaurado somente se ponteiro, dono, identidade e sentinela ainda correspondem. Falha no filtro cancela os loops LCS e mantem o processamento SA; troca de mundo limpa o cache. O teste isolado exercita o codigo real sobre objetos simulados e le os bytes de perfil em memoria nao executavel, sem jogo ou dispositivo de audio.

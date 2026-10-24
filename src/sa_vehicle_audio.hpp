@@ -59,7 +59,7 @@ class SaVehicleSounds {
     };
     struct Entry {
         uint32_t touched=0;uint16_t model=0;
-        bool engine_idle=true;uint32_t engine_switch=0,engine_quiet_since=0;
+        uint32_t engine_quiet_since=0;
         enum class Engine:uint8_t{undecided,lcs,sa} engine_owner=Engine::undecided;
     };
     struct Asset {std::shared_ptr<const AudioSample> pcm;uint32_t begin=0,end=0;bool silent=false;}; // retail placeholder (e.g. RC idle)
@@ -105,8 +105,9 @@ public:
     void set_effects_scale(float value){if(mixer_)mixer_->set_effects_scale(value);}
     // PlayHornOrSiren. taken_horn / taken_siren say which of the two LCS now plays.
     void horn_siren(const void* audio_entity,bool horn,bool siren,bool fast,const void* params,bool& taken_horn,bool& taken_siren);
-    // ProcessPlayer/DummyVehicleEngine. True: the LCS engine owns this vehicle and SA's call is skipped.
+    // Called after native engine processing. True: mute only its native engine voices.
     bool engine(const void* audio_entity,const void* params,bool player);
+    void cancel_engine(const void* audio_entity);
     // AddAudioEvent. True: LCS plays (or deliberately drops) the door / starter sound.
     bool vehicle_event(const void* audio_entity,int32_t event);
     // Releases voices of vehicles SA no longer updates.

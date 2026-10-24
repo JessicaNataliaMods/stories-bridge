@@ -50,13 +50,17 @@ bool read_engine(const void* params,uintptr_t vehicle,bool player,EngineRead& ou
         if(!gears || gears>5)return false;
         struct Gear {float max,up,down;};
         const auto* table=reinterpret_cast<const Gear*>(transmission);
-        uint32_t gear=gears;
-        for(uint32_t i=1;i<=gears;++i)if(std::fabs(speed)<=table[i].max){gear=i;break;}
+        // Read the actual SA transmission gear, as ProcessPlayerVehicleEngine does.
+        // Inferring it from road speed ignores shifts/wheelspin and changes the pitch curve.
+        const uint32_t gear=*reinterpret_cast<const uint8_t*>(vehicle+0x4B4);
+        if(gear>gears)return false;
         out.inputs.speed=speed;out.inputs.max_velocity=max;
         out.inputs.gear_change_down=table[gear].down;out.inputs.first_gear_change_up=table[1].up;
         out.inputs.gas_pedal=std::fabs(*reinterpret_cast<const float*>(vehicle+0x49C));
         out.inputs.gas_audio=*reinterpret_cast<const float*>(vehicle+(type==0?0x964:0x808)); // m_GasPedalAudioRevs
-        out.inputs.is_bike=type==9;out.inputs.drive_wheels_on_ground=true;out.inputs.player=player;
+        out.inputs.is_bike=type==9;
+        out.inputs.drive_wheels_on_ground=*reinterpret_cast<const uint8_t*>(vehicle+(type==0?0x961:0x805))!=0;
+        out.inputs.player=player;
         out.engine_on=(*reinterpret_cast<const uint32_t*>(vehicle+0x428)&0x10)!=0;     // vehicleFlags.bEngineOn
     } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     const auto& in=out.inputs;
@@ -266,6 +270,12 @@ void SaVehicleSounds::horn_siren(const void* audio_entity,bool horn,bool siren,b
         }
     }
 }
+void SaVehicleSounds::cancel_engine(const void* audio_entity) {
+    const auto entity=reinterpret_cast<uintptr_t>(audio_entity);
+    release(key(entity,engine_idle_loop));release(key(entity,engine_rev_loop));
+    const auto found=entries_.find(entity);
+    if(found!=entries_.end())found->second.engine_owner=Entry::Engine::undecided;
+}
 bool SaVehicleSounds::engine(const void* audio_entity,const void* params,bool player) {
     if(!config_.engines || !lcs_for_native_ || !mixer_ || !mixer_->available())return false;
     VehicleRead v;
@@ -291,8 +301,8 @@ bool SaVehicleSounds::engine(const void* audio_entity,const void* params,bool pl
     const uint32_t offset=(100u*uint32_t(entity>>4))%1000u;
     const auto volume=continuous_sound_volume(sound.volume,vehicle_engine_range,where.distance).value_or(0);
     const auto pan=continuous_sound_pan(where.distance,where.camera_x).value_or(63);
-    // Idle <-> acceleration is a change of volume between two loops that stay open; hold each kind 150 ms.
-    if(sound.idle!=entry->engine_idle && now-entry->engine_switch>=150) {entry->engine_idle=sound.idle;entry->engine_switch=now;}
+    // Both loops stay open. Follow the actual pedal state without an artificial
+    // 150 ms hold that changes pitch after the driver has already changed input.
     const uint32_t idle_sample=samples->idle,rev_sample=row->accel_sample;
     const auto frequency_for=[&](uint32_t sample,uint32_t base){
         uint32_t frequency=base+offset;
@@ -318,8 +328,8 @@ bool SaVehicleSounds::engine(const void* audio_entity,const void* params,bool pl
             for(const auto& item:entries_)if(item.second.engine_owner==Entry::Engine::lcs)++active;
             if(active>=8) {entry->engine_owner=Entry::Engine::sa;return false;}
         }
-        publish(idle_id,idle_sample,22050,idle_frequency,entry->engine_idle?volume:uint8_t(0),pan);
-        publish(rev_id,rev_sample,22050,rev_frequency,entry->engine_idle?uint8_t(0):volume,pan);
+        publish(idle_id,idle_sample,22050,idle_frequency,sound.idle?volume:uint8_t(0),pan);
+        publish(rev_id,rev_sample,22050,rev_frequency,sound.idle?uint8_t(0):volume,pan);
     }
     if(failed(idle_id) || failed(rev_id)) {
         ++refusals_;

@@ -22,11 +22,12 @@ struct NativeVehicleEngineSoundIdentity {
 
 inline constexpr float native_vehicle_engine_mute_db = -100.0f;
 
+// Slot 0 (CAR_REV) is also used by the player wheelspin state.
 // Native SA car/bike engine slots. Slots 7..11 include nitro, damage and
 // moving-part sounds and stay native even when an LCS engine loop is active.
 constexpr bool native_vehicle_engine_slot_eligible(uint16_t slot,
                                                    bool player) noexcept {
-    return player ? slot >= 1 && slot <= 6 : slot <= 1;
+    return player ? slot <= 6 : slot <= 1;
 }
 
 // Pure identity check for the restore path. The current snapshot must carry
@@ -56,10 +57,23 @@ constexpr bool native_vehicle_engine_can_restore(
            current_volume == native_vehicle_engine_mute_db;
 }
 
+// Always advance SA state before reading its live RPM values for LCS.
+template<class Before,class Native,class Replacement,class After,class Fallback>
+void dispatch_vehicle_engine(Before before,Native native,Replacement replacement,After after,Fallback fallback) {
+    bool safe=false;
+    try {safe=before();}catch(...){}
+    native();
+    try {
+        const bool owns=safe && replacement();
+        if(!after(owns) || !safe)fallback();
+    }catch(...){fallback();}
+}
+
 namespace sa_vehicle_engine_native {
 
 // These hooks bracket the original SA engine processor. `after` mutes only
 // its engine CAESounds when the LCS loop pair has taken ownership.
+void reset() noexcept;
 bool profile_matches();
 bool before(const void* audio_entity, bool player);
 bool after(const void* audio_entity, bool player, bool lcs_owns_engine);

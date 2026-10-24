@@ -37,6 +37,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "sa_vehicle_audio.hpp"
 #include "sa_vehicle_horn_dispatch.hpp"
 #include "sa_ambient_gunfire.hpp"
+#include "sa_vehicle_engine_native.hpp"
 #include "sa_interface_audio.hpp"
 #include "sa_audio_jobs.hpp"
 #include "sa_audio_mixer.hpp"
@@ -2381,6 +2382,7 @@ void __cdecl on_marker_shutdown(){
     original_marker_shutdown();
 }
 void __cdecl on_world_shutdown(){
+    lcs::sa_vehicle_engine_native::reset();
     // Retire script-owned mutations first, then normalize actual links while
     // the old CBuilding pool and model bounds are still alive. Native shutdown
     // retains sole responsibility for destruction, in its original order.
@@ -2400,6 +2402,7 @@ void __cdecl on_world_shutdown(){
     original_world_shutdown();
 }
 void __cdecl on_world_restart(){
+    lcs::sa_vehicle_engine_native::reset();
     // CMenuManager::m_bLoadingData (sdk m_bWantToLoad), offset 0x60.
     // It is still set here; InitialiseWhenRestarting clears it before GenericLoad.
     const bool loading=*reinterpret_cast<const uint8_t*>(0xBA6748+0x60)!=0;
@@ -2521,9 +2524,15 @@ void __fastcall on_vehicle_horn_siren(void* self,void*,int32_t horn,int32_t sire
 }
 template<ScriptProcess* Original,bool Player> void __fastcall on_vehicle_engine(void* self,void*,void* params) {
     SlowSoundCall timing("vehicle engine");
-    try {if(auto* sounds=vehicle_sounds_ready())if(sounds->engine(self,params,Player))return;}
-    catch(...) {}
-    reinterpret_cast<void(__thiscall*)(void*,void*)>(*Original)(self,params);
+    lcs::dispatch_vehicle_engine(
+        [&]{return lcs::sa_vehicle_engine_native::before(self,Player);},
+        [&]{reinterpret_cast<void(__thiscall*)(void*,void*)>(*Original)(self,params);},
+        [&]{if(auto* sounds=vehicle_sounds_ready())return sounds->engine(self,params,Player);return false;},
+        [&](bool owned){return lcs::sa_vehicle_engine_native::after(self,Player,owned);},
+        [&]{
+            try {if(auto* sounds=vehicle_sounds_ready())sounds->cancel_engine(self);}catch(...){}
+            try {lcs::sa_vehicle_engine_native::after(self,Player,false);}catch(...){}
+        });
 }
 void __fastcall on_vehicle_event(void* self,void*,int32_t event,float value) {
     SlowSoundCall timing("vehicle event");
@@ -2574,7 +2583,7 @@ bool install_vehicle_sounds() {
     bool ok=true;
     if(on(L"LcsVehicleHorns") || on(L"LcsVehicleSirens"))
         ok=install_call(Profile::horn_siren_call,reinterpret_cast<ScriptProcess>(&on_vehicle_horn_siren),original_horn_siren) && ok;
-    if(on(L"LcsVehicleEngines")) {
+    if(on(L"LcsVehicleEngines") && lcs::sa_vehicle_engine_native::profile_matches()) {
         ok=install_call(Profile::player_engine_calls[0],reinterpret_cast<ScriptProcess>(&on_vehicle_engine<&original_player_engine_car,true>),original_player_engine_car) && ok;
         ok=install_call(Profile::player_engine_calls[1],reinterpret_cast<ScriptProcess>(&on_vehicle_engine<&original_player_engine_bike,true>),original_player_engine_bike) && ok;
         ok=install_call(Profile::dummy_engine_calls[0],reinterpret_cast<ScriptProcess>(&on_vehicle_engine<&original_dummy_engine_car,false>),original_dummy_engine_car) && ok;
