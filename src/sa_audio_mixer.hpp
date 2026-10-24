@@ -79,6 +79,13 @@ class SaAudioMixer {
     std::unique_ptr<Runtime> runtime_;
 
 public:
+    // Keep enough submitted PCM to cover ordinary Windows scheduling stalls
+    // while bounding how far native voices can be heard after a stop request.
+    static constexpr size_t output_queue_buffer_count = 12;
+    static constexpr uint32_t output_queue_margin_ms = uint32_t(
+        SaAudioMixerCore::output_frames * output_queue_buffer_count * 1000 /
+        SaAudioMixerCore::output_rate);
+
     SaAudioMixer();
     ~SaAudioMixer();
     SaAudioMixer(const SaAudioMixer&) = delete;

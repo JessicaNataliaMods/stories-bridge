@@ -209,11 +209,12 @@ struct SaAudioMixer::Runtime {
     struct Buffer {
         WAVEHDR header{};
         std::vector<int16_t> pcm;
+        uint64_t submission_order = 0;
     };
     struct DeviceState {
         HWAVEOUT handle = nullptr;
         HANDLE event = nullptr;
-        std::array<Buffer, 3> buffers;
+        std::array<Buffer, SaAudioMixer::output_queue_buffer_count> buffers;
     };
 
     SaAudioMixerCore& core;
@@ -221,6 +222,7 @@ struct SaAudioMixer::Runtime {
     std::atomic<bool> stop{false};
     std::shared_ptr<DeviceState> device;
     std::thread thread;
+    uint64_t next_submission_order = 0;
 
     explicit Runtime(SaAudioMixerCore& mixer) : core(mixer) {
         try { thread = std::thread([this] { run(); }); }
@@ -264,6 +266,11 @@ struct SaAudioMixer::Runtime {
             return false;
         }
 
+        // Hold playback until every output block has been prepared and queued.
+        // Otherwise the first short block can start before the safety margin
+        // exists and a startup scheduling delay can immediately underrun.
+        if (waveOutPause(device->handle) != MMSYSERR_NOERROR) return false;
+
         for (auto& buffer : device->buffers) {
             buffer.pcm.resize(SaAudioMixerCore::output_frames * 2);
             buffer.header.lpData = reinterpret_cast<LPSTR>(buffer.pcm.data());
@@ -271,6 +278,17 @@ struct SaAudioMixer::Runtime {
             if (waveOutPrepareHeader(device->handle, &buffer.header, sizeof(buffer.header)) != MMSYSERR_NOERROR)
                 return false;
         }
+        return true;
+    }
+
+    bool submit(Buffer& buffer, std::vector<int16_t>& mixed) {
+        core.render(SaAudioMixerCore::output_frames, mixed);
+        std::copy(mixed.begin(), mixed.end(), buffer.pcm.begin());
+        buffer.header.dwFlags &= ~WHDR_DONE;
+        buffer.submission_order = next_submission_order;
+        if (waveOutWrite(device->handle, &buffer.header, sizeof(buffer.header)) != MMSYSERR_NOERROR)
+            return false;
+        ++next_submission_order;
         return true;
     }
 
@@ -299,6 +317,8 @@ struct SaAudioMixer::Runtime {
     }
 
     void run() {
+        // Scheduling priority is best-effort; a refusal must not mute all effects.
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         if (!open()) {
             ready = false;
             cleanup();
@@ -306,12 +326,16 @@ struct SaAudioMixer::Runtime {
         }
         std::vector<int16_t> mixed;
         for (auto& buffer : device->buffers) {
-            core.render(SaAudioMixerCore::output_frames, mixed);
-            std::copy(mixed.begin(), mixed.end(), buffer.pcm.begin());
-            if (waveOutWrite(device->handle, &buffer.header, sizeof(buffer.header)) != MMSYSERR_NOERROR) {
+            if (!submit(buffer, mixed)) {
                 cleanup();
                 return;
             }
+        }
+        // All blocks are now queued under pause; restart publishes one full
+        // bounded margin to the driver at once.
+        if (waveOutRestart(device->handle) != MMSYSERR_NOERROR) {
+            cleanup();
+            return;
         }
         ready = true;
 
@@ -320,12 +344,22 @@ struct SaAudioMixer::Runtime {
             if (stop) break;
             if (waited == WAIT_TIMEOUT) continue;
             if (waited != WAIT_OBJECT_0) break;
+
+            std::array<Buffer*, SaAudioMixer::output_queue_buffer_count> completed{};
+            size_t completed_count = 0;
             for (auto& buffer : device->buffers) {
                 if (!(buffer.header.dwFlags & WHDR_DONE)) continue;
-                core.render(SaAudioMixerCore::output_frames, mixed);
-                std::copy(mixed.begin(), mixed.end(), buffer.pcm.begin());
-                buffer.header.dwFlags &= ~WHDR_DONE;
-                if (waveOutWrite(device->handle, &buffer.header, sizeof(buffer.header)) != MMSYSERR_NOERROR) {
+                completed[completed_count++] = &buffer;
+            }
+            // Event callbacks may coalesce while this worker is delayed. Sort
+            // completed blocks by their original submission order so a wrap
+            // around the fixed header array cannot reorder the rendered PCM.
+            std::sort(completed.begin(), completed.begin() + completed_count,
+                [](const Buffer* left, const Buffer* right) {
+                    return left->submission_order < right->submission_order;
+                });
+            for (size_t index = 0; index < completed_count; ++index) {
+                if (!submit(*completed[index], mixed)) {
                     ready = false;
                     stop = true;
                     break;

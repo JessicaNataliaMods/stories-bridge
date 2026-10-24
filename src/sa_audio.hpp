@@ -18,8 +18,23 @@ struct ContinuousVoiceStart {
     ContinuousVoiceStart(uint32_t frequency,float time_scale,ContinuousMixContext mix):frequency(frequency),time_scale(time_scale),mix(mix){}
 };
 class MissionSpeech {
-    struct PcmStream {std::function<AudioSample()> next;std::array<std::vector<uint8_t>,2> pcm;};
-    struct Voice {HWAVEOUT handle=nullptr;WAVEHDR header{};std::array<WAVEHDR,2> loop_headers{};std::vector<uint8_t> bytes,loop_bytes;uint64_t generation=0;uint32_t frequency=0;std::optional<uint32_t> continuous_frequency;std::unique_ptr<PcmStream> pcm_stream;bool continuous_channel=false,looping=false,loop_fault=false,paused=false;};
+    struct PcmStream {std::function<AudioSample()> next;};
+    struct Voice {
+        HWAVEOUT handle=nullptr;
+        WAVEHDR header{};
+        std::array<WAVEHDR,2> loop_headers{};
+        std::array<std::vector<uint8_t>,3> output_pcm;
+        std::vector<uint8_t> bytes;
+        uint64_t generation=0;
+        uint32_t frequency=0,target_frequency=0,repeats=1;
+        uint16_t channels=0;
+        double cursor=0;
+        size_t loop_begin=0,loop_end=0;
+        AudioMix mix{};
+        std::optional<uint32_t> continuous_frequency;
+        std::unique_ptr<PcmStream> pcm_stream;
+        bool continuous_channel=false,looping=false,loop_fault=false,paused=false,source_done=false;
+    };
     // Headers handed to WinMM must keep their addresses through failure and
     // shutdown. Heap storage can be retained if a driver refuses final release.
     std::vector<std::unique_ptr<Voice>> voices_;
@@ -31,6 +46,11 @@ class MissionSpeech {
     bool continuous_user_paused_=false;
     std::vector<uint8_t> continuous_volumes_;
     bool ensure_loop_worker();
+    static bool finished_unlocked(const Voice&);
+    static WAVEHDR& output_header(Voice&,size_t);
+    bool queue_next_unlocked(Voice&,size_t);
+    bool start_output_unlocked(size_t);
+    static void render_chunk(Voice&,std::vector<uint8_t>&);
     OwnedEffectReceipt play_owned_region(const AudioSample&,uint32_t,uint32_t,AudioMix,std::optional<ContinuousVoiceStart>,bool repeat);
     bool open_unlocked(size_t,const AudioSample&,const AudioMix*,bool streaming);
     OwnedEffectReceipt update_owned_effect_unlocked(const OwnedEffectVoice&,AudioMix,uint32_t,bool);
@@ -49,7 +69,8 @@ public:
     bool set_mix(size_t slot,AudioMix mix);
     OwnedEffectReceipt play_owned_effect(const AudioSample& sample,std::optional<AudioMix> initial_mix={},uint32_t repeats=1);
     // Byte offsets, exclusive end; caller must translate its authored format.
-    // Two immutable headers keep queuing the same region until an owned stop.
+    // Three stable output blocks apply per-voice gain and resampling in software.
+    // Submitted PCM stays immutable until the driver returns its header.
     OwnedEffectReceipt play_owned_loop(const AudioSample&,uint32_t begin,uint32_t end,AudioMix,std::optional<ContinuousVoiceStart> start={});
     // Authored SDT loop records stream indefinitely. Sentinel-1 records play
     // once: the source audio-frame queue must observe completion, release the

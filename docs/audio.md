@@ -199,3 +199,11 @@ O ruído de pista, piso molhado, derrapagem e marcha à ré usam os pedidos e ca
 As falas contextuais comprovadas de policiais, SWAT/FBI, paramédicos e personagens identificados usam resolução pelo nome equivalente exato. Perseguição/bump de policial exigem os predicados de estado/wanted legíveis. A seleção entre bancos usa identidade estável do ator SA, uma adaptação ao índice de entidade do LCS.
 
 Capô e porta-malas mantêm o consumidor nativo do SA: a movimentação desses painéis em danos não é convertida em um pedido de porta de passageiro do LCS.
+
+### Saida PCM e continuidade
+
+O backend das falas de missao, NEWS, CITY e sons de script aplica ganho, pan e velocidade no PCM de cada voz. Nao usa os controles de volume/frequencia do dispositivo WinMM. Tres blocos de 50 ms sao preparados com a saida pausada e permanecem imutaveis enquanto publicados. O fim de uma fala exige que o driver devolva todos os blocos finais; a leitura antecipada do decoder nao conclui comandos de missao.
+
+O mixer de efeitos mantem doze blocos de 10 ms (120 ms), em vez da fila anterior de apenas 30 ms. A saida so inicia apos o preenchimento completo e os blocos devolvidos sao repostos na ordem de submissao. Essa reserva pode acrescentar ate 120 ms de latencia. O teste do Runtime real, com WinMM simulado, mantem a sequencia PCM sem underruns em quatro atrasos de callback de 60 ms. Isso valida a fila offline; nao e observacao de reproducao dentro do jogo.
+
+Os testes de isolamento verificam os bytes PCM recebidos pelo driver simulado, a independencia de ganho entre vozes, velocidade/loops, pausa, conclusao real e retencao segura de buffers quando o driver recusa liberacao. Nenhum teste abre dispositivo de audio.

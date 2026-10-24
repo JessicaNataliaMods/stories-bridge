@@ -1,10 +1,12 @@
 #include "audio_output_mock.hpp"
 #include "sa_continuous_sound.hpp"
 
+#include <algorithm>
 #include <array>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 void check(bool value, const char* message) {
@@ -85,16 +87,49 @@ int main(int argc, char** argv) try {
         create_source(runtime, handles, 51, {10.0f, 0.0f, 0.0f})};
     check(audio_mock::opens == opens_before,
           "script creation only allocates/cache-preflights and does not bypass the audio frame service");
-    WAVEHDR* finite_header = nullptr;
+    const auto finite_record = archive.record(4);
+    const auto finite_frames = uint64_t(finite_record.size / 2);
+    const auto block_frames = std::max<uint32_t>(1, finite_record.frequency / 20);
+    const auto finite_emission = *lcs::continuous_sound_emission(0);
+    const auto playback_frequency = lcs::continuous_channel_frequency(archive.record(finite_emission.frequency_sample).frequency);
+    const auto output_frames = (finite_frames * finite_record.frequency + playback_frequency - 1) / playback_frequency;
+    const auto finite_blocks = size_t((output_frames + block_frames - 1) / block_frames);
+    const auto finite_initial_headers = std::min<size_t>(3, finite_blocks);
+    const auto finite_output_begin = audio_mock::headers.size();
     for (uint32_t id = 1; id <= sources.size(); ++id) {
         check(runtime.service_frame(frame()), "source frame services validated PCM requests in insertion order");
-        if (id == 1 && !audio_mock::headers.empty()) finite_header = audio_mock::headers.front();
     }
     check(audio_mock::opens == opens_before + sources.size() && audio_mock::writes >= 9,
           "selectors 0, 2, 4, 11 and 51 reach owned PCM output in entity insertion order");
 
-    check(finite_header != nullptr, "owned PCM path prepared a real one-shot header");
-    finite_header->dwFlags |= WHDR_DONE;
+    check(finite_initial_headers > 0 && finite_output_begin + finite_initial_headers <= audio_mock::headers.size(),
+          "owned PCM path prepared every initial one-shot output header");
+    std::vector<WAVEHDR*> finite_headers(audio_mock::headers.begin() + finite_output_begin,
+                                         audio_mock::headers.begin() + finite_output_begin + finite_initial_headers);
+    auto blocks_to_render = finite_blocks - finite_initial_headers;
+    if (blocks_to_render) {
+        HANDLE completion = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        check(completion != nullptr, "create a completion barrier for the mocked output worker");
+        audio_mock::completion_event = completion;
+        while (blocks_to_render) {
+            const auto writes_before_pump = audio_mock::pcm_writes.size();
+            finite_headers.front()->dwFlags |= WHDR_DONE;
+            check(SetEvent(reinterpret_cast<HANDLE>(audio_mock::last_callback)) != 0,
+                  "mock WinMM callback event wakes the output worker for a finite sample");
+            check(WaitForSingleObject(completion, 2000) == WAIT_OBJECT_0,
+                  "output worker refills a completed finite-sample block");
+            check(runtime.service_frame(frame()),
+                  "audio-frame service waits for the output worker to finish its refill");
+            check(audio_mock::pcm_writes.size() == writes_before_pump + 1,
+                  "finite output advances one completed 50 ms block until source end");
+            --blocks_to_render;
+        }
+        audio_mock::completion_event = nullptr;
+        CloseHandle(completion);
+    }
+    // The rendered source is now exhausted; model playback completion for every
+    // prepared final buffer before the controller observes the one-shot receipt.
+    for (auto* header : finite_headers) header->dwFlags |= WHDR_DONE;
     const auto opens_before_reacquire = audio_mock::opens;
     check(runtime.service_frame(frame()), "completed finite sample is retired before reacquisition");
     check(audio_mock::opens == opens_before_reacquire + 1,
@@ -121,12 +156,12 @@ int main(int argc, char** argv) try {
           "script slot is freed only after physical channel retirement succeeds");
 
     const auto start_failure = create_source(runtime, handles, 2, {25.0f, 0.0f, 0.0f});
-    audio_mock::fail_rate = true;
+    audio_mock::fail_write = true;
     audio_mock::fail_reset = true;
     const auto opens_before_failure = audio_mock::opens;
     check(!runtime.service_frame(frame()) && runtime.quarantined(),
-          "entered initial-rate failure quarantines the owner and dedicated speech instance");
-    audio_mock::fail_rate = false;
+          "entered initial PCM write failure quarantines the owner and dedicated speech instance");
+    audio_mock::fail_write = false;
     check(!runtime.service_frame(frame()) && audio_mock::opens == opens_before_failure + 1,
           "ambiguous failed start blocks every reopen until checked shutdown succeeds");
     audio_mock::fail_reset = false;

@@ -14,6 +14,7 @@ inline size_t position_queries=0;inline HWAVEOUT position_handle=nullptr;
 inline DWORD last_volume=0;
 inline std::vector<char> effects;
 inline std::vector<WAVEHDR*> headers;
+inline std::vector<std::vector<uint8_t>> pcm_writes;
 inline WAVEHDR* last_prepared=nullptr;
 inline DWORD_PTR last_callback=0;inline DWORD last_flags=0;inline HANDLE completion_event=nullptr;
 inline MMRESULT WINAPI open(LPHWAVEOUT out,UINT,LPCWAVEFORMATEX,DWORD_PTR callback,DWORD_PTR,DWORD flags) {
@@ -22,7 +23,7 @@ inline MMRESULT WINAPI open(LPHWAVEOUT out,UINT,LPCWAVEFORMATEX,DWORD_PTR callba
     *out=reinterpret_cast<HWAVEOUT>(opens);return MMSYSERR_NOERROR;
 }
 inline MMRESULT WINAPI prepare(HWAVEOUT,WAVEHDR* header,UINT){last_prepared=header;header->dwFlags|=WHDR_PREPARED;return 0;}
-inline MMRESULT WINAPI write(HWAVEOUT,WAVEHDR* header,UINT){effects.push_back('W');++writes;if(fail_write)return MMSYSERR_ERROR;headers.push_back(header);if(completion_event)SetEvent(completion_event);return 0;}
+inline MMRESULT WINAPI write(HWAVEOUT,WAVEHDR* header,UINT){effects.push_back('W');++writes;if(fail_write)return MMSYSERR_ERROR;headers.push_back(header);pcm_writes.emplace_back(reinterpret_cast<uint8_t*>(header->lpData),reinterpret_cast<uint8_t*>(header->lpData)+header->dwBufferLength);if(completion_event)SetEvent(completion_event);return 0;}
 inline MMRESULT WINAPI reset(HWAVEOUT){++resets;return fail_reset?MMSYSERR_ERROR:0;}
 inline MMRESULT WINAPI unprepare(HWAVEOUT,WAVEHDR* header,UINT){if(fail_unprepare)return MMSYSERR_ERROR;header->dwFlags&=~WHDR_PREPARED;return 0;}
 inline MMRESULT WINAPI close(HWAVEOUT){return fail_close?MMSYSERR_ERROR:0;}
