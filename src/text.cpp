@@ -4,6 +4,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <set>
+#include <map>
 
 namespace lcs {
 uint32_t text_key(const std::string& name) {
@@ -13,6 +14,52 @@ uint32_t text_key(const std::string& name) {
         crc^=c;for(int i=0;i<8;++i)crc=(crc>>1)^((crc&1)?0xEDB88320u:0u);
     }
     return crc;
+}
+// LCS writes a button as "~k~ ~CODE~"; SA's text engine only knows "~k~~CONTROL~" and prints an empty square
+// for the LCS codes. Keep this table identical to tools/translate-gxt-controls.py.
+static std::string translate_controls(const std::string& text) {
+    static const std::map<std::string,std::string> replacements{
+        {"VEACC","~k~~VEHICLE_ACCELERATE~"},
+        {"VEBRK","~k~~VEHICLE_BRAKE~"},
+        {"VEHN","~k~~VEHICLE_HORN~"},
+        {"VEHB","~k~~VEHICLE_HANDBRAKE~"},
+        {"VEEE","~k~~VEHICLE_ENTER_EXIT~"},
+        {"VEWEP","~k~~VEHICLE_FIREWEAPON~"},
+        {"VELL","~k~~VEHICLE_LOOKLEFT~"},
+        {"VELR","~k~~VEHICLE_LOOKRIGHT~"},
+        {"VELB","~k~~VEHICLE_LOOKBEHIND~"},
+        {"PDFW","~k~~PED_FIREWEAPON~"},
+        {"PDLT","~k~~PED_LOCK_TARGET~"},
+        {"PDLOO","~k~~PED_LOOKBEHIND~"},
+        {"PDSPR","~k~~PED_SPRINT~"},
+        {"PDCTL","~k~~PED_CYCLE_TARGET_RIGHT~"},
+        {"SNZI","~k~~PED_SNIPER_ZOOM_IN~"},
+        {"SNZO","~k~~PED_SNIPER_ZOOM_OUT~"},
+        {"FREE1","~k~~PED_LOCK_TARGET~"},
+        {"ANS","~k~~PED_ANSWER_PHONE~"},
+        {"TGSUB","~k~~TOGGLE_SUBMISSIONS~"},
+        {"CVEIW","~k~~CAMERA_CHANGE_VIEW_ALL_SITUATIONS~"},
+        {"TRSK","~k~~VEHICLE_ENTER_EXIT~"},
+        {"PUCF","~k~~VEHICLE_ENTER_EXIT~"},
+        {"AMBUY","~k~~PED_SPRINT~"},
+        {"AMEXI","~k~~VEHICLE_ENTER_EXIT~"},
+        {"VESTR","~k~~VEHICLE_STEERLEFT~/~k~~VEHICLE_STEERRIGHT~"},
+        {"VEWEA","~k~~VEHICLE_TURRETLEFT~/~k~~VEHICLE_TURRETRIGHT~"},
+        {"VEWEI","~k~~VEHICLE_STEERUP~/~k~~VEHICLE_STEERDOWN~"},
+        {"VECRS","~k~~VEHICLE_RADIO_STATION_UP~/~k~~VEHICLE_RADIO_STATION_DOWN~"},
+        {"PDCWE","~k~~PED_CYCLE_WEAPON_LEFT~/~k~~PED_CYCLE_WEAPON_RIGHT~"},
+        {"AMMOV","~k~~GO_FORWARD~/~k~~GO_BACK~"},
+        {"FREE2","mouse"}
+    };
+    std::string result;size_t at=0;
+    for(;;) {
+        const auto start=text.find("~k~ ~",at);
+        if(start==std::string::npos){result.append(text,at,std::string::npos);return result;}
+        const auto end=text.find('~',start+5);
+        const auto found=end==std::string::npos ? replacements.end() : replacements.find(text.substr(start+5,end-start-5));
+        if(found==replacements.end()){result.append(text,at,start-at);result+="~k~~";at=start+5;continue;}
+        result.append(text,at,start-at);result+=found->second;at=end+1;
+    }
 }
 static void require(bool value,const char* message) {if(!value)throw std::runtime_error(message);}
 static std::string label(const std::vector<uint8_t>& bytes,size_t at) {
@@ -92,6 +139,7 @@ TextArchive TextArchive::parse(const std::vector<uint8_t>& bytes,bool lcs_format
                 require(c<=255,"LCS glyph needs an explicit SA font mapping");value+=char(c);
             }
             require(terminated,"Text value has no terminator");
+            if(lcs_format)value=translate_controls(value);
             const auto old=bank.find(key);
             if(old!=bank.end() && old->second!=value)
                 throw std::runtime_error("Conflicting text key in "+name+": "+(lcs_format ? label(bytes,row+4) : std::to_string(key)));
