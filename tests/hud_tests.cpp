@@ -35,7 +35,7 @@ int main(){try {
     b.clear();op(b,COMMAND_DISPLAY_NTH_ONSCREEN_COUNTER_WITH_STRING);global(b,64);integer(b,0);integer(b,0);b.insert(b.end(),8,0);auto badline=script(b);check(step(badline)==lcs::StepResult::unsupported && history.size()==prior,"invalid original counter line causes no native mutation");
     b.clear();op(b,COMMAND_DISPLAY_ONSCREEN_TIMER);global(b,64);integer(b,1);auto missing=script(b);available=false;check(step(missing)==lcs::StepResult::unsupported && history.size()==prior,"unavailable native HUD stops rather than simulating a timer");
     b.clear();op(b,COMMAND_SET_CLOCK_EVENT_WARNING);integer(b,0);integer(b,0);integer(b,0);auto no_warning=script(b);check(step(no_warning)==lcs::StepResult::continued,"original MAIN may disable an inactive optional clock warning");
-    b.clear();op(b,COMMAND_SET_CLOCK_EVENT_WARNING);integer(b,12);integer(b,0);integer(b,15);auto warning=script(b);check(step(warning)==lcs::StepResult::unsupported,"active PS2 clock warning cannot silently become a disabled warning");
+    b.clear();op(b,COMMAND_SET_CLOCK_EVENT_WARNING);integer(b,12);integer(b,0);integer(b,15);auto warning=script(b);check(step(warning)==lcs::StepResult::continued,"active PS2 clock warning is a visual-only command, as in reLCS, and never suspends a mission");
     available=true;
     b.clear();op(b,COMMAND_SET_ONSCREEN_TIMER_COLOUR);for(auto n:{261,-1,7,80})integer(b,n);auto fg=script(b);
     check(step(fg)==lcs::StepResult::continued,"Source foreground colour stages actual low bytes");

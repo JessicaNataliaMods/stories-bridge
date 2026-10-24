@@ -292,6 +292,71 @@ void report_fast_vehicles() {
         log(text);
     }
 }
+// Entry evidence (read-only): state of vehicles within 12 m of the player, once
+// per two seconds, to explain a car that cannot be entered.
+size_t collect_nearby_vehicle_state(char (*out)[400],size_t capacity) {
+    size_t used=0;
+    __try {
+        const auto focus=*reinterpret_cast<const uint8_t*>(0xB7CD74);if(focus>1)return 0;
+        const auto player=*reinterpret_cast<const uintptr_t*>(0xB7CD98+uintptr_t(focus)*0x190);if(!player)return 0;
+        const auto player_matrix=*reinterpret_cast<const uintptr_t*>(player+0x14);
+        const auto* me=reinterpret_cast<const float*>(player_matrix?player_matrix+0x30:player+4);
+        const auto pool=*reinterpret_cast<const uintptr_t*>(0xB74494);if(!pool)return 0;
+        const auto items=*reinterpret_cast<const uintptr_t*>(pool),flags=*reinterpret_cast<const uintptr_t*>(pool+4);
+        const auto count=*reinterpret_cast<const int32_t*>(pool+8);
+        if(!items || !flags || count<0 || count>10000)return 0;
+        for(int32_t slot=0;slot<count && used<capacity;++slot) {
+            if(*reinterpret_cast<const uint8_t*>(flags+slot)&128)continue;
+            const auto vehicle=items+0xA18*uintptr_t(slot);
+            const auto matrix=*reinterpret_cast<const uintptr_t*>(vehicle+0x14);
+            const auto* p=reinterpret_cast<const float*>(matrix?matrix+0x30:vehicle+4);
+            if(std::fabs(p[0]-me[0])>12.f || std::fabs(p[1]-me[1])>12.f)continue;
+            std::snprintf(out[used++],320,"Nearby vehicle state: slot=%d model=%u status=%u entityFlags=%08X physicalFlags=%08X vehicleFlags=%08X gettingIn=%02X gettingOut=%02X doorLock=%u driver=%08X passenger0=%08X health=%.0f pos=(%.1f,%.1f,%.1f)",
+                int(slot),unsigned(*reinterpret_cast<const uint16_t*>(vehicle+0x22)),unsigned(*reinterpret_cast<const uint8_t*>(vehicle+0x36)>>3),
+                unsigned(*reinterpret_cast<const uint32_t*>(vehicle+0x1C)),unsigned(*reinterpret_cast<const uint32_t*>(vehicle+0x40)),
+                unsigned(*reinterpret_cast<const uint32_t*>(vehicle+0x428)),unsigned(*reinterpret_cast<const uint8_t*>(vehicle+0x4F4)),unsigned(*reinterpret_cast<const uint8_t*>(vehicle+0x4F5)),unsigned(*reinterpret_cast<const uint32_t*>(vehicle+0x4F8)),
+                unsigned(*reinterpret_cast<const uint32_t*>(vehicle+0x460)),unsigned(*reinterpret_cast<const uint32_t*>(vehicle+0x464)),
+                double(*reinterpret_cast<const float*>(vehicle+0x4C0)),p[0],p[1],p[2]);
+        }
+        const auto ped_pool=*reinterpret_cast<const uintptr_t*>(0xB74490);
+        if(ped_pool) {
+            const auto ped_items=*reinterpret_cast<const uintptr_t*>(ped_pool),ped_flags=*reinterpret_cast<const uintptr_t*>(ped_pool+4);
+            const auto ped_count=*reinterpret_cast<const int32_t*>(ped_pool+8);
+            for(int32_t slot=0;ped_items && ped_flags && ped_count>0 && ped_count<10000 && slot<ped_count && used<capacity;++slot) {
+                if(*reinterpret_cast<const uint8_t*>(ped_flags+slot)&128)continue;
+                const auto ped=ped_items+0x7A4*uintptr_t(slot);
+                const auto matrix=*reinterpret_cast<const uintptr_t*>(ped+0x14);
+                const auto* p=reinterpret_cast<const float*>(matrix?matrix+0x30:ped+4);
+                if(std::fabs(p[0]-me[0])>12.f || std::fabs(p[1]-me[1])>12.f)continue;
+                const auto intelligence=*reinterpret_cast<const uintptr_t*>(ped+0x440);
+                uintptr_t tasks[11]={};
+                if(intelligence)for(int k=0;k<11;++k) {
+                    const auto task=*reinterpret_cast<const uintptr_t*>(intelligence+4+4*uintptr_t(k));
+                    tasks[k]=task?*reinterpret_cast<const uintptr_t*>(task):0;
+                }
+                char pad_bytes[80]={};
+                if(ped==player) {
+                    const auto pad=0xB73458+0x134*uintptr_t(0);
+                    for(int k=0;k<24;++k)std::snprintf(pad_bytes+k*3,4,"%02X ",unsigned(*reinterpret_cast<const uint8_t*>(pad+0xF8+k)));
+                }
+                std::snprintf(out[used++],400,"Nearby ped state: intel=%08X slot=%d model=%u invehicle=%08X health=%.0f pos=(%.1f,%.1f,%.1f) primaryVt=%X,%X,%X,%X,%X secondaryVt=%X,%X,%X,%X,%X,%X pad[F8..]=%s",
+                    unsigned(intelligence),int(slot),unsigned(*reinterpret_cast<const uint16_t*>(ped+0x22)),unsigned(*reinterpret_cast<const uint32_t*>(ped+0x58C)),
+                    double(*reinterpret_cast<const float*>(ped+0x540)),p[0],p[1],p[2],
+                    unsigned(tasks[0]),unsigned(tasks[1]),unsigned(tasks[2]),unsigned(tasks[3]),unsigned(tasks[4]),
+                    unsigned(tasks[5]),unsigned(tasks[6]),unsigned(tasks[7]),unsigned(tasks[8]),unsigned(tasks[9]),unsigned(tasks[10]),pad_bytes);
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return used;
+}
+void report_nearby_vehicle_state(uint32_t now) {
+    static uint32_t last=0;
+    if(now-last<2000)return;
+    last=now;
+    char lines[12][400];
+    const auto used=collect_nearby_vehicle_state(lines,12);
+    for(size_t i=0;i<used;++i)log(lines[i]);
+}
 // Lane evidence (read-only): the car path link SA's autopilot is following
 // (vehicle +0x3A4/+0x3A6, links at 0x96F974[area]+index*14), the lane bytes
 // it reads (+0xB) and the car's measured signed offset from that link.
@@ -1497,6 +1562,7 @@ struct Campaign {
         });
         frame_updates.run("spatial-mission-speech",lcs::UpdateScope::auxiliary,now,"Cannot update original positioned mission speech",[&](){return audio.tick_spatial();});
         report_fast_vehicles();
+        report_nearby_vehicle_state(now);
         report_lane_samples(now);
         // Mission heartbeat: where the mission thread is while the player sees
         // no progress (e.g. a black screen after a fade-out).

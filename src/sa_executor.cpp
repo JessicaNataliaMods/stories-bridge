@@ -6,6 +6,7 @@
 #include "lcs/crouch_duration.hpp"
 #include "lcs/native_player_exports.hpp"
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <iomanip>
@@ -18,6 +19,31 @@ constexpr uintptr_t process_one=0x469EB0;
 // borrowed from LCS or inferred from a version name. Other profiles need validation.
 constexpr uint8_t signature[]={0x66,0xFF,0x05,0xF4,0x47,0xA4,0x00,0x8B,0x51,0x14,0x33,0xC0,0x66,0x8B,0x02,0x83};
 struct NativeFault {DWORD code=0;uintptr_t instruction=0,address=0;ULONG_PTR access=0;};
+// Read-only description of the pedestrian a faulted native command was given:
+// pool slot, model, health, state and the vtables of its tasks and target refs.
+static void describe_fault_ped(int32_t handle,char* out,size_t capacity) {
+    out[0]=0;
+    __try {
+        const auto pool=*reinterpret_cast<const uintptr_t*>(0xB74490);if(!pool){std::snprintf(out,capacity,"no ped pool");return;}
+        const auto items=*reinterpret_cast<const uintptr_t*>(pool),flags=*reinterpret_cast<const uintptr_t*>(pool+4);
+        const auto count=*reinterpret_cast<const int32_t*>(pool+8);
+        const auto slot=handle>>8;
+        if(!items || !flags || slot<0 || slot>=count){std::snprintf(out,capacity,"handle %d outside the ped pool",int(handle));return;}
+        const auto live_flags=*reinterpret_cast<const uint8_t*>(flags+slot);
+        const auto ped=items+0x7A4*uintptr_t(slot);
+        const auto intelligence=*reinterpret_cast<const uintptr_t*>(ped+0x440);
+        uintptr_t tasks[11]={};
+        if(intelligence)for(int k=0;k<11;++k) {
+            const auto task=*reinterpret_cast<const uintptr_t*>(intelligence+4+4*uintptr_t(k));
+            tasks[k]=task?*reinterpret_cast<const uintptr_t*>(task):0;
+        }
+        std::snprintf(out,capacity,"pedSlot=%d poolFlags=%02X model=%u health=%.0f pedState=%u intel=%08X taskVt=%X,%X,%X,%X,%X/%X,%X,%X,%X,%X,%X",
+            int(slot),unsigned(live_flags),unsigned(*reinterpret_cast<const uint16_t*>(ped+0x22)),double(*reinterpret_cast<const float*>(ped+0x540)),
+            unsigned(*reinterpret_cast<const uint32_t*>(ped+0x530)),unsigned(intelligence),
+            unsigned(tasks[0]),unsigned(tasks[1]),unsigned(tasks[2]),unsigned(tasks[3]),unsigned(tasks[4]),
+            unsigned(tasks[5]),unsigned(tasks[6]),unsigned(tasks[7]),unsigned(tasks[8]),unsigned(tasks[9]),unsigned(tasks[10]));
+    } __except(EXCEPTION_EXECUTE_HANDLER) {std::snprintf(out,capacity,"ped description faulted");}
+}
 int capture_fault(EXCEPTION_POINTERS* pointers,NativeFault* fault) {
     const auto& exception=*pointers->ExceptionRecord;
     fault->code=exception.ExceptionCode;fault->instruction=reinterpret_cast<uintptr_t>(exception.ExceptionAddress);
@@ -306,6 +332,10 @@ NativeResult execute_sa(const NativeCall& call) {
               <<" instruction=0x"<<fault.instruction<<" access="<<std::dec<<fault.access
               <<" address=0x"<<std::hex<<fault.address<<" inputs=";
         for(const auto input:call.inputs)detail<<"0x"<<uint32_t(input)<<",";
+        if(!call.inputs.empty()) {
+            char ped_text[320];describe_fault_ped(call.inputs[0],ped_text,sizeof(ped_text));
+            detail<<" firstOperandAsPed["<<ped_text<<"]";
+        }
         result.diagnostic=detail.str();return result;
     }
     if(script.ip!=bytes.data()+expected) { result.diagnostic="SA consumed a different parameter layout"; return result; }

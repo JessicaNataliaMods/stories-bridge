@@ -1618,17 +1618,15 @@ public:
             if(effect.executed && effect.native_entered) {
                 const auto epoch=effect.accepted_script_task?sa_owned_vehicle_entry_epoch(*effect.accepted_script_task,*actor):std::nullopt;
                 if(!epoch) {
-                    // SA accepted the entry (or found it already running) but no private task epoch can be proven.
-                    // A mission script keeps the strict rule. An ambient script (ambtaxi, pedestrians hailing a
-                    // taxi...) must not be suspended for good because of missing cleanup tracking: the entry is
-                    // real and never replayed, only its ownership record is absent, and the script itself polls
-                    // IS_CHAR_IN_CAR for the result.
-                    if(!call.mission_context) {
-                        last_diagnostic_="Ambient script entry accepted without private ownership; continued untracked, never replayed";
-                        return effect;
-                    }
-                    effect.executed=false;
-                    effect.diagnostic="Native script entry accepted without provable private ownership; replay forbidden";
+                    // SA accepted the entry (or found it already running), but the script-task bank cannot
+                    // single out the task this call created (for example when several entries are assigned
+                    // in the same frame). The entry is real and is never replayed; only its cleanup record is
+                    // absent, and the script itself polls IS_CHAR_IN_CAR for the result. Suspending the
+                    // script for good over a missing record (ambient or mission alike) would only turn a
+                    // working objective into a softlock.
+                    last_diagnostic_=call.mission_context?
+                        "Mission script entry accepted without private ownership; continued untracked, never replayed":
+                        "Ambient script entry accepted without private ownership; continued untracked, never replayed";
                     return effect;
                 }
                 script_entries_.insert_or_assign(actor->handle,ScriptEntry{*actor,target,*epoch});

@@ -44,10 +44,11 @@ StepResult HudBridge::dispatch(Vm& vm,Thread& t,uint16_t opcode) {
     }
     switch(opcode) {
     case COMMAND_SET_CLOCK_EVENT_WARNING: {
-        (void)vm.parameter(t);(void)vm.parameter(t);const auto minutes=vm.parameter(t);
-        // Original MAIN explicitly disables the optional warning. Enabling its
-        // PS2 clock renderer is still unsupported; never discard a live warning.
-        if(minutes!=0){t.diagnostic="Original clock-event warning renderer is not implemented";return StepResult::unsupported;}
+        // The warning is only a flashing clock on the HUD. The reLCS command
+        // (Script10.cpp) consumes its three operands and does nothing, and no
+        // mission progress depends on it, so a mission that enables it must
+        // not be suspended for lack of the PS2 clock renderer.
+        (void)vm.parameter(t);(void)vm.parameter(t);(void)vm.parameter(t);
         return StepResult::continued;
     }
     case COMMAND_DISPLAY_ONSCREEN_TIMER:clock=true;adding=true;break;

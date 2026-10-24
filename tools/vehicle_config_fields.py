@@ -117,10 +117,12 @@ SA_VEHICLE_CLASSES = {
 # as the final field of handling.cfg. These IDs are the SA AssocGroupId values
 # consumed by tHandlingData::m_nAnimGroup, not donor-model animation settings.
 # Their names are the SA categories used in Vehicle.cpp; IDs are confirmed by
-# native SA handling rows (low sports cars=1, LINERUN=2, BUS=16; standard=0).
+# native SA handling rows (low sports cars=1, RUMPO=13, BUS=16; standard=0).
 SA_ANIMATION_GROUP_ADAPTERS = {
     0x00000080: (1, "ANIM_GROUP_LOWCARAMIMS", "low car"),
-    0x00000020: (2, "ANIM_GROUP_TRKCARANIMS", "truck"),
+    # The SA van group (13) carries the van door/seat associations; the truck
+    # group (2) left a converted Rumpo impossible to enter (verified in game).
+    0x00000020: (13, "ANIM_GROUP_VANCARANIMS", "van"),
     0x00000040: (16, "ANIM_GROUP_BUSCARANIMS", "bus"),
 }
 SA_BIKE_ANIMATION_GROUP_ADAPTERS = {
@@ -236,7 +238,7 @@ def derive_sa_animation_group(ide_fields: Sequence[str],
     van, or coach/bus entry and door associations from ``HANDLING_IS_LOW``,
     ``HANDLING_IS_VAN`` and ``HANDLING_IS_BUS``. SA stores an association-group
     ID in handling field 35. The adapter maps those LCS behaviors to SA's low,
-    truck (the closest SA group to LCS van), and bus groups, respectively.
+    van, and bus groups, respectively.
     Ordinary LCS cars use SA's standard car group. It never borrows the group
     from the SA model slot being replaced.
     """

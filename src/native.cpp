@@ -2912,6 +2912,10 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
             traffic_waits_[ped]=uint32_t(clock.values[0]);return StepResult::continued;
         }
         traffic_waits_.erase(ped);
+        // LOOK_PED, LOOK_SHOP, LOOK_ACCIDENT and FACEOFF_GANG (4..7): the retail
+        // SetWaitState (Ped.cpp) only records the state; it starts no animation
+        // and no timer, and later clears do not need anything from us.
+        if(state>=4 && state<=7)return StepResult::continued;
         if(state!=0) {
             if(!play_wait_animation || !play_wait_animation(ped,state,duration,opcode==COMMAND_SET_CHAR_WAIT_STATE_REPEAT)){thread.diagnostic="Original LCS wait-state animation unavailable: "+std::to_string(state);return StepResult::unsupported;}
             return StepResult::continued;
@@ -3328,16 +3332,28 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         const auto policy=pednode_seek_.find(call.inputs[0]);
         if(policy!=pednode_seek_.end() && policy->second)call.opcode=0x05F5;
     }
+    if(opcode==COMMAND_FREEZE_CAR_POSITION && call.inputs.size()>1 && call.inputs[1]) {
+        // SA 0519 (handler 0x48CFA5) marks the vehicle static and removes it
+        // from the moving list, so its door animation never runs and nobody can
+        // enter it. LCS missions freeze a car precisely until a character has
+        // entered it (jdt1), so a static vehicle would deadlock. The car stays
+        // parked and enterable instead.
+        call.inputs[1]=0;
+    }
     if(opcode==COMMAND_SET_CHAR_OBJ_ENTER_CAR_AS_PASSENGER) {
         // Native timed entry, no specified passenger seat. Repeated attempts
         // and the mission's completion checks remain in the original SCM.
         const auto seat_rules=active_seat_rules(call.inputs[0]);
         if(!seat_rules){thread.diagnostic="Cannot confirm live passenger seat policy identity";return StepResult::unsupported;}
         const auto [front,rear]=*seat_rules;
-        if(front && rear){thread.diagnostic="Incompatible front-only and rear-only seat restrictions";return StepResult::unsupported;}
+        // The LCS CPed keeps both bits independently and nothing in the entry
+        // objective rejects a ped that has both; contradictory restrictions
+        // cancel out, otherwise the mission thread would be quarantined and
+        // the objective never completes.
+        const bool both=front && rear;
         // -1 lets the native engine choose; 0 is the actual front seat.
         // A front-only character must never fall back to a rear passenger.
-        call.inputs.insert(call.inputs.end(),{-1,front?0:(rear?1:-1)});
+        call.inputs.insert(call.inputs.end(),{-1,both?-1:(front?0:(rear?1:-1))});
     }
     if(opcode==COMMAND_GET_PAD_BUTTON_STATE) {
         // LCS selector 44 is the cutscene/dialogue skip control. Native SA
@@ -3707,8 +3723,9 @@ bool NativeAdapter::update_companion_boarding(int32_t actor,Companion& companion
     // preference must not exclude it, or a one-passenger vehicle cannot board.
     const auto seat_rules=active_seat_rules(actor);
     if(!seat_rules)return defer("Cannot confirm live companion seat policy identity");
-    const auto [front,rear_only]=*seat_rules;
-    if(front && rear_only)return defer("Incompatible original front/rear passenger policy");
+    auto [front,rear_only]=*seat_rules;
+    // Contradictory original bits cancel out instead of stalling the companion.
+    if(front && rear_only)front=rear_only=false;
     const int32_t first=!front && rear_only && capacity.values[0]>1?1:0;
     int32_t seat=-1;
     for(int32_t candidate=first;candidate<capacity.values[0] && (!front || candidate==0);++candidate) {
