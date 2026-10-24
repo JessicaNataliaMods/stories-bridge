@@ -23,7 +23,7 @@ def digest(path):
 
 
 def immutable(relative):
-    return relative.parts[0] in ('data', 'models', 'anim', 'text') or relative.parts[:2] == ('metadata', 'lcs-source')
+    return relative.parts[0] in ('data', 'models', 'anim', 'text', 'movies') or relative.parts[:2] == ('metadata', 'lcs-source')
 
 
 def mutable_profile(relative, version):
@@ -639,6 +639,8 @@ def prepare(base, output, version, notes, refresh, original_data):
             kept.append('LcsHud=1')  # docs/lcs-hud.md: gameplay HUD only
         if version >= 107 and not any(line.startswith('LcsMenuFonts=') for line in kept):
             kept.append('LcsMenuFonts=1')  # independent native frontend font switch
+        if version >= 128 and not any(line.startswith('LcsMarkers=') for line in kept):
+            kept.append('LcsMarkers=1')  # docs/lcs-screens.md: 0 keeps SA's mission cylinders
         if version >= 116 and not any(line.startswith('LcsWeaponSounds=') for line in kept):
             kept.append('LcsWeaponSounds=1')  # docs/audio.md: 0 keeps SA gun sounds
         for key in ('LcsVehicleHorns', 'LcsVehicleSirens', 'LcsVehicleDoors', 'LcsVehicleEngines', 'LcsInterfaceSounds', 'LcsPedSounds', 'LcsVehicleSurfaceSounds'):
@@ -658,6 +660,32 @@ def prepare(base, output, version, notes, refresh, original_data):
             if readme.stat().st_nlink != 1:
                 raise ValueError('Mutable readme must not share an inode with a rollback')
             readme.write_text(text.rstrip('\n')+'\n'+notice, encoding='utf-8')
+    if version >= 128:
+        # Original LCS loading screens, splash/title, intro cards, menu background and movies over SA's own
+        # (tools/prepare-lcs-screens.py, docs/lcs-screens.md). Shared with the next stages through hardlinks.
+        screens = tool_module('prepare-lcs-screens')
+        wanted = screens.expected_files()
+        if not all((output/relative).is_file() for relative in wanted):
+            game = pathlib.Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])
+            scratch = output/'.screens'
+            if scratch.exists():
+                shutil.rmtree(scratch)
+            screens.build(ROOT/'local/originals/lcs-ps2', game, scratch)
+            for relative in wanted:
+                target = output/relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    target.unlink()  # a hardlink to the base must stay untouched
+                shutil.move(scratch/relative, target)
+            shutil.rmtree(scratch)
+        resources = [row for row in campaign['originalResources'] if row['relative'] not in wanted]
+        resources += [dict(relative=relative, source='local/originals/lcs-ps2 (SPLASH, MOVIES)', sha256=digest(output/relative))
+                      for relative in wanted]
+        campaign['originalResources'] = resources
+        campaign['lcsScreens128'] = dict(files=wanted, setting='LcsMarkers', default=1, gameExecuted=False,
+            loading='loadsc0..14 <- LOADSC0..3', title='title_pc_EU/US <- SCEALE', splash='splash1..3 <- SPLASH1..3',
+            intro='intro1..4 <- INTRO1..4', menu='fronten2 back2..back7 mosaic <- LOADSC1 dimmed',
+            movies='Logo.mpg <- RSLEEDS.PSS, GTAtitles.mpg <- DM.PSS', markers='script spheres and contact points use LCS marker5')
     (output/'metadata/campaign.json').write_text(json.dumps(campaign, indent=2))
     preview = json.loads((output/'metadata/map-preview.json').read_text())
     preview['version'] = str(version)

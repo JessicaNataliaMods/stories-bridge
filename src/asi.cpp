@@ -2165,14 +2165,132 @@ void __cdecl on_credits_hud(){
         return campaign->credits.draw(*text,frame,int(width),int(height),(menu&0xFF)!=0,skip,accelerated);
     });
 }
+bool cylinder_markers_on=false,cylinder_markers_failed=false;
+bool cylinder_lcs_mesh=false; // LcsMarkers=1: LCS mesh in the private pool; 2: SA cylinder in the LCS colour
+void retire_cylinder_markers(const char* stage){
+    cylinder_markers_failed=true;
+    log(std::string("LCS mission cylinders disabled at ")+stage+", SA markers restored: "+lcs::sa_script_marker_last_failure());
+    if(campaign)campaign->marker_pool.clear();
+    lcs::sa_script_marker_forgive();
+}
+void place_coord_markers();
 void __cdecl on_marker_phase(){
     original_marker_phase();
+    place_coord_markers();
     if(!campaign || campaign->halted)return;
     bool live=false;for(const auto& entry:campaign->marker_pool.entries())live|=entry.live;
     if(!live)return;
+    if(cylinder_markers_on && !cylinder_markers_failed) {
+        // The cylinder replacement must never stall the campaign: a refusal restores SA's own markers.
+        if(!lcs::sa_script_marker_frame(campaign->marker_pool))retire_cylinder_markers("draw");
+        return;
+    }
     const auto now=*reinterpret_cast<const uint32_t*>(0xB7CB84);
     campaign->frame_updates.run("script-markers",lcs::UpdateScope::dependency,now,
         "Original private marker renderer failed",[&](){return lcs::sa_script_marker_frame(campaign->marker_pool);});
+}
+// SA's own yellow/red mission cylinders (script spheres and contact-point blips) are placed through
+// C3dMarkers::PlaceMarkerSet(id,type,pos,size,r,g,b,a,period,fraction,rotate). The retail LCS draws the same
+// markers as three nested shells of its own mesh, so a cylinder placement is redirected to the private pool
+// (same size and pulse, LCS colour); every other placement, or any refusal, keeps the native SA marker.
+void log_marker_call(const char* site,uint32_t id,int32_t type,float size,uint32_t r,uint32_t g,uint32_t b,uint32_t a);
+using PlaceMarkerSetFn=void(__cdecl*)(uint32_t,int32_t,const float*,float,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,float,int32_t);
+ScriptProcess original_sphere_marker=nullptr,original_contact_marker=nullptr;
+bool place_lcs_cylinder(uint32_t id,int32_t type,const float* position,float size,float fraction,uint32_t period,uint32_t identity_bias){
+    if(!cylinder_markers_on || !cylinder_lcs_mesh || cylinder_markers_failed || type!=1 || !position || !campaign || campaign->halted || period>0xFFFF)return false;
+    if(!lcs::sa_script_marker_resources_load(resource_directory()/L"markers")){retire_cylinder_markers("load");return false;}
+    const auto identity=uintptr_t(id)+identity_bias;
+    if(!identity)return false;
+    if(lcs::sa_script_marker_cylinder_set(campaign->marker_pool,identity,{position[0],position[1],position[2]},
+        size,fraction,uint16_t(period),*reinterpret_cast<const float*>(0xB7CB5C)))return true;
+    retire_cylinder_markers("place");return false;
+}
+void __cdecl on_sphere_marker(uint32_t id,int32_t type,const float* position,float size,uint32_t r,uint32_t g,uint32_t b,uint32_t a,
+                              uint32_t period,float fraction,int32_t rotate){
+    log_marker_call("15647FE",id,type,size,r,g,b,a);
+    if(place_lcs_cylinder(id,type,position,size,fraction,period,0))return;
+    if(type==1 && cylinder_markers_on){r=255;g=255;b=128;a=228;}
+    reinterpret_cast<PlaceMarkerSetFn>(original_sphere_marker)(id,type,position,size,r,g,b,a,period,fraction,rotate);
+}
+void __cdecl on_contact_marker(uint32_t id,int32_t type,const float* position,float size,uint32_t r,uint32_t g,uint32_t b,uint32_t a,
+                               uint32_t period,float fraction,int32_t rotate){
+    // Blip identities start at zero; keep them apart from sphere identities and non-zero.
+    log_marker_call("585CE4",id,type,size,r,g,b,a);
+    if(place_lcs_cylinder(id,type,position,size,fraction,period,0x7F000000u))return;
+    if(type==1 && cylinder_markers_on){r=255;g=255;b=128;a=228;}
+    reinterpret_cast<PlaceMarkerSetFn>(original_contact_marker)(id,type,position,size,r,g,b,a,period,fraction,rotate);
+}
+// Other native PlaceMarkerSet users (script command, three further cylinders): same recolour, plus a short log of what
+// SA places so a marker that still looks wrong can be traced to its call site.
+ScriptProcess original_other_marker[4]={};
+void log_marker_call(const char* site,uint32_t id,int32_t type,float size,uint32_t r,uint32_t g,uint32_t b,uint32_t a){
+    // One line per distinct site/identity/size, so every kind of marker SA places shows up once.
+    static std::set<std::string> seen;
+    const auto key=std::string(site)+":"+std::to_string(id)+":"+std::to_string(size);
+    if(site[0]=='7' || seen.size()>=60 || !seen.insert(key).second)return; // 70CD*: per-ped cylinders, far too many
+    log(std::string("Native marker placement: site=")+site+" type="+std::to_string(type)+" size="+std::to_string(size)+
+        " colour="+std::to_string(r)+","+std::to_string(g)+","+std::to_string(b)+","+std::to_string(a)+" id="+std::to_string(id));
+}
+template<int N>
+void __cdecl on_other_marker(uint32_t id,int32_t type,const float* position,float size,uint32_t r,uint32_t g,uint32_t b,uint32_t a,
+                             uint32_t period,float fraction,int32_t rotate){
+    log_marker_call(N==0?"4845F8":N==1?"70CD1F":N==2?"70CD6C":"70CDBC",id,type,size,r,g,b,a);
+    if(type==1 && cylinder_markers_on){
+        r=255;g=255;b=128;a=228;
+        if(N>=1) {
+            // SA draws two groups of three shells here (1.6/1.8/2.0 and 1.2/1.35/1.5); the LCS draws one set of
+            // 1.00/0.93/0.86 of the size 2.0. Keep only the outer group, at the LCS proportions.
+            if(size<1.55f)return;
+            size=N==3?2.0f:N==2?1.86f:1.72f;
+        }
+    }
+    reinterpret_cast<PlaceMarkerSetFn>(original_other_marker[N])(id,type,position,size,r,g,b,a,period,fraction,rotate);
+}
+bool install_cylinder_markers(){
+    // CTheScripts::DrawScriptSpheres (its body sits in the .HOODLUM section of this executable) and the
+    // CRadar contact-point branch call PlaceMarkerSet at 0x725BA0 (checked, not assumed).
+    for(const auto site:{uintptr_t(0x15647FE),uintptr_t(0x585CE4),uintptr_t(0x4845F8),uintptr_t(0x70CD1F),uintptr_t(0x70CD6C),uintptr_t(0x70CDBC)}){
+        const auto code=reinterpret_cast<const uint8_t*>(site);
+        int32_t relative=0;
+        if(IsBadReadPtr(code,5) || code[0]!=0xE8)return false;
+        std::memcpy(&relative,code+1,4);
+        if(uintptr_t(int64_t(site+5)+relative)!=0x725BA0)return false;
+    }
+    cylinder_markers_on=install_call(0x15647FE,reinterpret_cast<ScriptProcess>(&on_sphere_marker),original_sphere_marker) &&
+           install_call(0x585CE4,reinterpret_cast<ScriptProcess>(&on_contact_marker),original_contact_marker);
+    install_call(0x4845F8,reinterpret_cast<ScriptProcess>(&on_other_marker<0>),original_other_marker[0]);
+    install_call(0x70CD1F,reinterpret_cast<ScriptProcess>(&on_other_marker<1>),original_other_marker[1]);
+    install_call(0x70CD6C,reinterpret_cast<ScriptProcess>(&on_other_marker<2>),original_other_marker[2]);
+    install_call(0x70CDBC,reinterpret_cast<ScriptProcess>(&on_other_marker<3>),original_other_marker[3]);
+    cylinder_lcs_mesh=cylinder_markers_on && setting(L"LcsMarkers")==L"1";
+    return cylinder_markers_on;
+}
+// Retail shows the yellow cylinder for a coordinate blip the script puts at a door while the player is not on a
+// mission (PS2 tutorial, "Walk into the yellow marker in the doorway"); SA's Draw3dMarkers skips that blip type.
+void place_coord_markers(){
+    if(!original_contact_marker || !cylinder_markers_on || !campaign || campaign->halted)return;
+    // Read SA's own radar traces (the same walk as CRadar::Draw3dMarkers at 0x585BF0), so blips restored by a LOAD
+    // are covered too: trace+0x25 bit 1 = in use, trace+0x26 bits 2..5 = type (4 = coordinate), position at +8.
+    __try {
+        for(uintptr_t edi=0xBA8716;edi<0xBAA26E;edi+=0x28){
+            const auto flags=*reinterpret_cast<const uint8_t*>(edi-1);
+            const auto kind=*reinterpret_cast<const uint8_t*>(edi);
+            if(!(flags&2) || ((kind>>2)&0xF)!=4)continue;
+            float position[3];std::memcpy(position,reinterpret_cast<const void*>(edi-0x1E),12);
+            if(!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]))continue;
+            if(position[2]<=-100.f)position[2]=reinterpret_cast<float(__cdecl*)(float,float)>(0x569660)(position[0],position[1]);
+            // A script sphere already marks the same place (mission destinations pair ADD_SPHERE with the blip).
+            bool covered=false;
+            for(uintptr_t sphere=0xA91268;sphere<0xA91268+0x180;sphere+=0x18){
+                if(!*reinterpret_cast<const uint8_t*>(sphere))continue;
+                const auto* centre=reinterpret_cast<const float*>(sphere+8);
+                if(std::fabs(centre[0]-position[0])<3.f && std::fabs(centre[1]-position[1])<3.f){covered=true;break;}
+            }
+            if(covered)continue;
+            const auto blip=uint32_t(*reinterpret_cast<const uint16_t*>(edi-0x12));
+            reinterpret_cast<PlaceMarkerSetFn>(original_contact_marker)((blip<<16|uint32_t((edi-0xBA8716)/0x28))+0x7E000000u,1,position,2.0f,255,255,128,228,0x800,0.2f,0);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 void __cdecl on_marker_shutdown(){
     if(campaign)campaign->marker_pool.clear();
@@ -2561,6 +2679,10 @@ bool install_hook() {
     const bool marker_shutdown=marker_profile && install_call(0x723391,&on_marker_shutdown,original_marker_shutdown);
     lcs::sa_script_marker_render_bound(marker_frame?reinterpret_cast<uintptr_t>(&on_marker_phase):0,
         marker_shutdown?reinterpret_cast<uintptr_t>(&on_marker_shutdown):0);
+    lcs::sa_script_marker_set_logger([](const std::string& text){log(text);});
+    if(marker_frame && marker_shutdown && setting(L"Mode")==L"Campaign" && setting(L"LcsMarkers")!=L"0")
+        log(install_cylinder_markers()?"Original LCS mission cylinders active: script spheres and contact-point blips use the LCS marker mesh"
+                                       :"Original LCS mission cylinders unavailable: SA marker call sites differ; SA markers stay active");
     // Optional until a ground vehicle receives the source policy. Install only
     // here at startup, preserving every pre-existing target and its thiscall ABI.
     // A partial installation merely delegates; the command requires all sites.

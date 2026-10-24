@@ -1,4 +1,6 @@
 #pragma once
+#include <map>
+#include <array>
 #include "lcs/route_vehicle_native.hpp"
 #include "lcs/radar_sprites.hpp"
 #include <algorithm>
@@ -436,6 +438,10 @@ public:
     explicit NativeAdapter(const ScmImage& image) : image_(image) {}
     // Failure cleanup removes only markers successfully created by this VM.
     bool release_script_markers();
+    // Coordinate blips created by the scripts (position and logical display bits). SA draws no 3D marker for
+    // them; the ASI places the LCS cylinder from this table while the player is not on a mission.
+    struct CoordMarker {std::array<float,3> position{};int32_t display=3;};
+    std::map<int32_t,CoordMarker> coord_markers;
     // Repair owned blips restored from saves made with older sprite mappings.
     // The reader/setter must validate the native handle generation before use.
     size_t recover_source_blip_sprites(Vm&,const std::function<std::optional<RadarSpriteBlip>(int32_t)>& read,

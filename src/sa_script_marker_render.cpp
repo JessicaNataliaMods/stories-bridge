@@ -94,6 +94,10 @@ struct Resources {
     bool complete=false,faulted=false;
 } resources;
 uintptr_t frame_bound=0,shutdown_bound=0;
+const char* failure="none";
+void (*logger)(const std::string&)=nullptr;
+int logged_draws=0,logged_submits=0;
+bool why(const char* reason){failure=reason;return false;}
 bool current_binding(uintptr_t slot,uintptr_t callback){
     if(!callback)return false;
     const auto code=reinterpret_cast<const uint8_t*>(marker_rw::address(slot));
@@ -134,18 +138,12 @@ bool capture(FrameState& f){
     return true;
 }
 bool restore(FrameState& f){
-    if(!owner())return false;
+    if(!owner())return why("restore: engine or thread changed");
     bool ok=true;
-    for(size_t i=0;i<f.captured;++i)if(!f.set(states[i],reinterpret_cast<void*>(uintptr_t(f.values[i]))))ok=false;
+    for(size_t i=0;i<f.captured;++i)if(!f.set(states[i],reinterpret_cast<void*>(uintptr_t(f.values[i]))))ok=why("restore: render state refused");
     if(f.lights){
-        if(global<void*>(0xC886E8)!=f.ambient || global<void*>(0xC886EC)!=f.directional)return false;
-        // A callback may replace a light or deliberately change its colour.
-        // Restore only the light values that this pass actually published.
-        if(f.bright_entered && (std::memcmp(&global<uint8_t>(0xC88694),f.expected_globals,32) ||
-           std::memcmp(&field<uint8_t>(f.ambient,0x18),f.expected_ambient,16) ||
-           std::memcmp(&field<uint8_t>(f.directional,0x18),f.expected_directional,16) ||
-           field<uint8_t>(f.ambient,3)!=f.expected_ambient_flag ||
-           field<uint8_t>(f.directional,3)!=f.expected_directional_flag))return false;
+        if(global<void*>(0xC886E8)!=f.ambient || global<void*>(0xC886EC)!=f.directional)return why("restore: a light object was replaced");
+        // Like the native C3dMarkers::Render, put the captured light values back even when a callback touched them.
         std::memcpy(&global<uint8_t>(0xC88694),f.globals,32);
         std::memcpy(&field<uint8_t>(f.ambient,0x18),f.ambient_colour,16);
         std::memcpy(&field<uint8_t>(f.directional,0x18),f.directional_colour,16);
@@ -154,14 +152,15 @@ bool restore(FrameState& f){
     return ok;
 }
 bool draw(const ScriptMarkerInstance& entry,FrameState& state){
+    if(logger && logged_draws<12){++logged_draws;logger("Marker draw: type="+std::to_string(entry.source.type)+" size="+std::to_string(entry.current_size)+" vertical="+std::to_string(entry.vertical_size)+" pos="+std::to_string(entry.matrix[9])+","+std::to_string(entry.matrix[10])+","+std::to_string(entry.matrix[11])+" colour="+std::to_string(entry.source.colour[0])+","+std::to_string(entry.source.colour[1])+","+std::to_string(entry.source.colour[2])+","+std::to_string(entry.source.colour[3])+" range="+std::to_string(entry.camera_range));}
     const auto index=entry.source.type==1?0:entry.source.type==2?1:entry.source.type==5?2:3;
-    if(index>=3)return false;
+    if(index>=3)return why("draw: unknown marker type");
     auto& mesh=resources.meshes[index];
-    if(!mesh.atomic || field<uint8_t>(mesh.atomic,0)!=1 || field<void*>(mesh.atomic,4)!=mesh.frame)return false;
+    if(!mesh.atomic || field<uint8_t>(mesh.atomic,0)!=1 || field<void*>(mesh.atomic,4)!=mesh.frame)return why("draw: atomic changed");
     const auto geometry=field<void*>(mesh.atomic,0x18);
-    if(!geometry || field<int32_t>(geometry,0x24)<1)return false;
+    if(!geometry || field<int32_t>(geometry,0x24)<1)return why("draw: geometry has no materials");
     const auto table=field<void**>(geometry,0x20);
-    if(!table || !table[0])return false;
+    if(!table || !table[0])return why("draw: material table missing");
     // Source Render changes the first material, then scales source X/Y and Z
     // independently on a fresh frame. No native CONE/TUBE or world model ID.
     auto material=table[0];const auto colour=field<uint32_t>(material,4);
@@ -171,12 +170,13 @@ bool draw(const ScriptMarkerInstance& entry,FrameState& state){
         matrix[row*4+axis]=entry.matrix[row*3+axis]*(row==0 || row==1?entry.current_size:row==2?entry.vertical_size:1.f);
     marker_rw::matrix_update(matrix);marker_rw::frame_update(mesh.frame);
     const auto callback=field<void*(__cdecl*)(void*)>(mesh.atomic,0x48);
-    if(!executable(reinterpret_cast<void*>(callback))){field<uint32_t>(material,4)=colour;return false;}
+    if(!executable(reinterpret_cast<void*>(callback))){field<uint32_t>(material,4)=colour;return why("draw: atomic render callback not executable");}
     const auto previous_z=state.z_write;
-    if(entry.source.type==5 && !state.set(8,nullptr)){field<uint32_t>(material,4)=colour;return false;}
+    if(entry.source.type==5 && !state.set(8,nullptr)){field<uint32_t>(material,4)=colour;return why("draw: z-write state refused");}
     callback(mesh.atomic);
     field<uint32_t>(material,4)=colour;
-    return entry.source.type!=5 || state.set(8,reinterpret_cast<void*>(uintptr_t(previous_z)))!=0;
+    if(entry.source.type==5 && !state.set(8,reinterpret_cast<void*>(uintptr_t(previous_z))))return why("draw: z-write restore refused");
+    return true;
 }
 }
 void sa_script_marker_render_bound(uintptr_t frame,uintptr_t shutdown){frame_bound=frame;shutdown_bound=shutdown;}
@@ -245,11 +245,13 @@ bool sa_script_marker_resources_load(const std::filesystem::path& directory){
     if(!safe || !ok || !restored){resources.faulted=true;return false;}
     resources.directory=directory.lexically_normal();resources.complete=true;return true;
 }
+const char* sa_script_marker_last_failure(){return failure;}
+void sa_script_marker_forgive(){resources.faulted=false;}
 bool sa_script_marker_frame(ScriptMarkerPool& pool){
-    if(!sa_script_marker_render_ready())return false;
+    if(!sa_script_marker_render_ready())return why("frame: renderer not ready (bindings, thread, engine or profile changed)");
     FrameState state;bool ok=false;
     const bool safe=guard([&]{
-        if(!capture(state))return;
+        if(!capture(state)){why("frame: render state capture failed");return;}
         marker_rw::bright();state.bright_entered=true;
         std::memcpy(state.expected_globals,&global<uint8_t>(0xC88694),32);
         std::memcpy(state.expected_ambient,&field<uint8_t>(state.ambient,0x18),16);
@@ -259,6 +261,8 @@ bool sa_script_marker_frame(ScriptMarkerPool& pool){
         ok=pool.frame([&](size_t,const auto& entry){return draw(entry,state);});
     });
     bool restored=false;const bool cleanup=guard([&]{restored=restore(state);});
+    if(!safe)why("frame: native exception while drawing");
+    else if(ok && !cleanup)why("frame: native exception while restoring");
     if(!safe || !ok || !cleanup || !restored){resources.faulted=true;return false;}
     return true;
 }
@@ -284,7 +288,9 @@ std::optional<float> sa_script_marker_ground(float x,float y){
     if(!safe || !std::isfinite(height)){resources.faulted=true;return {};}
     return height;
 }
+void sa_script_marker_set_logger(void (*function)(const std::string&)){logger=function;}
 bool sa_script_marker_submit(ScriptMarkerPool& pool,const ScriptMarkerCommand& command,float time_step){
+    if(logger && logged_submits<12){++logged_submits;const auto& p=command.placement;logger("Marker submit: type="+std::to_string(p.type)+" size="+std::to_string(p.size)+" pos="+std::to_string(p.position[0])+","+std::to_string(p.position[1])+","+std::to_string(p.position[2])+" colour="+std::to_string(p.colour[0])+","+std::to_string(p.colour[1])+","+std::to_string(p.colour[2])+" vertical="+std::to_string(p.vertical_size)+" ready="+std::to_string(sa_script_marker_render_ready()));}
     if(!sa_script_marker_render_ready() || !std::isfinite(time_step))return false;
     ScriptMarkerEnvironment env;env.time_step=time_step;
     env.floor=[](const std::array<float,3>& position)->std::optional<ScriptMarkerEnvironment::Floor>{
@@ -296,6 +302,21 @@ bool sa_script_marker_submit(ScriptMarkerPool& pool,const ScriptMarkerCommand& c
         ok=pool.submit(command,env);
     });
     if(!safe || !ok){resources.faulted=true;return false;}
+    return true;
+}
+bool sa_script_marker_cylinder_set(ScriptMarkerPool& pool,uintptr_t identity,const std::array<float,3>& position,
+                                   float size,float pulse_fraction,uint16_t pulse_period,float time_step){
+    if(!identity || !pulse_period || (pulse_period&(pulse_period-1)) || !std::isfinite(size) || !std::isfinite(pulse_fraction))return false;
+    // Retail PlaceMarkerSet (PS2 0x24B140): the same placement at 1.00, 0.93 and
+    // 0.86 of the size with rotation rates 1, 2 and -1; colour 255,255,128,228.
+    static constexpr struct {float scale;int16_t rotate;} layers[]={{1.f,1},{.93f,2},{.86f,-1}};
+    for(const auto& layer:layers){
+        ScriptMarkerCommand command;auto& p=command.placement;
+        p.identity=identity;p.type=5;p.pulse_period=pulse_period;p.rotate_rate=layer.rotate;
+        p.position=position;p.size=size*layer.scale;p.pulse_fraction=pulse_fraction;p.vertical_size=0;
+        p.colour={255,255,128,228};
+        if(!sa_script_marker_submit(pool,command,time_step))return false;
+    }
     return true;
 }
 }

@@ -14,10 +14,10 @@
 #include <set>
 
 namespace lcs {
-// Retail CRadar::Draw3dMarkers (PS2 jump table 0x3A7020) skips BLIP_COORD:
-// only car/char/object arrows and contact-point cylinders are drawn. Display
-// values match SA (0 neither, 1 marker, 2 blip, 3 both); keep the radar bit.
-static int32_t coord_blip_display(int32_t display) {return display&2;}
+// Coordinate blips keep their marker bit. The earlier reading of the retail Draw3dMarkers table (no marker for
+// BLIP_COORD) contradicts the PS2 tutorial, where a coordinate blip at the safe-house door shows the yellow cylinder
+// while the player is not on a mission; SA's own marker branch applies the same not-on-a-mission rule.
+static int32_t coord_blip_display(int32_t display) {return display;}
 size_t NativeAdapter::recover_source_blip_sprites(Vm& vm,
     const std::function<std::optional<RadarSpriteBlip>(int32_t)>& read,
     const std::function<bool(int32_t,int32_t)>& set) {
@@ -2837,6 +2837,8 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
             if(d<distance){distance=d;nearest=i;}
         }
         if(nearest==phones_.size()){thread.diagnostic="No unclaimed mounted LCS phone within original 100m search";return StepResult::unsupported;}
+        try {if(diagnostic_event)diagnostic_event("GRAB_PHONE claimed IPL booth: script=("+std::to_string(position[0])+","+std::to_string(position[1])+","+std::to_string(position[2])+
+            ") booth=("+std::to_string(phones_[nearest].position[0])+","+std::to_string(phones_[nearest].position[1])+","+std::to_string(phones_[nearest].position[2])+")");}catch(...){}
         phones_[nearest].message_removed=true;
         std::swap(phones_[nearest],phones_[claimed_phones_]);
         vm.store(thread,int32_t(claimed_phones_++));return StepResult::continued;
@@ -3092,6 +3094,8 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
     if(opcode==COMMAND_ADD_HOSPITAL_RESTART || opcode==COMMAND_ADD_POLICE_RESTART)call.inputs.push_back(0);
     // Retail CRadar::Draw3dMarkers draws no 3D marker for BLIP_COORD (see
     // coord_blip_display); keep only the radar bit of a coordinate blip.
+    const int32_t original_blip_display=opcode==COMMAND_CHANGE_BLIP_DISPLAY && call.inputs.size()==2?call.inputs[1]:3;
+    const int32_t original_blip_display_old=opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD && call.inputs.size()==5?call.inputs[4]:3;
     if(opcode==COMMAND_CHANGE_BLIP_DISPLAY && call.inputs.size()==2 && coord_blips_.count(call.inputs[0]))
         call.inputs[1]=coord_blip_display(call.inputs[1]);
     if(opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD && call.inputs.size()==5)call.inputs[4]=coord_blip_display(call.inputs[4]);
@@ -3271,6 +3275,24 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
                 call.inputs[4]=float_bits(surface);
                 try {if(diagnostic_event)diagnostic_event("CREATE_CHAR spawn lifted to the floor: x="+std::to_string(bits_float(call.inputs[2]))+" y="+std::to_string(bits_float(call.inputs[3]))+
                     " z="+std::to_string(z)+" -> "+std::to_string(surface));}catch(...){}
+            }
+        }
+    }
+    if((opcode==COMMAND_CREATE_OBJECT || opcode==COMMAND_CREATE_OBJECT_NO_OFFSET) && call.inputs.size()>=4) {
+        try {if(diagnostic_event)diagnostic_event(std::string(opcode==COMMAND_CREATE_OBJECT?"CREATE_OBJECT":"CREATE_OBJECT_NO_OFFSET")+" SA model="+std::to_string(call.inputs[0])+
+            " x="+std::to_string(bits_float(call.inputs[1]))+" y="+std::to_string(bits_float(call.inputs[2]))+" z="+std::to_string(bits_float(call.inputs[3])));}catch(...){}
+    }
+    if(opcode==COMMAND_CREATE_OBJECT && call.inputs.size()>=4) {
+        // Same floor offset as peds: the converted map sits above the LCS floor, so an object whose base is
+        // given at the LCS floor (mission phone booth) would sink. Lift to the surface, never lower.
+        const float z=bits_float(call.inputs[3]);
+        if(std::isfinite(z) && z>-99.0f) {
+            const auto ground=execute({0x02CE,{call.inputs[1],call.inputs[2],float_bits(z+0.6f)},{},0,1});
+            const float surface=ground.executed ? bits_float(ground.values[0]) : z;
+            if(std::isfinite(surface) && surface>z && surface<=z+0.6f) {
+                call.inputs[3]=float_bits(surface);
+                try {if(diagnostic_event)diagnostic_event("CREATE_OBJECT base lifted to the floor: x="+std::to_string(bits_float(call.inputs[1]))+
+                    " y="+std::to_string(bits_float(call.inputs[2]))+" z="+std::to_string(z)+" -> "+std::to_string(surface));}catch(...){}
             }
         }
     }
@@ -3465,10 +3487,28 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
     if(opcode==COMMAND_ADD_SPHERE && result.values[0]>=0)owned_spheres_.insert(result.values[0]);
     if(opcode==COMMAND_REMOVE_SPHERE)owned_spheres_.erase(call.inputs[0]);
     const std::string operation=opcode_name(opcode);
+    if(diagnostic_event && (operation.find("SPHERE")!=std::string::npos || operation.find("MARKER")!=std::string::npos ||
+       operation.find("CHECKPOINT")!=std::string::npos || operation.find("BLIP_FOR_COORD")!=std::string::npos ||
+       operation.find("CONTACT")!=std::string::npos || operation.find("CORONA")!=std::string::npos)) {
+        // Diagnostic: which marker-like commands the scripts run (first sighting per call site).
+        static std::set<std::pair<uint32_t,uint16_t>> seen_markers;
+        if(seen_markers.size()<80 && seen_markers.emplace(thread.last_ip,opcode).second) {
+            std::string text="Marker command: "+operation+" ip="+std::to_string(thread.last_ip)+" inputs=";
+            for(const auto value:call.inputs){float f;std::memcpy(&f,&value,4);text+=std::to_string(value)+"("+std::to_string(f)+") ";}
+            try{diagnostic_event(text);}catch(...){}
+        }
+    }
     if(call.outputs==1 && result.values[0]>=0 && operation.rfind("COMMAND_ADD_",0)==0 && operation.find("BLIP")!=std::string::npos)owned_blips_.insert(result.values[0]);
-    if(opcode==COMMAND_REMOVE_BLIP){owned_blips_.erase(call.inputs[0]);coord_blips_.erase(call.inputs[0]);}
+    if(opcode==COMMAND_REMOVE_BLIP){owned_blips_.erase(call.inputs[0]);coord_blips_.erase(call.inputs[0]);coord_markers.erase(call.inputs[0]);}
+    if(opcode==COMMAND_CHANGE_BLIP_DISPLAY && call.inputs.size()==2 && result.native_entered){const auto marker=coord_markers.find(call.inputs[0]);if(marker!=coord_markers.end())marker->second.display=original_blip_display;}
     if((opcode==COMMAND_ADD_BLIP_FOR_COORD || opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD) && call.outputs==1 && result.values[0]>=0) {
         coord_blips_.insert(result.values[0]);
+        if(call.inputs.size()>=3){
+            CoordMarker marker;
+            for(size_t i=0;i<3;++i)marker.position[i]=entity_float(call.inputs[i]);
+            marker.display=opcode==COMMAND_ADD_BLIP_FOR_COORD_OLD && call.inputs.size()==5?original_blip_display_old:3;
+            coord_markers[result.values[0]]=marker;
+        }
         // Source ADD_BLIP_FOR_COORD uses BLIP_DISPLAY_BOTH; native 018A draws
         // SA's own marker for it. The blip already exists, so a refused
         // radar-only update is reported but does not replay the creation.
