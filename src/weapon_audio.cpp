@@ -5,6 +5,7 @@ namespace lcs {
 // Source: reLCS AudioLogic.cpp, cAudioManager::ProcessPedOneShots,
 // SOUND_WEAPON_SHOT_FIRED and SOUND_WEAPON_RELOAD. Volumes: Colt45 90, Uzi 70,
 // Shotgun 100, M4 90, M16 (M60) 127, Sniper 110, Rocket launcher 80.
+// User-requested comfort adjustment: M60 is 90 instead of its source 127 (~-3 dB).
 // Quirk kept out on purpose: the original also flags the rocket launcher as
 // stereo, but SFX_ROCKET_LEFT is followed by SFX_ROCKET_RELOAD (there is no
 // right sample), so the original would layer the reload clack on every launch
@@ -15,7 +16,7 @@ constexpr WeaponShotSpec shots[]={
     {lcs_weapon::Colt45,"Colt45",SFX_COLT45_LEFT,true,0,0,1,10,90},
     {lcs_weapon::Python,"Python",SFX_PYTHON_LEFT,true,0,0,no_table,0,127},
     {lcs_weapon::RocketLauncher,"RocketLauncher",SFX_ROCKET_LEFT,false,0,0,0,20,80},
-    {lcs_weapon::M60,"M60",SFX_M60_LEFT,true,0,0,no_table,0,127},
+    {lcs_weapon::M60,"M60",SFX_M60_LEFT,true,0,0,no_table,0,90},
     {lcs_weapon::Mp5,"MP5",SFX_MP5_LEFT,true,0,0,3,15,70},
     {lcs_weapon::Tec9,"Tec9",SFX_TEC_LEFT,true,17000,500,3,15,70},
     {lcs_weapon::SilencedIngram,"SilencedIngram",SFX_TEC_LEFT,true,34000,1000,3,15,70},

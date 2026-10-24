@@ -225,3 +225,5 @@ O processador de motor SA continua executando em todos os frames antes de ler ma
 Quando o LCS aceita o motor, apenas os slots de motor nativos correspondentes recebem ganho silencioso; buzina, sirene, danos e outros efeitos ficam fora desse filtro. Antes do proximo processamento SA, o ganho anterior e restaurado somente se ponteiro, dono, identidade e sentinela ainda correspondem. Falha no filtro cancela os loops LCS e mantem o processamento SA; troca de mundo limpa o cache. O teste isolado exercita o codigo real sobre objetos simulados e le os bytes de perfil em memoria nao executavel, sem jogo ou dispositivo de audio.
 
 `LcsMuteCjSpeech` (padrao `1`) silencia o fallback de voz nativa do jogador no gameplay, inclusive contextos sem substituto LCS pronto. NPCs e substituicoes Toni aceitas continuam audiveis. As falas de missao/cutscene LCS usam streams independentes e nao passam por este filtro.
+
+A pedido do usuario, o tiro da M60 usa ganho90 em vez de127 (aproximadamente -3 dB), como ajuste de conforto. Sample, pitch, recarga e demais armas permanecem com a configuracao anterior.
