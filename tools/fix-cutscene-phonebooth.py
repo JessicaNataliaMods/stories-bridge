@@ -58,23 +58,83 @@ def patch_block(block):
     return bytes(data), changed
 
 
+LIMIT = 31.9  # SA stores compressed translations as int16 / 1024 (about +-32 m)
+
+
+def large_animations(block):
+    """Animation names whose translation does not fit SA's compressed keys."""
+    names = set()
+    if block[:4] != b'ANPK' or block[8:12] != b'INFO':
+        return names
+    cursor = 8
+    size, count = struct.unpack_from('<Ii', block, cursor + 4)
+    cursor += 8 + padded(size)
+    for _ in range(count):
+        size = struct.unpack_from('<I', block, cursor + 4)[0]
+        name = bytes(block[cursor + 8:cursor + 8 + size]).split(b'\0')[0].decode('latin1')
+        cursor += 8 + padded(size)
+        end = cursor + 8 + struct.unpack_from('<I', block, cursor + 4)[0]
+        cursor += 8
+        size, objects = struct.unpack_from('<Ii', block, cursor + 4)
+        cursor += 8 + padded(size)
+        for _ in range(objects):
+            cursor += 8
+            size = struct.unpack_from('<I', block, cursor + 4)[0]
+            frames = struct.unpack_from('<i', block, cursor + 8 + 28)[0]
+            cursor += 8 + padded(size)
+            kind = bytes(block[cursor:cursor + 4])
+            size = struct.unpack_from('<I', block, cursor + 4)[0]
+            per = {b'KR00': 5, b'KRT0': 8, b'KRTS': 11}[kind]
+            if kind != b'KR00':
+                for i in range(frames):
+                    x, y, z = struct.unpack_from('<3f', block, cursor + 8 + 4 * per * i + 16)
+                    if max(abs(x), abs(y), abs(z)) >= LIMIT:
+                        names.add(name)
+            cursor += 8 + padded(size)
+        cursor = end
+    return names
+
+
+def add_uncompressed(cut, names):
+    """List the animations in the .cut uncompress section (kept as floats)."""
+    text = cut.split(b'\0')[0]
+    marker = b'uncompress\r\n'
+    at = text.find(marker)
+    if at < 0:
+        raise SystemExit('.cut has no uncompress section')
+    end = at + len(marker)
+    listed = text[end:text.index(b'end', end)].split()
+    add = b''.join(n.encode('latin1') + b'\r\n' for n in sorted(names) if n.encode('latin1') not in listed)
+    patched = text[:end] + add + text[end:]
+    if len(patched) > len(cut):
+        raise SystemExit('.cut does not fit its sector padding')
+    return patched + cut[len(patched):]
+
+
 def main(source, target):
     image = bytearray(open(source, 'rb').read())
     if image[:4] != b'VER2':
         raise SystemExit('Not an IMG v2 archive')
     total = 0
+    entries = {}
     for index in range(struct.unpack_from('<I', image, 4)[0]):
         base = 8 + 32 * index
         offset, size, size2 = struct.unpack_from('<IHH', image, base)
         name = bytes(image[base + 8:base + 32]).split(b'\0')[0].decode('latin1')
-        if not name.lower().endswith('.ifp'):
+        entries[name.lower()] = (offset * 2048, (size or size2) * 2048)
+    for name, (start, length) in entries.items():
+        if not name.endswith('.ifp'):
             continue
-        start, length = offset * 2048, (size or size2) * 2048
         patched, changed = patch_block(bytes(image[start:start + length]))
         if changed:
             image[start:start + length] = patched
             total += changed
             print('%s: %d keys raised by %.3f' % (name, changed, OFFSET))
+        large = large_animations(bytes(image[start:start + length]))
+        if large:
+            cut_start, cut_length = entries[name[:-4] + '.cut']
+            image[cut_start:cut_start + cut_length] = add_uncompressed(bytes(image[cut_start:cut_start + cut_length]), large)
+            print('%s: uncompressed %s' % (name[:-4] + '.cut', ', '.join(sorted(large))))
     open(target, 'wb').write(image)
     print('total keys:', total)
 
