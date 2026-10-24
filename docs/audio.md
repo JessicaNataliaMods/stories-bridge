@@ -213,3 +213,7 @@ Os testes de isolamento verificam os bytes PCM recebidos pelo driver simulado, a
 O gancho chama `PlayHornOrSiren` em todos os frames, inclusive quando os dois canais foram assumidos pelo LCS. Cada canal assumido recebe zero no consumidor nativo, permitindo encerrar a voz SA iniciada durante o carregamento do sample; pular a chamada deixava esse fallback tocando junto do LCS e sem receber o comando de parar. `vehicle_horn_dispatch_tests.cpp` cobre a transicao de fallback para LCS, cancelamento e posse independente dos canais.
 
 Cada pedido de loop tem uma revisao unica entre recriacoes do slot. O worker revalida essa revisao e o pedido ativo depois de decodificar, usando o volume/frequencia/pan mais recentes. Cancelamento e publicacao sao serializados junto ao estado do mixer; um pedido atrasado nao pode recriar um loop cancelado nem apagar uma geracao mais nova.
+
+### Tiros ambientes distantes do SA
+
+Na campanha ativa, a chamada dedicada de `CAudioEngine::Service` para `ServiceAmbientGunFire` e filtrada. Os eventos de armas, NPCs atirando e recargas continuam nos consumidores existentes. O destino do CALL e validado antes de instalar o gancho; fora da campanha, o gerador nativo continua sendo chamado. O teste isolado confere o roteamento e le o perfil do executavel somente como dados.

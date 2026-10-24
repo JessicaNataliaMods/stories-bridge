@@ -36,6 +36,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include "sa_weapon_audio.hpp"
 #include "sa_vehicle_audio.hpp"
 #include "sa_vehicle_horn_dispatch.hpp"
+#include "sa_ambient_gunfire.hpp"
 #include "sa_interface_audio.hpp"
 #include "sa_audio_jobs.hpp"
 #include "sa_audio_mixer.hpp"
@@ -2266,6 +2267,20 @@ template<ScriptProcess* Original,bool Reload> void __fastcall on_weapon_sound(vo
     catch(...) {}
     reinterpret_cast<void(__thiscall*)(void*,int32_t,void*,int32_t)>(*Original)(self,type,entity,event);
 }
+ScriptProcess original_ambient_gunfire=nullptr;
+void __fastcall on_ambient_gunfire(void* self,void*) {
+    lcs::dispatch_ambient_gunfire(campaign && !campaign->halted && !world_failure,[&]{
+        reinterpret_cast<void(__thiscall*)(void*)>(original_ambient_gunfire)(self);
+    });
+}
+bool install_ambient_gunfire_filter() {
+    if(original_ambient_gunfire)return true;
+    using Profile=lcs::SaAmbientGunfireProfile;
+    const auto* code=reinterpret_cast<const uint8_t*>(Profile::call);
+    int32_t relative=0;std::memcpy(&relative,code+1,4);
+    if(*code!=0xE8 || uintptr_t(int64_t(Profile::call+5)+relative)!=Profile::target)return false;
+    return install_call(Profile::call,reinterpret_cast<ScriptProcess>(&on_ambient_gunfire),original_ambient_gunfire);
+}
 bool install_weapon_sounds() {
     if(!lcs::sa_weapon_audio_profile_matches())return false;
     using Profile=lcs::SaWeaponAudioProfile;
@@ -2480,6 +2495,8 @@ bool install_hook() {
         interface_sound_hooks_installed=lcs::sa_interface_event_calls(reinterpret_cast<uintptr_t>(&on_frontend_event));
         if(!interface_sound_hooks_installed)log("Original LCS interface sounds unavailable: SA frontend report call sites differ; SA interface sounds stay active");
     }
+    if(setting(L"Mode")==L"Campaign" && !install_ambient_gunfire_filter())
+        log("Distant ambient gunfire filter unavailable: native generator call differs");
     if(setting(L"Mode")==L"Campaign" && setting(L"LcsSilentLoading")!=L"0") {
         if(!install_silent_loading())log("Silent PS2 loading unavailable: SA loading-tune call differs");
     }
