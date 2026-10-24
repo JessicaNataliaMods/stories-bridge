@@ -5,9 +5,14 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 ORIGINAL_AUDIO=ROOT/'local/originals/lcs-ps2/AUDIO'
 def digest(path):
     with path.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
-def validate(package,source,validation_build=None):
+def validate(package,source,validation_build=None,game=None):
     validation_build=pathlib.Path(validation_build) if validation_build else ROOT/"build"
     metadata=package/'metadata/campaign.json';campaign=json.loads(metadata.read_text())
+    if campaign.get('version', 0) >= 32:
+        legacy_game = json.loads((package/'metadata/map-preview.json').read_text()).get('gameDirectory')
+        if game is None and not legacy_game:
+            raise ValueError('Offline native startup checks require an explicit --game directory')
+        game = pathlib.Path(game or legacy_game)
     campaign['nativeStartupValidated']=False;metadata.write_text(json.dumps(campaign,indent=2))
     commands=[(validation_build/'Release/lcs-one-off-sound-tests.exe',[source/'DATA/MAIN.SCM',source/'audio']),
               (validation_build/'Release/lcs-campaign-package-tests.exe',[package,source]),
@@ -26,12 +31,12 @@ def validate(package,source,validation_build=None):
         # The executable is read as PE data; only relocated parameter routines
         # run in the isolated test process, never the GTA process or its world.
         commands.append((validation_build/'Release/lcs-native-abi-tests.exe',
-                         [pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']))
+                         [game/'gta_sa.exe']))
     if campaign.get('version',0)>=33:
         commands.extend([(validation_build/'Release/lcs-campaign-entity-family-tests.exe',[]),
                          (validation_build/'Release/lcs-campaign-statistics-family-tests.exe',[]),
                          (validation_build/'Release/lcs-native-entity-backend-tests.exe',
-                          [pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']),
+                          [game/'gta_sa.exe']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/source_family_contracts.py'])])
     if campaign.get('version',0)>=34:
         commands.append((validation_build/'Release/lcs-campaign-infrastructure-family-tests.exe',[]))
@@ -59,34 +64,34 @@ def validate(package,source,validation_build=None):
                          (validation_build/'Release/lcs-ending-tune-source-tests.exe',
                           [ORIGINAL_AUDIO/'MUSIC/FINALE.VB' if campaign.get('version',0)>=90 else package/'metadata/lcs-source/AUDIO/MUSIC/FINALE.VB.bin']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_ending_tune_contracts.py',
-                          pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
+                          game/'gta_sa.exe'])])
     if campaign.get('version',0)>=58:
         for name in ('original_remote_cancel_contracts','original_save_menu_contracts',
                      'original_front_seat_contracts','original_pickup_weapon_contracts'):
             commands.append((pathlib.Path(sys.executable),['-B',ROOT/'tests'/f'{name}.py',
-                             pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']))
+                             game/'gta_sa.exe']))
     if campaign.get('version',0)>=59:
         commands.append((validation_build/'Release/lcs-resource-tests.exe',[source]))
     if campaign.get('version',0)>=60:
         commands.extend([(validation_build/'Release/lcs-script-coronas-tests.exe',[]),
                          (validation_build/'Release/lcs-script-corona-backend-tests.exe',[]),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_script_corona_contracts.py',
-                          pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
+                          game/'gta_sa.exe'])])
     if campaign.get('version',0)>=62:
         commands.extend([(validation_build/'Release/lcs-hud-tests.exe',[]),
                          (validation_build/'Release/lcs-hud-render-tests.exe',[]),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_hud_presentation_contracts.py',
-                          pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
+                          game/'gta_sa.exe'])])
     if campaign.get('version',0)>=61:
         commands.extend([(validation_build/'Release/lcs-collectives-tests.exe',[]),
             (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_collective_contracts.py',
-             pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe'])])
+             game/'gta_sa.exe'])])
     if campaign.get('version',0)>=63:
         commands.extend([(validation_build/'Release/lcs-script-markers-tests.exe',[]),
                          (validation_build/'Release/lcs-script-marker-pool-tests.exe',[]),
                          (validation_build/'Release/lcs-script-marker-render-tests.exe',[validation_build/'marker-render-fixture']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tests/original_marker_contracts.py',
-                          pathlib.Path(map_report['gameDirectory'])/'gta_sa.exe']),
+                          game/'gta_sa.exe']),
                          (pathlib.Path(sys.executable),['-B',ROOT/'tools/validate-script-marker-resources.py',package])])
     if campaign.get('version',0)>=90:
         commands.append((validation_build/'Release/lcs-ps2-audio-source-tests.exe',
@@ -156,4 +161,5 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--package',type=pathlib.Path,required=True);parser.add_argument('--source',type=pathlib.Path,default=ROOT/'out/lcs-converted')
     parser.add_argument("--validation-build",type=pathlib.Path,help="Existing offline validator build; defaults to the current build")
-    args=parser.parse_args();print(json.dumps(validate(args.package.resolve(),args.source.resolve(),args.validation_build),indent=2))
+    parser.add_argument('--game',type=pathlib.Path,help='Local SA directory; not recorded in package metadata')
+    args=parser.parse_args();print(json.dumps(validate(args.package.resolve(),args.source.resolve(),args.validation_build,args.game),indent=2))

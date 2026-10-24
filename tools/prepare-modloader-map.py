@@ -252,10 +252,9 @@ def prepare(game, source, output, bridge):
     (output / 'data/script/main.scm').write_bytes(export_player_globals(code))
     navigation = mount_navigation(output, source / 'paths') if (source / 'paths/paths.img').exists() else None
     shutil.copyfile(bridge, output / 'LcsSaBridge.asi')
-    world_directory = game / 'modloader/stories_bridge/data/lcs'
     for name in ('render-ranges.tsv','island-zones.tsv'):
         shutil.copyfile(source / 'layout-review' / name, output / 'data/lcs' / name)
-    (output / 'LcsSaBridge.ini').write_text('[LCS]\nMode=WorldPreview\nOriginalMapRenderRules=1\nWorldDirectory=' + str(world_directory) + '\n', encoding='utf-16')
+    (output / 'LcsSaBridge.ini').write_text('[LCS]\nMode=WorldPreview\nPortableUserFiles=1\nUserFilesFolder=GTA Liberty City Stories User Files\nOriginalMapRenderRules=1\nResourceDirectory=.\nWorldDirectory=data/lcs\n', encoding='utf-16')
     shutil.copyfile(source / 'lighting-source.json',output / 'metadata/lighting-source.json')
     report = dict(version=15 if navigation else 14, navigation=navigation, nativeObjectCollisions=len(native_collisions['records']), mode='WorldPreview', campaignEnabled=False, gameExecuted=False,
                   originalIslandLodSelection=True,originalLodMinimumRanges=True,sourceBasedNativeDayNightLighting=True,mapBackfaceCulling=False,
@@ -266,12 +265,14 @@ def prepare(game, source, output, bridge):
                   sourceEntitiesMissingDff=71, pendingLodPairs=282,
                   modelAliases=model_aliases, textureDictionaryAliases=txd_aliases,
                   unregisteredCollisionAliases=extra_col_aliases,
-                  internalTextureNamesChanged=False, sourceMap=str(source), gameDirectory=str(game),
+                  internalTextureNamesChanged=False,
                   nativeExecutableSHA256=hashlib.sha256((game / 'gta_sa.exe').read_bytes()).hexdigest(),
                   originalArchiveHashes={name: hashlib.file_digest((game / 'models' / name).open('rb'), 'sha256').hexdigest()
                                         for name in ('gta3.img', 'gta_int.img')},
                   modelStores=dict(collections.Counter(section for section, fields in loaded)))
     (output / 'metadata/map-preview.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+    from package_metadata import make_portable
+    make_portable(output)
     (output / 'LEIA.txt').write_text(
         ('Stories Bridge v15 - mapa e paths PS2\n\n' if navigation else 'Stories Bridge v14 - teste do mapa PS2\n\n') +
         'Abra uma NOVA PARTIDA para testar o mapa. A campanha nao esta ativada neste perfil.\n'

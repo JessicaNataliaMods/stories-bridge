@@ -36,6 +36,7 @@ def main():
     p.add_argument('--weapons-only',action='store_true',help='Convert all original PS2 weapon models and textures; preserve separate weapon identities')
     p.add_argument('--peds-only',action='store_true',help='Convert/audit all streamed gameplay peds and extra gameplay characters')
     p.add_argument('--sa-game',type=pathlib.Path,help='User SA installation supplying its native pedestrian skeleton')
+    p.add_argument('--verify-source-revision', action='store_true', help='Developer proof: require the recorded original source hashes')
     default_links=pathlib.Path(__file__).with_name('..').resolve()/'local/metadata/ps2-source-links.json'
     p.add_argument('--links',type=pathlib.Path,default=default_links,
                    help='Verified source-link metadata (included in the standalone package)')
@@ -47,14 +48,14 @@ def main():
     if a.output.exists():raise ValueError('Output directory already exists; source/previous packages are never overwritten')
     a.output.mkdir(parents=True)
     rom=extract_iso(a.rom,a.output/'rom-input') if a.rom.is_file() else a.rom
-    # Link metadata belongs to one precise console world revision. Verify all
-    # original input bytes before sending RSL chunks to the native decoder.
-    revision=json.loads((root/'local/metadata/ps2-source-revision.json').read_text())
+    # Source identity is an optional developer proof, not a modding lock.
     source_hashes={}
-    for name,expected in revision['files'].items():
-        with (rom/name).open('rb') as stream:value=hashlib.file_digest(stream,'sha256').hexdigest()
-        if value!=expected:raise ValueError(f'Unsupported source revision: {name}')
-        source_hashes[name]=value
+    if a.verify_source_revision:
+        revision=json.loads((root/'local/metadata/ps2-source-revision.json').read_text())
+        for name,expected in revision['files'].items():
+            with (rom/name).open('rb') as stream:value=hashlib.file_digest(stream,'sha256').hexdigest()
+            if value!=expected:raise ValueError(f'Unsupported source revision: {name}')
+            source_hashes[name]=value
     if a.weapons_only:
         report=export_weapons(rom,a.output/'weapons',root)
         (a.output/'manifest.json').write_text(json.dumps(dict(sourceHashes=source_hashes,weapons=report,mode='WeaponsOnly',gameExecuted=False),indent=2),encoding='utf-8')

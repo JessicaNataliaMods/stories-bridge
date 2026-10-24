@@ -1,4 +1,8 @@
 [LCS]
+; 1 (default): user files beside gta_sa.exe; 0: the Windows Documents folder.
+; Both modes use this exclusive folder; never GTA San Andreas User Files.
+PortableUserFiles=1
+UserFilesFolder=GTA Liberty City Stories User Files
 ; Campaign packages need no paths: every folder is a subfolder of the .asi,
 ; and the original PS2 AUDIO folder is copied next to it (docs/audio.md).
 ; 0 keeps SA's own radio stations instead of the original LCS radio.

@@ -45,8 +45,9 @@ TIMED_BY_SA = re.compile(r'(car_|bike_|drive|kart_|seat_|train_|door_|jump_|fall
 
 
 # Same name, different meaning: in the air SA flails (FALL_fall) where the original tumbles
-# (seen in game as the ped rolling mid-air), so these stay SA data.
-KEEP_SA = {'FALL_fall', 'FALL_glide', 'JUMP_glide'}
+# (seen in game as the ped rolling mid-air), so these stay SA data. WEAPON_crouch is the C-key crouch:
+# SA's duck task times its stand/crouch steps by the SA length (0.8 s), the original's 0.5 s made it bob in a loop.
+KEEP_SA = {'FALL_fall', 'FALL_glide', 'JUMP_glide', 'WEAPON_crouch'}
 
 
 def digest(data):

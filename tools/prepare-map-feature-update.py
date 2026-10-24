@@ -8,86 +8,191 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 import shutil
 import tempfile
 
 import map_effects
 import map_damage
-from gameplay_ped_profile import validate as validate_peds
-from native_collisions import retained_definitions
-import weapon_slots
+from package_metadata import make_portable
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def reconcile_resource_records(package):
-    """Repair stale bookkeeping only after independent asset validation.
+    """Refresh package-local hashes from the current files without provenance claims.
 
-    Never repin a modified weapon or skin just because it exists. Ped files
-    must reproduce their source conversion; weapon entries may only lose
-    absent files belonging to obsolete target names, followed by full package
-    validation of the remaining weapon conversion.
+    Map feature updates do not rewrite weapon or ped assets. Their current bytes
+    are inventoried so package integrity checks describe this staged package;
+    this does not prove how those assets were produced.
     """
+    package = Path(package).resolve()
     campaign_path = package/'metadata/campaign.json'
-    campaign = json.loads(campaign_path.read_text())
-    preview = json.loads((package/'metadata/map-preview.json').read_text())
-    proof = validate_peds(package, Path(preview['gameDirectory']))
-    if not proof or proof.get('valid') is not True:
-        raise ValueError('Missing independent ped conversion proof')
-    refreshed = []
-    for row in campaign['originalResources']+campaign['preservedApprovedResources']:
-        if row['relative'].startswith('models/lcs/peds/'):
-            actual = map_effects.digest(package/row['relative'])
-            if row['sha256'].lower() != actual:
-                row['sha256'] = actual
-                refreshed.append(row['relative'])
-    weapon_path = package/'metadata/weapon-visuals.json'
-    weapons = json.loads(weapon_path.read_text())
-    expected = {'weapons/'+slot['nativeName']+suffix for slot in weapons['slots'] for suffix in ('.dff','.txd')}
-    actual = {row['relative'] for row in weapons['files']}
-    obsolete = actual-expected
-    if expected-actual or any((package/name).exists() for name in obsolete):
-        raise ValueError('Weapon inventory requires an asset change; bookkeeping repair refused')
-    source_manifest = Path(weapons['sourceManifest'])
-    if map_effects.digest(source_manifest) != weapons['sourceManifestSha256']:
-        raise ValueError('Weapon conversion source changed')
-    converted = json.loads(source_manifest.read_text())
-    by_name = {row['originalName'].lower():row for row in converted['converted']}
-    visual_choices = []
-    for slot in weapons['slots']:
-        visual = weapon_slots.VISUAL_SOURCE_OVERRIDES.get(slot['selectedOriginal'].lower())
-        if not visual:
-            continue
-        source_row = by_name[visual]
-        for suffix, key in (('.dff','dffSHA256'),('.txd','txdSHA256')):
-            if map_effects.digest(package/('weapons/'+slot['nativeName']+suffix)) != source_row[key]:
-                raise ValueError('Preserved weapon visual differs from its explicit source')
-        if slot.get('visualOriginal') != visual:
-            slot['visualOriginal'] = visual
-            visual_choices.append(slot['nativeName'])
-    game = Path(preview['gameDirectory'])
-    sa_models = {int(fields[0]):fields[1].lower() for section, fields in retained_definitions(game) if section == 'weap'}
-    regenerated = weapon_slots.convert_weapon_dat((game/'data/weapon.dat').read_text(encoding='latin1'),
-        (package/'metadata/lcs-source/DATA/WEAPON.DAT.bin').read_text(encoding='latin1'),
-        {row['originalModelId']:row['originalName'].lower() for row in converted['converted']},
-        sa_models, animations=campaign['version']>=95).encode('latin1')
-    if (package/'data/weapon.dat').read_bytes() != regenerated:
-        raise ValueError('Current weapon.dat does not reproduce its converter inputs')
-    weapon_data_sha = map_effects.digest(package/'data/weapon.dat')
-    data_pin_changed = weapons['weaponDat']['sha256'] != weapon_data_sha
-    if obsolete or data_pin_changed or visual_choices:
-        weapons['files'] = [row for row in weapons['files'] if row['relative'] in expected]
-        weapons['weaponDat']['sha256'] = weapon_data_sha
-        weapon_path.write_text(json.dumps(weapons, indent=2)+'\n')
-        sha = map_effects.digest(weapon_path)
-        campaign['weaponVisuals']['sha256'] = sha
-        for row in campaign['originalResources']:
-            if row['relative'] == 'metadata/weapon-visuals.json':row['sha256'] = sha
+    campaign = json.loads(campaign_path.read_text(encoding='utf-8'))
+
+    def package_file(relative, required=True):
+        if not isinstance(relative, str) or not relative.strip():
+            raise ValueError('Package resource path is missing')
+        normalized = relative.replace('\\', '/')
+        posix = PurePosixPath(normalized)
+        windows = PureWindowsPath(normalized)
+        if posix.is_absolute() or windows.is_absolute() or windows.drive or '..' in posix.parts or \
+                any(':' in part for part in posix.parts) or not posix.parts:
+            raise ValueError('Package resource path is not relative: '+relative)
+        normalized = posix.as_posix()
+        target = package.joinpath(*posix.parts)
+        cursor = package
+        for part in posix.parts:
+            cursor = cursor/part
+            if cursor.is_symlink() or cursor.is_junction():
+                raise ValueError('Linked package resource is not allowed: '+normalized)
+        if not target.exists():
+            if required:
+                raise ValueError('Missing package resource: '+normalized)
+            return normalized, None
+        resolved = target.resolve(strict=True)
+        if package not in resolved.parents or not resolved.is_file():
+            raise ValueError('Package resource is outside the package or not a file: '+normalized)
+        return normalized, resolved
+
+    obsolete_weapon_rows = []
+    refreshed_files = []
+    visual_pin = campaign.get('weaponVisuals')
+    if campaign.get('version', 0) >= 94 and not visual_pin:
+        raise ValueError('Missing weapon visual inventory for the declared campaign version')
+    if visual_pin:
+        if not isinstance(visual_pin, dict):
+            raise ValueError('Invalid weapon visual manifest reference')
+        manifest_rel, weapon_path = package_file(visual_pin.get('manifest'))
+        weapons = json.loads(weapon_path.read_text(encoding='utf-8'))
+        if not isinstance(weapons, dict) or not isinstance(weapons.get('slots'), list) or not weapons['slots'] or not isinstance(weapons.get('files'), list):
+            raise ValueError('Invalid weapon visual inventory')
+
+        expected = set()
+        slot_names = set()
+        for slot in weapons['slots']:
+            native_name = slot.get('nativeName') if isinstance(slot, dict) else None
+            if not isinstance(native_name, str) or not native_name or '/' in native_name or '\\' in native_name or ':' in native_name or native_name in ('.', '..'):
+                raise ValueError('Invalid declared weapon slot target')
+            if native_name.lower() in slot_names:
+                raise ValueError('Duplicate declared weapon slot target: '+native_name)
+            slot_names.add(native_name.lower())
+            expected.update(('weapons/'+native_name+suffix).lower() for suffix in ('.dff', '.txd'))
+
+        kept_files = []
+        seen_files = set()
+        declared_files = set()
+        for row in weapons['files']:
+            if not isinstance(row, dict):
+                raise ValueError('Invalid weapon file inventory row')
+            relative, target = package_file(row.get('relative'), required=False)
+            path_parts = PurePosixPath(relative).parts
+            if not path_parts or path_parts[0].lower() != 'weapons' or PurePosixPath(relative).suffix.lower() not in ('.dff', '.txd'):
+                raise ValueError('Invalid weapon asset inventory path: '+relative)
+            key = relative.lower()
+            if key in seen_files:
+                raise ValueError('Duplicate weapon file inventory row: '+relative)
+            seen_files.add(key)
+            if key in expected:
+                declared_files.add(key)
+            if target is None:
+                if key in expected:
+                    raise ValueError('Missing file for a declared weapon slot: '+relative)
+                obsolete_weapon_rows.append(relative)
+                continue
+            row['relative'] = relative
+            actual = map_effects.digest(target)
+            if row.get('sha256') != actual:
+                refreshed_files.append(relative)
+            row['sha256'] = actual
+            kept_files.append(row)
+        missing_slots = expected-declared_files
+        if missing_slots:
+            raise ValueError('Declared weapon slots lack file inventory rows: '+', '.join(sorted(missing_slots)))
+        weapons['files'] = kept_files
+
+        weapon_data = weapons.get('weaponDat')
+        if campaign.get('version', 0) >= 94 and not isinstance(weapon_data, dict):
+            raise ValueError('Missing converted weapon.dat inventory reference')
+        if weapon_data is not None:
+            if not isinstance(weapon_data, dict):
+                raise ValueError('Invalid converted weapon.dat inventory reference')
+            data_rel, data_path = package_file(weapon_data.get('relative'))
+            if campaign.get('version', 0) >= 94 and data_rel.lower() != 'data/weapon.dat':
+                raise ValueError('Converted weapon.dat must reference data/weapon.dat')
+            weapon_data['relative'] = data_rel
+            actual = map_effects.digest(data_path)
+            if weapon_data.get('sha256') != actual:
+                refreshed_files.append(data_rel)
+            weapon_data['sha256'] = actual
+
+        weapon_path.write_text(json.dumps(weapons, indent=2)+'\n', encoding='utf-8')
+        visual_pin['manifest'] = manifest_rel
+        visual_pin['sha256'] = map_effects.digest(weapon_path)
+        visual_pin['slots'] = len(weapons['slots'])
+
+    # Drop only missing weapon records explicitly declared obsolete by the
+    # weapon manifest. Every other campaign resource must still be present.
+    obsolete_keys = {name.lower() for name in obsolete_weapon_rows}
+    refreshed_resources = []
+    for section in ('originalResources', 'preservedApprovedResources'):
+        rows = campaign.get(section)
+        if not isinstance(rows, list):
+            raise ValueError('Missing campaign resource inventory: '+section)
+        kept_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError('Invalid campaign resource inventory row: '+section)
+            relative, target = package_file(row.get('relative'), required=False)
+            if target is None:
+                if relative.lower() in obsolete_keys:
+                    continue
+                raise ValueError('Missing declared campaign resource: '+relative)
+            row['relative'] = relative
+            actual = map_effects.digest(target)
+            if not isinstance(row.get('sha256'), str) or row['sha256'].lower() != actual:
+                refreshed_resources.append(relative)
+            row['sha256'] = actual
+            kept_rows.append(row)
+        campaign[section] = kept_rows
+
+    for key in ('mapDamage', 'mapEffects'):
+        if not isinstance(campaign.get(key), dict) or not isinstance(campaign[key].get('manifest'), str):
+            raise ValueError('Missing required map feature manifest reference: '+key)
+
+    def refresh_manifest_pins(value):
+        if isinstance(value, dict):
+            relative = value.get('manifest')
+            if 'manifest' in value and 'sha256' in value:
+                if not isinstance(relative, str):
+                    raise ValueError('Invalid package manifest reference')
+                normalized, target = package_file(relative)
+                actual = map_effects.digest(target)
+                if value.get('sha256') != actual:
+                    refreshed_resources.append(normalized)
+                value['manifest'] = normalized
+                value['sha256'] = actual
+            for item in value.values():
+                refresh_manifest_pins(item)
+        elif isinstance(value, list):
+            for item in value:
+                refresh_manifest_pins(item)
+
+    refresh_manifest_pins(campaign)
     previous = campaign.get('preservedAssetBookkeeping', {})
-    campaign['preservedAssetBookkeeping'] = dict(sourceValidatedPedPins=sorted(set(refreshed+previous.get('sourceValidatedPedPins', []))),
-        absentObsoleteWeaponEntries=sorted(obsolete | set(previous.get('absentObsoleteWeaponEntries', []))),
-        explicitWeaponVisuals=sorted(set(visual_choices+previous.get('explicitWeaponVisuals', []))), sourceValidatedWeaponData=True,
-        assetBytesChanged=False)
+    if not isinstance(previous, dict):
+        raise ValueError('Invalid prior preserved asset bookkeeping')
+    old_absent = previous.get('absentObsoleteWeaponEntries', [])
+    old_visuals = previous.get('explicitWeaponVisuals', [])
+    if not isinstance(old_absent, list) or not all(isinstance(item, str) for item in old_absent) or \
+            not isinstance(old_visuals, list) or not all(isinstance(item, str) for item in old_visuals):
+        raise ValueError('Invalid prior preserved asset bookkeeping lists')
+    campaign['preservedAssetBookkeeping'] = dict(
+        currentFileHashesRefreshed=sorted(set(refreshed_resources+refreshed_files)),
+        absentObsoleteWeaponEntries=sorted(set(obsolete_weapon_rows) | set(old_absent)),
+        explicitWeaponVisuals=sorted(set(old_visuals)),
+        sourceProvenanceValidated=False,
+        customWeaponAndPedAssetsWritten=False)
     campaign_path.write_text(json.dumps(campaign, indent=2)+'\n')
     return campaign['preservedAssetBookkeeping']
 
@@ -178,9 +283,11 @@ def prepare(base, output, original, rom, names, asi, version, asset_cache=None, 
     (output/'metadata/campaign.json').write_text(json.dumps(campaign, indent=2)+'\n')
     preview['version'] = str(version)
     (output/'metadata/map-preview.json').write_text(json.dumps(preview, indent=2)+'\n')
-    reconcile_resource_records(output)
+    make_portable(output)
+    bookkeeping = reconcile_resource_records(output)
     return dict(stage=str(output), version=version, sharedAssets=preserved,
-                physics=physics, effects=effects, damage=damage, gameExecuted=False)
+                physics=physics, effects=effects, damage=damage, gameExecuted=False,
+                preservedAssetBookkeeping=bookkeeping)
 
 
 if __name__ == '__main__':

@@ -7,7 +7,16 @@ import argparse
 import collections
 import hashlib
 import json
+import shutil
+import sys
 from pathlib import Path
+TOOLS_DIR = str(Path(__file__).resolve().parent)
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+from package_metadata import make_portable
+
+
+SOURCE_MANIFEST = 'metadata/source-manifests/weapon-conversion/manifest.json'
 
 
 def digest(path):
@@ -23,6 +32,12 @@ def mount(converted, package, game):
     campaign = json.loads(campaign_path.read_text(encoding='utf-8'))
     if campaign['version'] <= 69 or campaign.get('weaponVisuals'):
         raise ValueError('Use a new unmounted stage after v69')
+    snapshot_path = package / SOURCE_MANIFEST
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    if snapshot_path.exists():
+        raise ValueError('Stage already contains a weapon conversion source snapshot')
+    shutil.copyfile(manifest_path, snapshot_path)
+    source_manifest_sha = digest(snapshot_path)
     by_id = {r['originalModelId']: r for r in manifest['converted']}
     groups = collections.defaultdict(list)
     for line in (package / 'data/lcs/native-equivalents.tsv').read_text().splitlines():
@@ -63,14 +78,12 @@ def mount(converted, package, game):
         slots.append(dict(nativeModel=model, nativeName=target,
                           selectedOriginal=row['originalName'], originalModel=row['originalModelId'],
                           aliases=[r['originalName'] for r in sources if r is not row]))
-        for extension, key in (('.dff', 'dffSHA256'), ('.txd', 'txdSHA256')):
+        for extension in ('.dff', '.txd'):
             source = converted / 'rw-assets' / (row['asset'] + extension)
-            expected = row[key]
-            if digest(source) != expected:
-                raise ValueError('Converted weapon changed: ' + str(source))
+            actual_sha = digest(source)
             relative = 'weapons/' + target + extension
-            pending.append((source, relative, expected))
-            files.append(dict(relative=relative, sha256=expected, source=str(source)))
+            pending.append((source, relative, actual_sha))
+            files.append(dict(relative=relative, sha256=actual_sha))
     # Refuse another mod's override rather than quietly relying on load order.
     names = {Path(relative).name.casefold() for _, relative, _ in pending}
     destination = (game / 'modloader/stories_bridge').resolve()
@@ -85,7 +98,7 @@ def mount(converted, package, game):
         target = package / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
-    report = dict(format=1, sourceManifest=str(manifest_path), sourceManifestSha256=digest(manifest_path),
+    report = dict(format=1, sourceManifest=SOURCE_MANIFEST, sourceManifestSha256=source_manifest_sha,
                   slots=slots, files=files, installed=False, gameExecuted=False,
                   behaviorChanged=False, audioChanged=False, animationsChanged=False,
                   handAlignmentRuntimeVerified=False)
@@ -93,12 +106,22 @@ def mount(converted, package, game):
     metadata = package / relative
     metadata.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     campaign['weaponVisuals'] = dict(manifest=relative, sha256=digest(metadata), slots=len(slots))
-    campaign['originalResources'] += files + [dict(relative=relative, source=str(metadata), sha256=digest(metadata))]
+    campaign['originalResources'] += files + [dict(relative=relative, sha256=digest(metadata))]
     campaign['nativeStartupValidated'] = False
     campaign.pop('startupValidationSha256', None)
     campaign_path.write_text(json.dumps(campaign, indent=2) + '\n', encoding='utf-8')
+    make_portable(package)
+    report = json.loads(metadata.read_text(encoding='utf-8'))
+    report['sourceManifestSha256'] = digest(package / report['sourceManifest'])
+    metadata.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    campaign = json.loads(campaign_path.read_text(encoding='utf-8'))
+    campaign['weaponVisuals']['sha256'] = digest(metadata)
+    for row in campaign['originalResources']:
+        if row.get('relative') == relative:
+            row['sha256'] = campaign['weaponVisuals']['sha256']
+    campaign_path.write_text(json.dumps(campaign, indent=2) + '\n', encoding='utf-8')
     return dict(slots=len(slots), files=len(files), deferredAliases=sum(len(r['aliases']) for r in slots),
-                package=str(package), installed=False, gameExecuted=False)
+                package=package.name, installed=False, gameExecuted=False)
 
 
 if __name__ == '__main__':

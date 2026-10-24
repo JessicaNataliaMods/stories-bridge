@@ -8,6 +8,13 @@ parser.add_argument('--python',type=pathlib.Path,required=True)
 parser.add_argument('--crt',type=pathlib.Path,required=True)
 parser.add_argument('--links',type=pathlib.Path,default=root/'reports/ps2-verified-links-v13.json')
 args=parser.parse_args();out=args.output.resolve()
+# This legacy bundle depends on extracted reference tables. Removing personal
+# paths does not make those tables distributable. Fail before reading private
+# inputs or creating a partially public output; local campaign tools remain usable.
+parser.error('Public converter packaging is disabled: this legacy bundle copies private '
+             'source-revision, texture fingerprints, source associations and hashes.inc. '
+             'Generate required metadata from each user\'s own inputs before enabling '
+             'distribution. Do not publish local metadata or campaign stages.')
 links=json.loads(args.links.read_text())
 if links.get('geometryVerified') is False:raise ValueError('Proposed source associations cannot be included in the public tool')
 if out.exists():raise ValueError('Bundle output already exists')

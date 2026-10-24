@@ -1,17 +1,21 @@
-"""Independently compare the install preview against original converted files."""
+"""Validate Modloader map package structure; original conversion proof is optional."""
 import argparse
 import hashlib
 import json
+import os
+import math
 import pathlib
 import re
+import stat as stat_module
 import struct
 import importlib.util
 import subprocess
 import tempfile
 from traffic_profile import audit as path_audit
-from native_collisions import retained_definitions, validate as validate_native_collisions
+from native_collisions import retained_definitions, validate as validate_native_collisions, records as parse_collision_records
 from gameplay_ped_profile import validate as validate_gameplay_peds
 from bootstrap_player_exports import export_player_globals
+from package_metadata import make_portable
 import weapon_slots
 import weapon_animations
 from map_effects import expected_effects, inject_dff
@@ -130,7 +134,7 @@ def collision_records(path):
         offset += size
 
 
-def validate_campaign(package, map_report):
+def validate_campaign(package, map_report, weapon_source=None):
     if map_report['mode'] != 'Campaign':
         return dict(enabled=False)
     campaign=json.loads((package/'metadata/campaign.json').read_text())
@@ -464,8 +468,7 @@ def validate_campaign(package, map_report):
         metadata=package/fleet['manifest']
         if digest(metadata)!=fleet['sha256']:raise ValueError('Vehicle fleet manifest changed')
         mounted=json.loads(metadata.read_text(encoding='utf-8'))
-        source=pathlib.Path(mounted['sourceManifest'])
-        if digest(source)!=mounted['sourceManifestSha256']:raise ValueError('Vehicle fleet provenance changed')
+        source=_member(package, mounted['sourceManifest'])
         original_fleet=json.loads(source.read_text(encoding='utf-8'))
         original_rows={row['LcsId']:row for row in original_fleet['Vehicles'] if row['Prepared']}
         expected_files={row['RelativePath'].replace('\\','/'):row['Sha256'].lower() for row in original_fleet['OutputFiles']}
@@ -548,9 +551,7 @@ def validate_campaign(package, map_report):
         if weapons['gameExecuted'] or weapons['installed'] or weapons['behaviorChanged']!=slotted or weapons['animationsChanged']!=animated or any(weapons[key] for key in
             ('audioChanged','handAlignmentRuntimeVerified')):
             raise ValueError('Invalid weapon visual scope or runtime claims')
-        source=pathlib.Path(weapons['sourceManifest'])
-        if digest(source)!=weapons['sourceManifestSha256']:
-            raise ValueError('Weapon conversion provenance changed')
+        source=_member(package, weapons['sourceManifest'])
         converted=json.loads(source.read_text(encoding='utf-8'))
         by_id={row['originalModelId']:row for row in converted['converted']}
         bindings=(package/'data/lcs/native-equivalents.tsv').read_text().splitlines()
@@ -558,7 +559,13 @@ def validate_campaign(package, map_report):
             raise ValueError('Incomplete weapon conversion')
         expected={}
         by_name={row['originalName'].lower():row for row in converted['converted']}
-        rw=source.parent/'rw-assets'
+        if weapon_source is None:
+            rw = source.parent / 'rw-assets'
+        else:
+            supplied = pathlib.Path(weapon_source).resolve()
+            rw = supplied.parent / 'rw-assets' if supplied.is_file() else supplied / 'rw-assets'
+        if not rw.is_dir():
+            raise ValueError('Conversion proof needs a converted weapons directory with sibling rw-assets; provide --weapon-source')
         for slot in weapons['slots']:
             row=by_id[slot['originalModel']]
             binding='\t'.join(map(str,(slot['originalModel'],slot['nativeModel'],
@@ -691,7 +698,8 @@ def validate_campaign(package, map_report):
         if len(rows)!=1 or re.sub(ide_mask,'<vehicle>',native_ide,flags=re.M)!=re.sub(ide_mask,'<vehicle>',mounted_ide,flags=re.M):
             raise ValueError('Unrelated native vehicle definitions changed')
         # A fleet converting the ferry owns its definition (its source vehicles.ide).
-        approved_ide=(pathlib.Path(fleet_record['sourceManifest']).parent/'vehicles.ide') if fleet_owned else prepared/'overlay/data/vehicles.ide'
+        fleet_source=_member(package, fleet_record['sourceManifest']) if fleet_owned else None
+        approved_ide=(fleet_source.parent/'vehicles.ide') if fleet_owned else prepared/'overlay/data/vehicles.ide'
         if rows!=re.findall(pattern,approved_ide.read_text(),re.M):
             raise ValueError('Fleet overwrote the approved ferry definition')
         fields=[v.strip()for v in rows[0].split(',')]
@@ -705,7 +713,7 @@ def validate_campaign(package, map_report):
         if len(re.findall(pattern,mounted_handling,re.M))!=2 or \
            re.sub(handling_mask,'<vehicle>',native_handling,flags=re.M)!=re.sub(handling_mask,'<vehicle>',mounted_handling,flags=re.M):
             raise ValueError('Unrelated native handling changed')
-        approved_handling=(pathlib.Path(fleet_record['sourceManifest']).parent/'handling.cfg') if fleet_owned else prepared/'overlay/data/handling.cfg'
+        approved_handling=(fleet_source.parent/'handling.cfg') if fleet_owned else prepared/'overlay/data/handling.cfg'
         if [line.split() for line in re.findall(pattern,mounted_handling,re.M)]!=[line.split() for line in re.findall(pattern,approved_handling.read_text(),re.M)]:
             raise ValueError('Fleet overwrote the approved ferry handling')
         if 'sa_boat_hierarchy_validated=true' not in (prepared/'logs/boat-validation.log').read_text():
@@ -728,8 +736,12 @@ def validate_campaign(package, map_report):
                 originalResourcesVerified=len(campaign['originalResources']),nativeStartupValidated=campaign.get('nativeStartupValidated',False),
                 gameExecuted=False,completeCampaignVerified=False)
 
-def validate(package, source):
+def validate_conversion(package, source, game=None, weapon_source=None):
     report = json.loads((package / 'metadata/map-preview.json').read_text())
+    if game is not None:
+        report['gameDirectory'] = str(pathlib.Path(game).resolve())
+    elif not report.get('gameDirectory'):
+        raise ValueError('Offline conversion proof requires an explicit --game directory')
     effects = expected_effects(package)
     damage_by_asset, breakable_by_asset, damage_inputs = expected_damage(package)
     game = pathlib.Path(report['gameDirectory'])
@@ -888,14 +900,14 @@ def validate(package, source):
         for start, opcode in ((651, 0x01eb), (658, 0x03de)):
             if code[start:start+3] != struct.pack('<HB', opcode, 6) or struct.unpack_from('<f', code, start+3)[0] != 1.0:
                 raise ValueError('Native population density is not enabled in bootstrap')
-    result = dict(valid=True, nativeAssetBytesPreserved=len(checked), collisionGeometryAndSurfaceBytesPreserved=len(after),
+    result = dict(valid=True, validationScope='conversion-proof', nativeAssetBytesPreserved=len(checked), collisionGeometryAndSurfaceBytesPreserved=len(after),
                   modelBindings=len(bindings), placementTransformsAndLodLinksPreserved=placements,
                   radarTilesPreserved=len(radar), waterPreserved=True, originalRenderRulesPreserved=True, gameExecuted=False,
                   completeGame=False, nativeNavigation=navigation, nativeObjectCollisions=native_objects)
     result['nativeDamageAtomicModels'] = len(damage_by_asset)
     result['nativeBreakableModels'] = len(breakable_by_asset)
     result['gameplayPeds'] = validate_gameplay_peds(package, game)
-    result['campaign'] = validate_campaign(package, report)
+    result['campaign'] = validate_campaign(package, report, weapon_source)
     (package / 'metadata/package-validation.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
     files = []
     for file in sorted(package.rglob('*')):
@@ -907,9 +919,547 @@ def validate(package, source):
     return result
 
 
+def _inside(root, path):
+    root = pathlib.Path(root).resolve()
+    resolved = pathlib.Path(path).resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise ValueError('Package path resolves outside the package: ' + str(path)) from error
+    return resolved
+
+
+def _member(root, relative, *, must_exist=True):
+    if not isinstance(relative, str) or not relative:
+        raise ValueError('Package resource path must be a nonempty relative string')
+    normalized = relative.replace('\\', '/')
+    parsed = pathlib.PurePosixPath(normalized)
+    if parsed.is_absolute() or re.match(r'^[A-Za-z]:', normalized) or any(part in ('', '.', '..') for part in parsed.parts):
+        raise ValueError('Unsafe package resource path: ' + relative)
+    path = pathlib.Path(root).joinpath(*parsed.parts)
+    if must_exist:
+        _inside(root, path)
+    else:
+        parent = path.parent.resolve()
+        try:
+            parent.relative_to(pathlib.Path(root).resolve())
+        except ValueError as error:
+            raise ValueError('Package path parent resolves outside the package: ' + str(path)) from error
+    return path
+
+
+def _audit_package_tree(package):
+    requested_root = pathlib.Path(package)
+    root_info = requested_root.lstat()
+    reparse_attribute = getattr(stat_module, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)
+    if stat_module.S_ISLNK(root_info.st_mode) or getattr(root_info, 'st_file_attributes', 0) & reparse_attribute:
+        raise ValueError('Package root cannot be a symlink or reparse point')
+    root = requested_root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError('Package root is not a directory')
+    files = []
+    for directory, subdirectories, filenames in os.walk(root, followlinks=False):
+        current = pathlib.Path(directory)
+        _inside(root, current)
+        for name in list(subdirectories):
+            path = current / name
+            info = path.lstat()
+            if stat_module.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & reparse_attribute:
+                raise ValueError('Package contains a symlink or reparse point: ' + str(path))
+            _inside(root, path)
+        for name in filenames:
+            path = current / name
+            info = path.lstat()
+            if stat_module.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & reparse_attribute:
+                raise ValueError('Package contains a symlink or reparse point: ' + str(path))
+            _inside(root, path)
+            if path.is_file():
+                files.append(path)
+    return root, files
+
+
+def _safe_asset_name(name, context):
+    if not isinstance(name, str) or not name or name in ('.', '..') or \
+       not name.isascii() or any(character in name for character in '/\\:\0') or \
+       any(character.isspace() for character in name):
+        raise ValueError('Unsafe ' + context + ' name: ' + repr(name))
+    return name
+
+
+def _img_names(path):
+    length = path.stat().st_size
+    with path.open('rb') as stream:
+        header = stream.read(8)
+        if len(header) != 8 or header[:4] != b'VER2':
+            raise ValueError('IMG archive must use the native v2 structure: ' + str(path.name))
+        count, = struct.unpack_from('<I', header, 4)
+        if not 0 < count < 100000 or 8 + count * 32 > length:
+            raise ValueError('Invalid IMG directory count: ' + str(path.name))
+        minimum = ((8 + count * 32 + 2047) // 2048) * 2048
+        entries = {}
+        intervals = []
+        for _ in range(count):
+            raw = stream.read(32)
+            if len(raw) != 32:
+                raise ValueError('Truncated IMG directory: ' + str(path.name))
+            sector, size, compressed, raw_name = struct.unpack('<IHH24s', raw)
+            if b'\0' not in raw_name:
+                raise ValueError('Unterminated IMG filename: ' + str(path.name))
+            try:
+                name = raw_name.split(b'\0', 1)[0].decode('ascii')
+            except UnicodeDecodeError as error:
+                raise ValueError('Non-ASCII IMG filename: ' + str(path.name)) from error
+            _safe_asset_name(name, 'IMG')
+            key = name.casefold()
+            if key in entries:
+                raise ValueError('Duplicate IMG filename: ' + name)
+            payload_sectors = compressed or size
+            start = sector * 2048
+            stop = start + payload_sectors * 2048
+            if not payload_sectors or start < minimum or stop > length:
+                raise ValueError('IMG payload is outside archive bounds: ' + name)
+            entries[key] = name
+            intervals.append((start, stop))
+        intervals.sort()
+        if any(left[1] > right[0] for left, right in zip(intervals, intervals[1:])):
+            raise ValueError('IMG payload regions overlap: ' + str(path.name))
+    return entries
+
+
+def _map_ide(path):
+    definitions = {}
+    section = ''
+    for line_number, raw in enumerate(path.read_text(encoding='ascii').splitlines(), 1):
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if line.lower() == 'end':
+            section = ''
+            continue
+        if ',' not in line:
+            section = line.lower()
+            continue
+        if section not in ('objs', 'tobj'):
+            continue
+        fields = [field.strip() for field in line.split(',')]
+        if len(fields) < 3:
+            raise ValueError(f'Malformed {section} definition at {path.name}:{line_number}')
+        try:
+            model_id = int(fields[0])
+        except ValueError as error:
+            raise ValueError(f'Invalid model ID at {path.name}:{line_number}') from error
+        if not 10000 <= model_id < 20000 or model_id in definitions:
+            raise ValueError(f'Duplicate/out-of-range model ID at {path.name}:{line_number}')
+        model = _safe_asset_name(fields[1], 'model')
+        texture = _safe_asset_name(fields[2], 'texture dictionary')
+        definitions[model_id] = dict(model=model, texture=texture, section=section)
+    if not definitions:
+        raise ValueError('World IDE has no object definitions')
+    return definitions
+
+
+def _binding_rows(path, model_ids, model_names):
+    rows = []
+    seen_ids = set()
+    seen_names = {}
+    for line_number, line in enumerate(path.read_text(encoding='ascii').splitlines(), 1):
+        if not line:
+            continue
+        fields = line.split('\t')
+        if len(fields) != 4:
+            raise ValueError(f'Malformed model binding at {path.name}:{line_number}')
+        try:
+            int(fields[0])
+            native_id = int(fields[1])
+        except ValueError as error:
+            raise ValueError(f'Invalid model binding ID at {path.name}:{line_number}') from error
+        _safe_asset_name(fields[2], 'source model')
+        runtime_name = _safe_asset_name(fields[3], 'runtime model')
+        if not 10000 <= native_id < 20000 or native_id not in model_ids or runtime_name.casefold() not in model_names:
+            raise ValueError(f'Model binding points to an undefined IDE model at {path.name}:{line_number}')
+        if native_id in seen_ids:
+            raise ValueError(f'Duplicate model binding ID at {path.name}:{line_number}')
+        prior = seen_names.setdefault(runtime_name.casefold(), native_id)
+        if prior != native_id:
+            raise ValueError(f'Ambiguous runtime model binding at {path.name}:{line_number}')
+        seen_ids.add(native_id)
+        rows.append(fields)
+    if not rows:
+        raise ValueError('Model binding table is empty')
+    return rows
+
+
+def _validate_placements(files, definitions):
+    count = 0
+    model_names = {row['model'].casefold() for row in definitions.values()}
+    model_ids = set(definitions)
+    for path in files:
+        section = ''
+        for line_number, raw in enumerate(path.read_text(encoding='ascii').splitlines(), 1):
+            line = raw.split('#', 1)[0].strip()
+            if not line:
+                continue
+            if ',' not in line:
+                section = line.lower()
+                continue
+            if section != 'inst':
+                continue
+            fields = [field.strip() for field in line.split(',')]
+            if len(fields) < 11:
+                raise ValueError(f'Malformed IPL instance at {path.name}:{line_number}')
+            try:
+                model_id = int(fields[0])
+                coordinates = [float(value) for value in fields[3:6]]
+                rotation = [float(value) for value in fields[6:10]]
+                int(fields[10])
+            except ValueError as error:
+                raise ValueError(f'Invalid IPL numeric field at {path.name}:{line_number}') from error
+            if model_id not in model_ids or fields[1].casefold() not in model_names or \
+                any(not math.isfinite(value) for value in coordinates + rotation):
+                raise ValueError(f'IPL instance references an undefined model or nonfinite transform at {path.name}:{line_number}')
+            count += 1
+    if count == 0:
+        raise ValueError('No world IPL placements were found')
+    return count
+
+
+def _validate_render_tables(package, model_ids):
+    ranges = _member(package, 'data/lcs/render-ranges.tsv').read_text(encoding='ascii').splitlines()
+    seen = set()
+    for line_number, line in enumerate(ranges, 1):
+        if not line:
+            continue
+        fields = line.split('\t')
+        if len(fields) != 6:
+            raise ValueError(f'Malformed render range at line {line_number}')
+        try:
+            ident, lod, minimum, related, levels, physical = int(fields[0]), int(fields[1]), float(fields[2]), int(fields[3]), int(fields[4]), int(fields[5])
+        except ValueError as error:
+            raise ValueError(f'Invalid render range at line {line_number}') from error
+        if ident not in model_ids or ident in seen or lod not in (0, 1) or not math.isfinite(minimum) or \
+           not 0 <= minimum <= 10000 or not 1 <= levels <= 31 or physical not in (0, 1) or \
+           (physical and lod) or (related != -1 and not 0 <= related < 20000):
+            raise ValueError(f'Invalid or unbound render range at line {line_number}')
+        seen.add(ident)
+    if not model_ids.issubset(seen):
+        raise ValueError('Render range table does not cover every world IDE model')
+    zones = _member(package, 'data/lcs/island-zones.tsv').read_text(encoding='ascii').splitlines()
+    zone_count = 0
+    for line_number, line in enumerate(zones, 1):
+        if not line:
+            continue
+        fields = line.split('\t')
+        if len(fields) != 7:
+            raise ValueError(f'Malformed island zone at line {line_number}')
+        try:
+            level = int(fields[0])
+            bounds = [float(value) for value in fields[1:]]
+        except ValueError as error:
+            raise ValueError(f'Invalid island zone at line {line_number}') from error
+        if not 0 <= level <= 4 or any(not math.isfinite(value) for value in bounds) or \
+           any(bounds[index] > bounds[index + 3] for index in range(3)):
+            raise ValueError(f'Invalid island zone bounds at line {line_number}')
+        zone_count += 1
+    if not zone_count:
+        raise ValueError('Island-zone table is empty')
+    return len(seen), zone_count
+
+
+def _validate_profile(package):
+    profile = _member(package, 'data/gta.dat').read_text(encoding='ascii')
+    package_prefixes = ('data/lcs/', 'models/lcs/', 'models/radar/')
+    references = []
+    for line_number, raw in enumerate(profile.splitlines(), 1):
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        fields = line.split()
+        directive = fields[0].upper()
+        if directive in ('IMG', 'IDE', 'IPL') and len(fields) == 2:
+            reference = fields[1]
+        elif directive == 'COLFILE' and len(fields) == 3:
+            reference = fields[2]
+        else:
+            continue
+        normalized = reference.replace('\\', '/')
+        while normalized.startswith('./'):
+            normalized = normalized[2:]
+        normalized = normalized.casefold()
+        parsed = pathlib.PurePosixPath(normalized)
+        if parsed.is_absolute() or re.match(r'^[a-z]:', normalized) or '..' in parsed.parts:
+            raise ValueError(f'Unsafe gta.dat resource path at line {line_number}')
+        if normalized.startswith(package_prefixes):
+            _member(package, normalized)
+            references.append(normalized)
+    required = {
+        'models/lcs/world.img', 'models/lcs/paths.img', 'data/lcs/world.ide',
+        'models/lcs/world.col', 'models/lcs/native-objects.col',
+    }
+    observed = set(references)
+    if not required.issubset(observed):
+        raise ValueError('gta.dat is missing required package resource registrations')
+    if not any(reference.startswith('data/lcs/world') and reference.endswith('.ipl') for reference in observed):
+        raise ValueError('gta.dat does not register any packaged world IPL')
+    return references
+
+
+def _native_collision_load_order(package):
+    profile = _member(package, 'data/gta.dat').read_text(encoding='ascii')
+    lines = [line.split('#', 1)[0].strip().replace('\\', '/').casefold()
+             for line in profile.splitlines()]
+    directive = 'colfile 0 models/lcs/native-objects.col'
+    if lines.count(directive) != 1:
+        raise ValueError('Native collision resource must be registered exactly once')
+    if not any(line.startswith('ipl ') for line in lines) or lines.index(directive) > next(
+            i for i, line in enumerate(lines) if line.startswith('ipl ')):
+        raise ValueError('Native collision resource must load before map placements')
+
+
+def _validate_doors(path):
+    count = 0
+    for line_number, line in enumerate(path.read_text(encoding='ascii').splitlines(), 1):
+        if not line:
+            continue
+        fields = line.split('\t')
+        if len(fields) != 10:
+            raise ValueError(f'Malformed door binding at line {line_number}')
+        try:
+            int(fields[0]); int(fields[1]); _safe_asset_name(fields[2], 'door source model')
+            _safe_asset_name(fields[3], 'door runtime model'); _safe_asset_name(fields[4], 'door IPL')
+            int(fields[5])
+            coordinates = [float(value) for value in fields[6:9]]
+        except ValueError as error:
+            raise ValueError(f'Invalid door binding at line {line_number}') from error
+        if fields[9] not in ('object', 'dummy') or any(not math.isfinite(value) for value in coordinates):
+            raise ValueError(f'Invalid door binding kind at line {line_number}')
+        count += 1
+    return count
+
+
+def _check_portable_source_manifests(package):
+    checked = 0
+    for path in package.joinpath('metadata').rglob('*.json'):
+        _inside(package, path)
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError('Invalid JSON metadata: ' + path.name)
+        stack = [data]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    if key == 'sourceManifest' and value is not None:
+                        manifest = _member(package, value)
+                        if not manifest.is_file():
+                            raise ValueError('Portable source manifest is missing: ' + str(value))
+                        checked += 1
+                    elif isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(current, list):
+                stack.extend(current)
+    return checked
+
+
+def _validate_gameplay_peds_structure(package):
+    profile_path = package / 'metadata/gameplay-peds.json'
+    if not profile_path.exists():
+        return dict(valid=True, included=False, resources=0)
+    profile = json.loads(profile_path.read_text(encoding='utf-8'))
+    if not isinstance(profile, dict) or not isinstance(profile.get('bindings'), list):
+        raise ValueError('Gameplay-ped metadata has no binding list')
+    rows = profile['bindings']
+    if not rows:
+        raise ValueError('Gameplay-ped binding list is empty')
+    index_path = _member(package, 'data/lcs/peds/index.tsv')
+    model_path = _member(package, 'data/lcs/peds/model-bindings.tsv')
+    canonical_path = _member(package, 'data/lcs/peds/canonical-model-bindings.tsv')
+    index_rows = [line.split('\t') for line in index_path.read_text(encoding='ascii').splitlines() if line]
+    binding_rows = [line.split('\t') for line in model_path.read_text(encoding='ascii').splitlines() if line]
+    canonical_rows = [line.split('\t') for line in canonical_path.read_text(encoding='ascii').splitlines() if line]
+    if not index_rows or any(len(row) != 3 for row in index_rows) or \
+       not binding_rows or any(len(row) != 5 for row in binding_rows) or \
+       not canonical_rows or any(len(row) != 5 for row in canonical_rows):
+        raise ValueError('Malformed gameplay-ped binding resources')
+    asset_directory = _member(package, 'models/lcs/peds')
+    assets = {path.name.casefold() for path in asset_directory.iterdir() if path.is_file()}
+    checked = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('Malformed gameplay-ped metadata row')
+        model = _safe_asset_name(row.get('nativeName'), 'ped model')
+        dictionary = _safe_asset_name(row.get('nativeDictionary'), 'ped texture dictionary')
+        for name in (model + '.dff', dictionary + '.txd'):
+            path = _member(package, 'models/lcs/peds/' + name)
+            if not path.stat().st_size or name.casefold() not in assets:
+                raise ValueError('Gameplay-ped media is missing or empty: ' + name)
+            checked.add(name.casefold())
+    if not checked.issubset(assets):
+        raise ValueError('Gameplay-ped media inventory is inconsistent')
+    return dict(valid=True, included=True, resources=len(checked), bindings=len(rows))
+
+
+def _campaign_record(package, map_report):
+    campaign_path = package / 'metadata/campaign.json'
+    if map_report.get('mode') != 'Campaign' and not campaign_path.exists():
+        if map_report.get('mode') == 'FirstMission':
+            raise ValueError('First-mission package is missing campaign metadata')
+        return dict(enabled=False, valid=True, nativeStartupValidated=False,
+                    startupValidationScope='recorded-offline-proof; identity not enforced',
+                    gameExecuted=False, completeCampaignVerified=False)
+    if not campaign_path.is_file():
+        raise ValueError('Campaign package is missing campaign metadata')
+    campaign = json.loads(campaign_path.read_text(encoding='utf-8'))
+    if not isinstance(campaign, dict):
+        raise ValueError('Campaign metadata must be a JSON object')
+    recorded_startup = campaign.get('nativeStartupValidated', False)
+    if not isinstance(recorded_startup, bool):
+        raise ValueError('Campaign startup record must be boolean')
+    for key in ('gameExecuted', 'completeCampaignVerified'):
+        if key in campaign and not isinstance(campaign[key], bool):
+            raise ValueError('Campaign metadata field must be boolean: ' + key)
+    return dict(
+        enabled=bool(map_report.get('mode') in ('Campaign', 'FirstMission') or campaign.get('enabled', map_report.get('campaignEnabled', False))),
+        valid=True,
+        nativeStartupValidated=recorded_startup,
+        startupValidationScope='recorded-offline-proof; identity not enforced',
+        gameExecuted=campaign.get('gameExecuted', False),
+        completeCampaignVerified=campaign.get('completeCampaignVerified', False),
+    )
+
+
+def validate(package, source=None, game=None):
+    """Validate package layout and references without requiring source identity."""
+    package = pathlib.Path(package)
+    _audit_package_tree(package)
+    make_portable(package)
+    root, files = _audit_package_tree(package)
+    required = (
+        'LcsSaBridge.asi', 'LcsSaBridge.ini', 'LEIA.txt',
+        'data/gta.dat', 'data/script/main.scm', 'data/water.dat',
+        'data/lcs/world.ide', 'data/lcs/model-bindings.tsv', 'data/lcs/door-bindings.tsv',
+        'data/lcs/render-ranges.tsv', 'data/lcs/island-zones.tsv',
+        'models/lcs/world.img', 'models/lcs/world.col', 'models/lcs/paths.img',
+        'models/lcs/native-objects.col', 'metadata/map-preview.json', 'metadata/native-collisions.json',
+    )
+    for relative in required:
+        _member(root, relative)
+    map_report = json.loads(_member(root, 'metadata/map-preview.json').read_text(encoding='utf-8'))
+    if not isinstance(map_report, dict) or map_report.get('mode') not in ('WorldPreview', 'Campaign', 'FirstMission'):
+        raise ValueError('Map metadata has no supported package mode')
+    for key in ('modelAliases', 'textureDictionaryAliases'):
+        aliases = map_report.get(key)
+        if not isinstance(aliases, dict):
+            raise ValueError('Map metadata is missing a valid ' + key + ' table')
+        for original, runtime in aliases.items():
+            _safe_asset_name(original, 'source alias')
+            _safe_asset_name(runtime, 'runtime alias')
+
+    img_names = _img_names(_member(root, 'models/lcs/world.img'))
+    path_archive = path_audit.validate(_member(root, 'models/lcs/paths.img'))
+    world_collisions = list(parse_collision_records(_member(root, 'models/lcs/world.col').read_bytes()))
+    native_collisions = list(parse_collision_records(_member(root, 'models/lcs/native-objects.col').read_bytes()))
+    if not world_collisions or not native_collisions:
+        raise ValueError('Map and native collision resources must contain valid records')
+    if len({name for name, _ in world_collisions}) != len(world_collisions) or \
+       len({name for name, _ in native_collisions}) != len(native_collisions):
+        raise ValueError('Collision resources contain duplicate model names')
+
+    ide_path = _member(root, 'data/lcs/world.ide')
+    definitions = _map_ide(ide_path)
+    names = {row['model'].casefold() for row in definitions.values()}
+    for row in definitions.values():
+        if row['model'].casefold() + '.dff' not in img_names:
+            raise ValueError('World IDE model has no bundled DFF: ' + row['model'])
+    missing_textures = sorted({row['texture'] for row in definitions.values()
+                               if row['texture'].casefold() + '.txd' not in img_names})
+    bindings = _binding_rows(_member(root, 'data/lcs/model-bindings.tsv'), set(definitions), names)
+    ipl_files = sorted(root.joinpath('data/lcs').glob('world*.ipl'))
+    if not ipl_files:
+        raise ValueError('No world IPL placements are packaged')
+    for path in ipl_files:
+        _inside(root, path)
+    placements = _validate_placements(ipl_files, definitions)
+    render_ranges, zones = _validate_render_tables(root, set(definitions))
+    door_rows = _validate_doors(_member(root, 'data/lcs/door-bindings.tsv'))
+    profile_references = _validate_profile(root)
+    radar_files = sorted(root.joinpath('models/radar').glob('*.txd'))
+    if not radar_files:
+        raise ValueError('No radar tile TXDs are packaged')
+    for path in radar_files:
+        _inside(root, path)
+        _safe_asset_name(path.name, 'radar tile')
+    native_metadata = json.loads(_member(root, 'metadata/native-collisions.json').read_text(encoding='utf-8'))
+    if not isinstance(native_metadata, dict):
+        raise ValueError('Native collision metadata must be a JSON object')
+    _native_collision_load_order(root)
+    source_manifests = _check_portable_source_manifests(root)
+    peds = _validate_gameplay_peds_structure(root)
+    campaign = _campaign_record(root, map_report)
+    path_summary = {key: path_archive[key] for key in ('Areas', 'VehicleNodes', 'PedNodes') if key in path_archive}
+    result = dict(
+        valid=True,
+        validationScope='structure',
+        nativeObjectCollisions=dict(valid=True, records=len(native_collisions), structuralRecordsParsed=True),
+        gameplayPeds=peds,
+        campaign=campaign,
+        checks=dict(
+            packagePathsContained=True,
+            requiredResources=len(required),
+            profileReferences=len(profile_references),
+            worldImgEntries=len(img_names),
+            worldCollisionRecords=len(world_collisions),
+            nativeCollisionRecords=len(native_collisions),
+            worldModelDefinitions=len(definitions),
+            modelBindings=len(bindings),
+            worldPlacements=placements,
+            renderRules=render_ranges,
+            islandZones=zones,
+            doorBindings=door_rows,
+            radarTiles=len(radar_files),
+            portableSourceManifests=source_manifests,
+            pathArchive=path_summary,
+        ),
+        textureDictionariesNotBundled=missing_textures,
+        renderWareGeometryParsed=False,
+        texturePixelsCompared=False,
+        startupValidationIncluded=False,
+        conversionProvenanceVerified=False,
+        gameExecuted=False,
+        completeCampaignVerified=campaign.get('completeCampaignVerified', False),
+    )
+    validation_path = _member(root, 'metadata/package-validation.json', must_exist=False)
+    validation_path.write_text(json.dumps(result, indent=2), encoding='utf-8')
+    inventory = []
+    for path in sorted(_audit_package_tree(root)[1]):
+        if path.name == 'package-files.json':
+            continue
+        with path.open('rb') as stream:
+            observed_hash = hashlib.file_digest(stream, 'sha256').hexdigest()
+        inventory.append(dict(relative=path.relative_to(root).as_posix(), bytes=path.stat().st_size,
+                              sha256=observed_hash))
+    _member(root, 'metadata/package-files.json', must_exist=False).write_text(
+        json.dumps(inventory, indent=2), encoding='utf-8')
+    return result
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--package', type=pathlib.Path, required=True)
-    parser.add_argument('--source', type=pathlib.Path, required=True)
+    parser.add_argument('--source', type=pathlib.Path,
+                        help='Original converted map source; required only for --verify-conversion')
+    parser.add_argument('--game', type=pathlib.Path,
+                        help='Read-only original game directory; required only for --verify-conversion')
+    parser.add_argument('--weapon-source', type=pathlib.Path,
+                        help='Converted weapon rw-assets directory for --verify-conversion')
+    parser.add_argument('--verify-conversion', action='store_true',
+                        help='Run the strict offline original-conversion proof instead of package structure checks')
     args = parser.parse_args()
-    print(json.dumps(validate(args.package, args.source), indent=2))
+    if args.verify_conversion:
+        if args.source is None:
+            parser.error('--source is required with --verify-conversion')
+        if args.game is None:
+            parser.error('--game is required with --verify-conversion')
+        print(json.dumps(validate_conversion(args.package, args.source, args.game, args.weapon_source), indent=2))
+    else:
+        print(json.dumps(validate(args.package, args.source, args.game), indent=2))

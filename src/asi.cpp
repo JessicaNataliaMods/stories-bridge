@@ -3,6 +3,7 @@
 #include "lcs/route_scripts.hpp"
 #include "sa_ui_draw.hpp"
 #include "sa_hand_aim.hpp"
+#include "sa_user_files.hpp"
 #include "sa_route_service.hpp"
 #include "lcs/cop_native_translation.hpp"
 #include "lcs/route_vehicle_native.hpp"
@@ -1163,11 +1164,11 @@ struct Campaign {
         // Campaign packages keep scenes in data/lcs/cutscenes; the legacy
         // first-mission installer names its folder explicitly.
         const auto configured_cutscenes=setting(L"CutsceneDirectory");
-        const auto cutscene_directory=!configured_cutscenes.empty()?std::filesystem::path(configured_cutscenes):
+        const auto cutscene_directory=!configured_cutscenes.empty()?module_directory()/configured_cutscenes:
             setting(L"Mode")==L"Campaign"?module_directory()/L"data"/L"lcs"/L"cutscenes":std::filesystem::path();
         if(!cutscene_directory.empty()) {
             cutscenes=std::make_unique<lcs::NativeCutscenes>(resource_directory(),cutscene_directory,original_audio_directory()/L"CUTSCENE",adapter);
-            log("Original cutscene archives/audio verified and native aliases registered");
+            log("Cutscene index loaded and native aliases registered");
         }
         if(first) {
             validate_first_mission_world();
@@ -1573,16 +1574,16 @@ std::filesystem::path module_directory() {
 // preview installers that still write one.
 std::filesystem::path resource_directory() {
     const auto configured=setting(L"ResourceDirectory");
-    if(!configured.empty())return configured;
+    if(!configured.empty())return module_directory()/configured;
     return setting(L"Mode")==L"Campaign" ? module_directory() : module_directory().parent_path();
 }
 std::filesystem::path world_directory() {
     const auto configured=setting(L"WorldDirectory");
-    return configured.empty() ? module_directory()/L"data"/L"lcs" : std::filesystem::path(configured);
+    return configured.empty() ? module_directory()/L"data"/L"lcs" : module_directory()/configured;
 }
 std::filesystem::path original_data_directory() {
     const auto configured=setting(L"DataDirectory");
-    return configured.empty() ? module_directory()/L"metadata"/L"lcs-source" : std::filesystem::path(configured);
+    return configured.empty() ? module_directory()/L"metadata"/L"lcs-source" : module_directory()/configured;
 }
 std::string source_suffix() {
     const auto suffix=setting(L"SourceFileSuffix");
@@ -2662,6 +2663,18 @@ bool install_hook() {
        pe->OptionalHeader.SizeOfImage<=0x53C158-base ||
        !lcs::sa_executor_profile_matches()) {
         OutputDebugStringA("LcsSaBridge: unsupported native script/profile instruction; hooks skipped\n");
+        return false;
+    }
+    // This only registers the early event CALL (sa_user_files.cpp). Path
+    // resolution, directory creation and write checks run later in that event,
+    // after the loader lock has been released, before SA reads its user files.
+    lcs::UserFilesOptions user_files;
+    user_files.portable=setting(L"PortableUserFiles")!=L"0";
+    const auto user_folder=setting(L"UserFilesFolder");
+    if(!user_folder.empty())user_files.folder_name=user_folder;
+    std::string user_files_error;
+    if(!lcs::sa_user_files_install(user_files,user_files_error)) {
+        OutputDebugStringA(("LcsSaBridge user files: "+user_files_error+"\n").c_str());
         return false;
     }
     if(setting(L"VehicleColours")==L"1") {

@@ -5,7 +5,13 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import sys
 import uuid
+TOOLS_DIR = str(Path(__file__).resolve().parent)
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+from package_metadata import make_portable
 
 
 CONFIG_PATHS = (
@@ -15,6 +21,7 @@ CONFIG_PATHS = (
 )
 PROFILE_PATH = "data/gta.dat"
 REPORT_PATH = "metadata/campaign-vehicles.json"
+SOURCE_SNAPSHOT = "metadata/source-manifests/campaign-vehicles/manifest.json"
 
 
 def digest_bytes(data):
@@ -307,11 +314,7 @@ def load_fleet(fleet):
             if record is None:
                 raise ValueError("Fleet output manifest does not pin selected model: " + relative)
             source = _asset_path(fleet, relative)
-            expected = str(record.get("Sha256", "")).lower()
-            if not expected or digest(source).lower() != expected:
-                raise ValueError("Prepared fleet model hash mismatch: " + relative)
-            final_assets.append({"source": source, "relative": destination,
-                                 "sha256": expected, "bytes": source.stat().st_size})
+            final_assets.append({"source": source, "relative": destination})
     destinations = [asset["relative"].casefold() for asset in final_assets]
     if len(destinations) != 2 * len(mappings) or len(set(destinations)) != len(destinations):
         raise ValueError("Fleet must produce one distinct DFF/TXD destination pair per vehicle")
@@ -323,10 +326,9 @@ def load_fleet(fleet):
             raise ValueError("Unexpected shared vehicle texture dictionary destination")
         record = output_files.get(relative.casefold())
         source = _asset_path(fleet, relative)
-        if not record or digest(source).lower() != record["Sha256"].lower():
-            raise ValueError("Shared vehicle texture dictionary hash mismatch")
-        final_assets.append({"source": source, "relative": destination,
-                             "sha256": record["Sha256"].lower(), "bytes": source.stat().st_size})
+        if not record:
+            raise ValueError("Shared vehicle texture dictionary is missing from the fleet manifest")
+        final_assets.append({"source": source, "relative": destination})
     if manifest.get("VehicleColours"):
         colours = manifest["VehicleColours"]
         relative, destination = colours["PreparedPath"], colours["TargetPath"]
@@ -334,20 +336,18 @@ def load_fleet(fleet):
             raise ValueError("Unexpected vehicle colours consumer resource")
         source = _asset_path(fleet, relative)
         record = output_files.get(relative.casefold())
-        if not record or digest(source).lower() != record["Sha256"].lower():
-            raise ValueError("Vehicle colours resource hash mismatch")
-        final_assets.append({"source": source, "relative": destination,
-                             "sha256": record["Sha256"].lower(), "bytes": source.stat().st_size})
+        if not record:
+            raise ValueError("Vehicle colours resource is missing from the fleet manifest")
+        final_assets.append({"source": source, "relative": destination})
     if manifest.get("NativeColourLoader"):
         loader = manifest["NativeColourLoader"]
         if (loader["PreparedPath"], loader["TargetPath"]) != ("carcols.dat", "data/carcols.dat"):
             raise ValueError("Unexpected native colour loader resource")
         source = _asset_path(fleet, "carcols.dat")
         record = output_files.get("carcols.dat")
-        if not record or digest(source).lower() != record["Sha256"].lower():
-            raise ValueError("Native colour loader hash mismatch")
-        final_assets.append({"source": source, "relative": "data/carcols.dat",
-                             "sha256": record["Sha256"].lower(), "bytes": source.stat().st_size})
+        if not record:
+            raise ValueError("Native colour loader resource is missing from the fleet manifest")
+        final_assets.append({"source": source, "relative": "data/carcols.dat"})
     return manifest, manifest_path, source_mappings, mappings, fleet_ide_text, final_assets
 
 
@@ -447,10 +447,19 @@ def mount(fleet, package, game, replace_existing=False):
             raise ValueError("Required staged/native config is missing: " + str(path))
     before = {relative: digest(path) for relative, path in config_paths.items()}
     before[PROFILE_PATH] = digest(package / PROFILE_PATH)
-    if campaign.get("equivalentSha256") and campaign["equivalentSha256"].lower() != before["data/lcs/native-equivalents.tsv"].lower():
-        raise ValueError("New stage native-equivalent hash pin does not match its source-binding file")
-
-    source_manifest_sha = digest(manifest_path)
+    snapshot_path = package / SOURCE_SNAPSHOT
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    if snapshot_path.exists():
+        raise ValueError("Stage already contains a vehicle source snapshot")
+    portable_manifest = dict(manifest)
+    # SourceFiles contains machine-local file names. It is not needed by the
+    # campaign consumers, which use the prepared rows, output records and the
+    # adjacent selected config files retained below.
+    portable_manifest.pop("SourceFiles", None)
+    snapshot_path.write_text(json.dumps(portable_manifest, indent=2) + "\n", encoding="utf-8")
+    shutil.copyfile(fleet / "vehicles.ide", snapshot_path.parent / "vehicles.ide")
+    shutil.copyfile(fleet / "handling.cfg", snapshot_path.parent / "handling.cfg")
+    source_manifest_sha = digest(snapshot_path)
     stage_ide_text = config_paths["data/vehicles.ide"].read_text(encoding="ascii")
     stage_handling_text = config_paths["data/handling.cfg"].read_text(encoding="ascii")
     native_ide_text = game_ide.read_text(encoding="ascii")
@@ -532,8 +541,6 @@ def mount(fleet, package, game, replace_existing=False):
         payloads["LcsSaBridge.ini"] = (ini.rstrip()+"\nVehicleColours=1\n").encode(ini_encoding)
     for asset in final_assets:
         data = asset["source"].read_bytes()
-        if digest_bytes(data).lower() != asset["sha256"].lower():
-            raise ValueError("Prepared fleet model changed after hash validation: " + asset["relative"])
         payloads[asset["relative"]] = data
     for relative, data in payloads.items():
         if not inside(package, package / relative):
@@ -553,7 +560,7 @@ def mount(fleet, package, game, replace_existing=False):
     ]
     report = {
         "format": 1,
-        "sourceManifest": str(manifest_path),
+        "sourceManifest": SOURCE_SNAPSHOT,
         "sourceManifestSha256": source_manifest_sha,
         "sourcePreparedCount": manifest["PreparedCount"],
         "vehicleCount": len(mappings),
@@ -583,8 +590,20 @@ def mount(fleet, package, game, replace_existing=False):
     campaign["nativeStartupValidated"] = False
     campaign.pop("startupValidationSha256", None)
     atomic_write(package, "metadata/campaign.json", (json.dumps(campaign, indent=2) + "\n").encode("utf-8"))
+    make_portable(package)
+    report_path = package / REPORT_PATH
+    report = read_json(report_path)
+    snapshot = package / report["sourceManifest"]
+    report["sourceManifestSha256"] = digest(snapshot)
+    atomic_write(package, REPORT_PATH, (json.dumps(report, indent=2) + "\n").encode("utf-8"))
+    campaign = read_json(package / "metadata/campaign.json")
+    campaign["vehicleFleet"]["sha256"] = digest(package / REPORT_PATH)
+    for row in campaign.get("originalResources", []):
+        if row.get("relative") == REPORT_PATH:
+            row["sha256"] = campaign["vehicleFleet"]["sha256"]
+    atomic_write(package, "metadata/campaign.json", (json.dumps(campaign, indent=2) + "\n").encode("utf-8"))
     return {"mounted": True, "vehicles": len(mappings), "modelFiles": len(final_assets),
-            "changedMappings": changed_bindings, "stage": str(package), "installed": False,
+            "changedMappings": changed_bindings, "stage": package.name, "installed": False,
             "gameExecuted": False}
 
 

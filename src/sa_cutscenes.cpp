@@ -1,40 +1,14 @@
 #include "sa_cutscenes.hpp"
 #include "lcs/cutscene_audio.hpp"
 #include "lcs/sa_executor.hpp"
-#include <bcrypt.h>
 #include <fstream>
 #include <sstream>
-#include <iomanip>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
 namespace lcs {
 namespace {
-std::string sha256(const std::filesystem::path* path,const std::vector<uint8_t>* bytes) {
-    BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
-    const auto cleanup=[&](){if(hash)BCryptDestroyHash(hash);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);};
-    try {
-        if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)throw std::runtime_error("Cannot open cutscene resource hash provider");
-        DWORD length=0,written=0;
-        if(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&length),sizeof(length),&written,0)<0 || !length || length>1048576)throw std::runtime_error("Invalid hash provider size");
-        std::vector<uint8_t> object(length);
-        if(BCryptCreateHash(algorithm,&hash,object.data(),length,nullptr,0,0)<0)throw std::runtime_error("Cannot create resource hash");
-        if(bytes) {
-            if(BCryptHashData(hash,const_cast<PUCHAR>(bytes->data()),ULONG(bytes->size()),0)<0)throw std::runtime_error("Resource hashing failed");
-        } else {
-            std::ifstream in(*path,std::ios::binary);if(!in)throw std::runtime_error("Missing mounted cutscene resource: "+path->string());
-            std::array<uint8_t,65536> buffer{};
-            while(in){in.read(reinterpret_cast<char*>(buffer.data()),buffer.size());if(in.gcount() && BCryptHashData(hash,buffer.data(),ULONG(in.gcount()),0)<0)throw std::runtime_error("Resource hashing failed");}
-            if(!in.eof())throw std::runtime_error("Mounted resource read failed");
-        }
-        std::array<uint8_t,32> digest{};if(BCryptFinishHash(hash,digest.data(),digest.size(),0)<0)throw std::runtime_error("Resource hash completion failed");
-        cleanup();hash=nullptr;algorithm=nullptr;
-        std::ostringstream out;out<<std::uppercase<<std::hex<<std::setfill('0');for(auto c:digest)out<<std::setw(2)<<int(c);return out.str();
-    }catch(...){cleanup();throw;}
-}
-std::string sha256(const std::filesystem::path& path){return sha256(&path,nullptr);}
-std::string sha256(const std::vector<uint8_t>& bytes){return sha256(nullptr,&bytes);}
 std::filesystem::path source_stream(const std::filesystem::path& directory,std::string name) {
     for(auto& c:name)if(c>='a' && c<='z')c=char(c-32);
     return directory/(name+".VB");
@@ -42,33 +16,33 @@ std::filesystem::path source_stream(const std::filesystem::path& directory,std::
 bool read(uintptr_t address,void* out,size_t size) {
     SIZE_T actual=0;return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(address),out,size,&actual) && actual==size;
 }
-bool valid_hash(const std::string& hash){return hash.size()==64 && std::all_of(hash.begin(),hash.end(),[](char c){return (c>='0' && c<='9') || (c>='A' && c<='F');});}
 std::array<std::string,3> row(const std::string& line) {
     std::istringstream input(line);std::array<std::string,3> values;
     if(!std::getline(input,values[0],'\t') || !std::getline(input,values[1],'\t') || !std::getline(input,values[2]) || values[2].find('\t')!=std::string::npos)throw std::runtime_error("Invalid mounted cutscene index row");
     if(!values[2].empty() && values[2].back()=='\r')values[2].pop_back();return values;
 }
 }
-NativeCutscenes::NativeCutscenes(const std::filesystem::path& game,const std::filesystem::path& directory,const std::filesystem::path& audio_directory,NativeAdapter& adapter):directory_(directory),audio_directory_(audio_directory) {
+NativeCutscenes::NativeCutscenes(const std::filesystem::path&,const std::filesystem::path& directory,const std::filesystem::path& audio_directory,NativeAdapter& adapter):directory_(directory),audio_directory_(audio_directory) {
     std::ifstream index(directory_/"index.tsv");std::string line;
     if(!index || !std::getline(index,line))throw std::runtime_error("Missing mounted cutscene index");
     const auto header=row(line);
-    if(header[0]!="LCSCUT1" || !valid_hash(header[1]) || !valid_hash(header[2]) || sha256(game/"anim"/"cuts.img")!=header[1] || sha256(game/"models"/"cutscene.img")!=header[2])throw std::runtime_error("Mounted cutscene archive hash mismatch");
+    if(header[0]!="LCSCUT1")throw std::runtime_error("Invalid mounted cutscene index header");
     while(std::getline(index,line)) {
         const auto entry=row(line);
-        if(entry[0].empty() || entry[0].size()>8 || !std::all_of(entry[0].begin(),entry[0].end(),[](char c){return (c>='a' && c<='z') || (c>='0' && c<='9') || c=='_';}) || !valid_hash(entry[2]))throw std::runtime_error("Invalid original cutscene identity/hash");
+        if(entry[0].empty() || entry[0].size()>8 || !std::all_of(entry[0].begin(),entry[0].end(),[](char c){return (c>='a' && c<='z') || (c>='0' && c<='9') || c=='_';}) || entry[1].empty())throw std::runtime_error("Invalid mounted cutscene scene/alias");
         if(!scenes_.emplace(entry[0],Scene{entry[1],entry[2]}).second)throw std::runtime_error("Duplicate original cutscene index entry");
-        // Decoding every stream here would delay startup; the hash is checked
-        // when the scene's voice is prepared.
+        // Decoding every stream here would delay startup; the selected stream
+        // is structurally decoded when its voice is prepared. Index hash fields
+        // are package metadata and do not pin user-modified archives or audio.
         if(!std::filesystem::is_regular_file(source_stream(audio_directory_,entry[0])))
-            throw std::runtime_error("Original PS2 cutscene audio is missing: "+source_stream(audio_directory_,entry[0]).string());
+            throw std::runtime_error("Mounted cutscene audio is missing: "+source_stream(audio_directory_,entry[0]).string());
     }
     if(scenes_.empty())throw std::runtime_error("Mounted cutscene index is empty");
     for(const auto& entry:scenes_)adapter.bind_cutscene(entry.first,entry.second.alias);
     adapter.prepare_cutscene_audio=[this](const std::string& name){
         const auto found=scenes_.find(name);if(found==scenes_.end())return false;
         clear();auto decoded=read_ps2_stream(source_stream(audio_directory_,name));
-        if(sha256(pcm_wave_bytes(decoded))!=found->second.hash)return false;
+        if(decoded.pcm.empty() || !decoded.frequency || (decoded.channels!=1 && decoded.channels!=2))return false;
         sample_=std::move(decoded);return true;
     };
     adapter.arm_cutscene_audio=[this](){if(sample_.pcm.empty())throw std::runtime_error("Cutscene voice is not prepared");armed_=true;};

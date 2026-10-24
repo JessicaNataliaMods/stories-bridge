@@ -13,13 +13,135 @@ import pathlib
 import shutil
 from pathlib import Path
 from bootstrap_player_exports import export_player_globals, report as bootstrap_report
+from package_metadata import make_portable
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+WEAPON_SOURCE_MANIFEST = 'metadata/source-manifests/weapon-conversion/manifest.json'
+FLEET_SOURCE_MANIFEST = 'metadata/source-manifests/campaign-vehicles/manifest.json'
 
 
 def digest(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def package_reference(package, value):
+    """Resolve package-relative provenance, with legacy absolute paths readable."""
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    candidate = (Path(package) / path).resolve()
+    if not candidate.is_relative_to(Path(package).resolve()):
+        raise ValueError('Package reference leaves the staging directory: ' + str(value))
+    return candidate
+
+
+def snapshot_source_manifest(package, source, relative, fleet_configs=False):
+    """Copy portable conversion metadata, omitting machine-local source lists."""
+    source = Path(source)
+    destination = Path(package) / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != destination.resolve():
+        data = json.loads(source.read_text(encoding='utf-8-sig'))
+        if fleet_configs:
+            data.pop('SourceFiles', None)
+        destination.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+        if fleet_configs:
+            for name in ('vehicles.ide', 'handling.cfg'):
+                shutil.copyfile(source.parent / name, destination.parent / name)
+    return relative, digest(destination)
+
+
+def migrate_source_references(package, campaign):
+    """Replace legacy absolute provenance paths with package-owned snapshots."""
+    weapon_path = Path(package) / 'metadata/weapon-visuals.json'
+    if weapon_path.is_file():
+        weapon = json.loads(weapon_path.read_text(encoding='utf-8'))
+        reference = weapon.get('sourceManifest')
+        if reference:
+            source = package_reference(package, reference)
+            if source.is_file():
+                relative, sha = snapshot_source_manifest(package, source, WEAPON_SOURCE_MANIFEST)
+                weapon['sourceManifest'] = relative
+                weapon['sourceManifestSha256'] = sha
+            else:
+                weapon.pop('sourceManifest', None)
+                weapon.pop('sourceManifestSha256', None)
+            if reference:
+                weapon_path.write_text(json.dumps(weapon, indent=2) + '\n', encoding='utf-8')
+                if campaign.get('weaponVisuals'):
+                    campaign['weaponVisuals']['sha256'] = digest(weapon_path)
+                for row in campaign.get('originalResources', []):
+                    if row.get('relative') == 'metadata/weapon-visuals.json':
+                        row['sha256'] = digest(weapon_path)
+
+    fleet = campaign.get('vehicleFleet')
+    if fleet:
+        fleet_path = Path(package) / fleet['manifest']
+        if fleet_path.is_file():
+            mounted = json.loads(fleet_path.read_text(encoding='utf-8'))
+            reference = mounted.get('sourceManifest')
+            if reference:
+                source = package_reference(package, reference)
+                if source.is_file():
+                    relative, sha = snapshot_source_manifest(package, source, FLEET_SOURCE_MANIFEST, fleet_configs=True)
+                    mounted['sourceManifest'] = relative
+                    mounted['sourceManifestSha256'] = sha
+                else:
+                    mounted.pop('sourceManifest', None)
+                    mounted.pop('sourceManifestSha256', None)
+                fleet_path.write_text(json.dumps(mounted, indent=2) + '\n', encoding='utf-8')
+                fleet['sha256'] = digest(fleet_path)
+                for row in campaign.get('originalResources', []):
+                    if row.get('relative') == fleet['manifest']:
+                        row['sha256'] = fleet['sha256']
+
+
+def game_directory_for(output, explicit_game):
+    if explicit_game is not None:
+        game = Path(explicit_game).resolve()
+    else:
+        preview_path = Path(output) / 'metadata/map-preview.json'
+        preview = json.loads(preview_path.read_text(encoding='utf-8'))
+        legacy = preview.get('gameDirectory')
+        if not legacy:
+            raise ValueError('This update needs the local SA directory; pass --game')
+        game = Path(legacy).resolve()
+    if not (game / 'data').is_dir():
+        raise ValueError('SA directory must contain data/: ' + str(game))
+    return game
+
+
+def refresh_snapshot_observations(package):
+    """Keep informational snapshot hashes accurate after metadata sanitizing."""
+    campaign_path = Path(package) / 'metadata/campaign.json'
+    campaign = json.loads(campaign_path.read_text(encoding='utf-8'))
+    weapon_path = Path(package) / 'metadata/weapon-visuals.json'
+    if weapon_path.is_file():
+        weapon = json.loads(weapon_path.read_text(encoding='utf-8'))
+        if weapon.get('sourceManifest'):
+            source = package_reference(package, weapon['sourceManifest'])
+            weapon['sourceManifestSha256'] = digest(source)
+        weapon_path.write_text(json.dumps(weapon, indent=2) + '\n', encoding='utf-8')
+        if campaign.get('weaponVisuals'):
+            campaign['weaponVisuals']['sha256'] = digest(weapon_path)
+        for row in campaign.get('originalResources', []):
+            if row.get('relative') == 'metadata/weapon-visuals.json':
+                row['sha256'] = digest(weapon_path)
+    fleet = campaign.get('vehicleFleet')
+    if fleet:
+        fleet_path = Path(package) / fleet['manifest']
+        if fleet_path.is_file():
+            mounted = json.loads(fleet_path.read_text(encoding='utf-8'))
+            if mounted.get('sourceManifest'):
+                source = package_reference(package, mounted['sourceManifest'])
+                mounted['sourceManifestSha256'] = digest(source)
+            fleet_path.write_text(json.dumps(mounted, indent=2) + '\n', encoding='utf-8')
+            fleet['sha256'] = digest(fleet_path)
+            for row in campaign.get('originalResources', []):
+                if row.get('relative') == fleet['manifest']:
+                    row['sha256'] = fleet['sha256']
+    campaign_path.write_text(json.dumps(campaign, indent=2) + '\n', encoding='utf-8')
 
 
 def immutable(relative):
@@ -67,18 +189,30 @@ def sa_weapon_models(game):
     return names
 
 
-def remount_weapons(output, campaign, game):
+def remount_weapons(output, campaign, game, weapon_source=None):
     """v94: every original weapon on its own SA weapon model (tools/weapon_slots.py),
     the minigun body and barrel in one clump, and SA weapon.dat values from the
     original WEAPON.DAT. Returns the weapon-visuals manifest."""
     slots_module = tool_module('weapon_slots')
     old_manifest = json.loads((output/'metadata/weapon-visuals.json').read_text(encoding='utf-8'))
-    source_manifest = Path(old_manifest['sourceManifest'])
-    if digest(source_manifest) != old_manifest['sourceManifestSha256']:
-        raise ValueError('Weapon conversion provenance changed')
-    converted = json.loads(source_manifest.read_text(encoding='utf-8'))
+    if weapon_source is not None:
+        source_root = Path(weapon_source).resolve()
+        source_manifest = source_root/'manifest.json' if source_root.is_dir() else source_root
+        source_root = source_manifest.parent
+    elif old_manifest.get('sourceManifest'):
+        source_manifest = package_reference(output, old_manifest['sourceManifest'])
+        source_root = source_manifest.parent
+    else:
+        raise ValueError('Weapon remount needs a source conversion manifest; pass --weapon-source')
+    converted = json.loads(source_manifest.read_text(encoding='utf-8-sig'))
     if not converted['complete'] or converted['failures'] or converted['gameExecuted']:
         raise ValueError('Weapon conversion must be complete and verified offline')
+    rw = source_root/'rw-assets'
+    if not rw.is_dir():
+        raise ValueError('Weapon remount needs converted assets; supply --weapon-source with rw-assets')
+    snapshot_ref, _ = snapshot_source_manifest(output, source_manifest, WEAPON_SOURCE_MANIFEST)
+    snapshot_path = package_reference(output, snapshot_ref)
+    source_manifest_sha = digest(snapshot_path)
     by_name = {row['originalName'].lower(): row for row in converted['converted']}
     models = {row['originalModelId']: row['originalName'].lower() for row in converted['converted']}
     sa_models = sa_weapon_models(game)
@@ -105,12 +239,8 @@ def remount_weapons(output, campaign, game):
     for row in old_manifest['files']:
         (output/row['relative']).unlink(missing_ok=True)
     slots, files = [], []
-    rw = source_manifest.parent/'rw-assets'
-    def source_bytes(row, extension, key):
-        data = (rw/(row['asset'] + extension)).read_bytes()
-        if hashlib.sha256(data).hexdigest() != row[key]:
-            raise ValueError('Converted weapon changed: ' + row['asset'])
-        return data
+    def source_bytes(row, extension):
+        return (rw/(row['asset'] + extension)).read_bytes()
     for target, names in sorted(groups.items()):
         selected = slots_module.CANONICAL.get(target, names[0] if len(names) == 1 else None)
         if selected is None:
@@ -118,14 +248,14 @@ def remount_weapons(output, campaign, game):
         row = by_name[selected]
         visual_name=slots_module.VISUAL_SOURCE_OVERRIDES.get(row['originalName'].lower())
         visual_row=by_name[visual_name] if visual_name else row
-        dff, txd = source_bytes(visual_row, '.dff', 'dffSHA256'), source_bytes(visual_row, '.txd', 'txdSHA256')
+        dff, txd = source_bytes(visual_row, '.dff'), source_bytes(visual_row, '.txd')
         slot = dict(nativeModel=sa_ids[target], nativeName=target, selectedOriginal=row['originalName'],
                     originalModel=row['originalModelId'], aliases=sorted(set(names) - {selected}))
         if visual_name:slot['visualOriginal']=visual_name
         if target == 'minigun':
             barrel = by_name['minigun2']
-            dff = slots_module.assemble_minigun(dff, source_bytes(barrel, '.dff', 'dffSHA256'))
-            txd = slots_module.merge_textures(txd, source_bytes(barrel, '.txd', 'txdSHA256'))
+            dff = slots_module.assemble_minigun(dff, source_bytes(barrel, '.dff'))
+            txd = slots_module.merge_textures(txd, source_bytes(barrel, '.txd'))
             slot['assembly'] = dict(barrel='minigun2', frame='minigun2', rule='LCS CPed minigun top atomic')
             slot['aliases'].remove('minigun2')
         for data, extension in ((dff, '.dff'), (txd, '.txd')):
@@ -139,7 +269,7 @@ def remount_weapons(output, campaign, game):
         (game/'data/weapon.dat').read_text(encoding='latin1'),
         (output/'metadata/lcs-source/DATA/WEAPON.DAT.bin').read_text(encoding='latin1'),
         models, sa_models).encode('latin1'))
-    manifest = dict(format=2, sourceManifest=str(source_manifest), sourceManifestSha256=digest(source_manifest),
+    manifest = dict(format=2, sourceManifest=WEAPON_SOURCE_MANIFEST, sourceManifestSha256=source_manifest_sha,
                     slots=slots, files=files, weaponDat=dict(relative='data/weapon.dat', sha256=digest(weapon_dat)),
                     installed=False, gameExecuted=False, behaviorChanged=True, audioChanged=False,
                     animationsChanged=False, handAlignmentRuntimeVerified=False)
@@ -154,7 +284,7 @@ def remount_weapons(output, campaign, game):
     return manifest
 
 
-def mount_weapon_animations(output, campaign, game):
+def mount_weapon_animations(output, campaign, game, weapon_source=None):
     """v95: SA gun animation blocks with the original LCS animations
     (tools/weapon_animations.py) and weapon.dat with the original loops."""
     animations = tool_module('weapon_animations')
@@ -176,7 +306,17 @@ def mount_weapon_animations(output, campaign, game):
         replaced[block] = names
     visuals_path = output/'metadata/weapon-visuals.json'
     visuals = json.loads(visuals_path.read_text(encoding='utf-8'))
-    converted = json.loads(Path(visuals['sourceManifest']).read_text(encoding='utf-8'))
+    if weapon_source is not None:
+        source_root = Path(weapon_source).resolve()
+        source_manifest = source_root/'manifest.json' if source_root.is_dir() else source_root
+        visuals['sourceManifest'], visuals['sourceManifestSha256'] = snapshot_source_manifest(
+            output, source_manifest, WEAPON_SOURCE_MANIFEST)
+        source_manifest = package_reference(output, visuals['sourceManifest'])
+    elif visuals.get('sourceManifest'):
+        source_manifest = package_reference(output, visuals['sourceManifest'])
+    else:
+        raise ValueError('Weapon animation update needs a source conversion manifest; pass --weapon-source')
+    converted = json.loads(source_manifest.read_text(encoding='utf-8-sig'))
     weapon_dat = output/'data/weapon.dat'
     replace_mutable(weapon_dat, slots_module.convert_weapon_dat(
         (game/'data/weapon.dat').read_text(encoding='latin1'),
@@ -198,24 +338,23 @@ def mount_weapon_animations(output, campaign, game):
 
 
 def resync_fleet_rows(output, campaign):
-    """Refresh the mounted fleet's vehicle rows from its hash-verified source
-    manifest when the source was regenerated after an in-place mount. Only
-    allowed when every mounted vehicle file already equals the source output,
-    so no vehicle data changes; returns the refreshed vehicle ids."""
+    """Refresh mounted vehicle rows from the package-local source snapshot.
+
+    This updates provenance metadata only; existing model files may have
+    independent mod edits and are never compared with source output hashes.
+    """
     fleet = campaign.get('vehicleFleet')
     if not fleet:
         return []
     metadata = output/fleet['manifest']
     mounted = json.loads(metadata.read_text(encoding='utf-8'))
-    source = Path(mounted['sourceManifest'])
-    if digest(source) != mounted['sourceManifestSha256']:
-        raise ValueError('Vehicle fleet provenance changed')
+    if not mounted.get('sourceManifest'):
+        return []
+    source = package_reference(output, mounted['sourceManifest'])
     original = json.loads(source.read_text(encoding='utf-8'))
-    outputs = {Path(row['RelativePath'].replace('\\', '/')).name.lower(): row['Sha256'].lower() for row in original['OutputFiles']}
     for row in mounted['Files']:
-        name = Path(row['relative']).name.lower()
-        if name in outputs and (digest(output/row['relative']) != outputs[name] or row['sha256'].lower() != outputs[name]):
-            raise ValueError('Mounted fleet file differs from its source output: ' + row['relative'])
+        if not (output/row['relative']).is_file():
+            raise ValueError('Mounted fleet asset is missing: ' + row['relative'])
     rows = {row['LcsId']: row for row in original['Vehicles'] if row['Prepared']}
     refreshed = [row['LcsId'] for row in mounted['VehicleMappings'] if rows.get(row['LcsId']) not in (None, row)]
     # The ferry pins the fleet-shared config files it was merged into; follow
@@ -254,7 +393,7 @@ def tool_module(name):
     return module
 
 
-def prepare(base, output, version, notes, refresh, original_data):
+def prepare(base, output, version, notes, refresh, original_data, game=None, weapon_source=None):
     base, output = base.resolve(), output.resolve()
     if base == output or base in output.parents or output in base.parents:
         raise ValueError('Stage must be separate from its input package')
@@ -297,6 +436,7 @@ def prepare(base, output, version, notes, refresh, original_data):
                         raise ValueError('Mutable stage metadata shares an inode: '+str(relative))
                     target.unlink()  # drop only this stage's link to a regenerated data file
                 shutil.copy2(source, target)
+    migrate_source_references(output, campaign)
     source_asi = ROOT/'build/Release/LcsSaBridge.asi'
     target_asi = output/'LcsSaBridge.asi'
     if target_asi.exists() and target_asi.stat().st_nlink != 1:
@@ -452,8 +592,8 @@ def prepare(base, output, version, notes, refresh, original_data):
         campaign['runtimeSafeguards'].update(typedRemoteVehicleExplosion=True,guardedFocusedRemoteVehicle=True,
             nativeRemoteExplosionEnteredFailureReceipt=True)
     if version >= 94 and not campaign.get('weaponSlots94'):
-        game_directory = Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])
-        weapons = remount_weapons(output, campaign, game_directory)
+        game_directory = game_directory_for(output, game)
+        weapons = remount_weapons(output, campaign, game_directory, weapon_source)
         campaign['weaponSlots94'] = dict(slots=len(weapons['slots']), weaponDat='data/weapon.dat',
             separatedOriginals=['chisel','hockeystick','handaxe','cleaver','machete','ingramsl','m60'],
             minigunBarrel='frame minigun2', sharedTargets={'sniper': ['laser'], 'brassknuckle': ['fingers']},
@@ -463,8 +603,8 @@ def prepare(base, output, version, notes, refresh, original_data):
         if refreshed:
             campaign['fleetRowsRefreshed96'] = dict(vehicles=refreshed, filesUnchanged=True, gameExecuted=False)
     if version >= 95 and not campaign.get('weaponAnimations95'):
-        game_directory = Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])
-        campaign['weaponAnimations95'] = mount_weapon_animations(output, campaign, game_directory)
+        game_directory = game_directory_for(output, game)
+        campaign['weaponAnimations95'] = mount_weapon_animations(output, campaign, game_directory, weapon_source)
     if version >= 90:
         campaign['originalResources']=[row for row in campaign['originalResources']
                                        if not packaged_audio(pathlib.PurePosixPath(row['relative']))]
@@ -591,11 +731,11 @@ def prepare(base, output, version, notes, refresh, original_data):
         # Retail LCS timecycle (GAME.DTZ) over the user's native SA timecyc.dat
         # (tools/convert-timecyc.py); SA-only fields stay native.
         rom = ROOT/'local/originals/lcs-ps2'
-        native = pathlib.Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])/'data/timecyc.dat'
+        native = game_directory_for(output, game)/'data/timecyc.dat'
         text, cycle_report = tool_module('convert-timecyc').convert_files(rom, native)
         target = output/'data/timecyc.dat'
         replace_mutable(target, text.encode('ascii'))
-        cycle_report.update(rom=str(rom), native=str(native), outputSha256=digest(target))
+        cycle_report.update(outputSha256=digest(target))
         campaign['timecycle83'] = cycle_report
     if version >= 84:
         # Navigation re-exported by tools/ps2_paths.py with SA's storage rule
@@ -617,7 +757,7 @@ def prepare(base, output, version, notes, refresh, original_data):
         preview['navigation']['graph'] = graph
         preview_path.write_text(json.dumps(preview, indent=2))
         (output/'metadata/navigation.json').write_text(json.dumps(dict(conversion=conversion, nativeValidation=graph), indent=2), encoding='utf-8')
-        campaign['navigation84'] = dict(source=str(navigation), pathsImgSha256=graph['PathsImgSha256'],
+        campaign['navigation84'] = dict(pathsImgSha256=graph['PathsImgSha256'],
                                         linkStorage='area of link position (native SA rule)', gameExecuted=False)
     if version >= 90:
         if version >= 92:
@@ -633,6 +773,9 @@ def prepare(base, output, version, notes, refresh, original_data):
         ini_path = output/'LcsSaBridge.ini'
         ini = ini_path.read_bytes().decode('utf-16')
         kept = [line for line in ini.splitlines() if line.split('=', 1)[0] not in PATH_KEYS]
+        for key, default in (('PortableUserFiles', '1'), ('UserFilesFolder', 'GTA Liberty City Stories User Files')):
+            if not any(line.split('=', 1)[0].strip().casefold() == key.casefold() for line in kept):
+                kept.append(key+'='+default)
         if version >= 92 and not any(line.startswith('LcsRadio=') for line in kept):
             kept.append('LcsRadio=1')  # docs/audio.md: 0 keeps SA's radio
         if version >= 98 and not any(line.startswith('LcsHud=') for line in kept):
@@ -667,7 +810,7 @@ def prepare(base, output, version, notes, refresh, original_data):
         screens = tool_module('prepare-lcs-screens')
         wanted = screens.expected_files()
         if not all((output/relative).is_file() for relative in wanted):
-            game = pathlib.Path(json.loads((output/'metadata/map-preview.json').read_text())['gameDirectory'])
+            game = game_directory_for(output, game)
             scratch = output/'.screens'
             if scratch.exists():
                 shutil.rmtree(scratch)
@@ -703,7 +846,9 @@ def prepare(base, output, version, notes, refresh, original_data):
             if digest(source) != digest(output/relative):
                 raise ValueError('Original immutable resource changed: '+str(relative))
             preserved += 1
-    return dict(stage=str(output), version=version, codeOnlyUpdate=version<57, immutableResourcesPreserved=preserved,
+    make_portable(output)
+    refresh_snapshot_observations(output)
+    return dict(stage=output.name, version=version, codeOnlyUpdate=version<57, immutableResourcesPreserved=preserved,
                 hardlinkedNewAssets=linked, asiSha256=digest(target_asi), gameExecuted=False)
 
 
@@ -715,5 +860,9 @@ if __name__ == '__main__':
     parser.add_argument('--notes', type=pathlib.Path, required=True)
     parser.add_argument('--refresh', action='store_true')
     parser.add_argument('--original-data',type=pathlib.Path,default=ROOT/'out/lcs-converted')
+    parser.add_argument('--game', type=pathlib.Path, help='Local San Andreas directory for conversion/update inputs')
+    parser.add_argument('--weapon-source', type=pathlib.Path,
+                        help='Converted weapon directory or manifest, needed when a weapon remount needs source assets')
     args = parser.parse_args()
-    print(json.dumps(prepare(args.base, args.output, args.version, args.notes, args.refresh,args.original_data), indent=2))
+    print(json.dumps(prepare(args.base, args.output, args.version, args.notes, args.refresh,
+                             args.original_data, args.game, args.weapon_source), indent=2))

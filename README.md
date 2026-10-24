@@ -16,6 +16,10 @@ Este repositório contém **somente código, testes em código e documentação*
 
 O áudio também não é distribuído: a ASI lê a pasta `AUDIO` do PS2 da própria pessoa usuária, copiada ao lado do `.asi`. Consulte [o áudio original](docs/audio.md).
 
+Saves e configurações usam uma pasta exclusiva, portátil por padrão junto ao
+executável do jogo. As opções de nome e de Documentos estão em
+[arquivos de usuário](docs/user-files.md).
+
 O diretório irmão `private-bridge/` guarda entradas originais, referências locais, dependências, dados gerados, builds, pacotes e evidências. Os atalhos locais de desenvolvimento são ignorados pelo Git e não são distribuídos. Consulte [a divisão público/privado](docs/public-private-layout.md).
 
 ## Desenvolvimento local

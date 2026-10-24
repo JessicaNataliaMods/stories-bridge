@@ -26,11 +26,9 @@ if($taskMetadata.mode -eq 'Campaign'){
     if(!$taskValidation.campaign.valid -or !$taskValidation.campaign.enabled -or !$taskValidation.campaign.nativeStartupValidated -or $taskValidation.campaign.gameExecuted -or $taskValidation.campaign.completeCampaignVerified){throw 'Campaign source/resource/startup validation missing or invalid; installation blocked'}
     & (Join-Path $PSScriptRoot '..\tests\campaign_native_profile.ps1') -Executable (Join-Path $taskGame 'gta_sa.exe') -ProjectDirectory (Join-Path $PSScriptRoot '..') | Out-Null
 }
-if([IO.Path]::GetFullPath($taskMetadata.gameDirectory) -ne $taskGame){throw 'Package was prepared for a different installation'}
-if((Get-FileHash -LiteralPath (Join-Path $taskGame 'gta_sa.exe')).Hash -ne $taskMetadata.nativeExecutableSHA256){throw 'Game executable changed after preparation'}
-foreach($taskName in @('gta3.img','gta_int.img')){
-    if((Get-FileHash -LiteralPath (Join-Path $taskGame ('models\'+$taskName))).Hash -ne $taskMetadata.originalArchiveHashes.$taskName){throw 'Original game archive changed after preparation'}
-}
+# The explicit target is checked below by inspect-install, validate-sa-profile
+# and validate-bootstrap. A different whole-file hash or workstation path is
+# not a compatibility failure. Package copy/backup integrity checks remain.
 # A single data override replaces the base file. Multiple mods or readme data
 # activate std.data merging, which would reintroduce SA's placements/water.
 $taskModloader=Join-Path $taskGame 'modloader'
