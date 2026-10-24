@@ -86,6 +86,7 @@ namespace lcs {template class NativeRouteConsumerBackend<TaskObserverHost>;}
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cwchar>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -1031,6 +1032,7 @@ struct Campaign {
             return lcs::sa_owned_vehicle_entry_wait_ready() && route_service->set_enter_car_range_multiplier(value);
         };
         adapter.char_objective_passed=[this](int32_t actor){return route_service->objective_passed(actor);};
+        adapter.char_objective_reason=[this](){return route_service->objective_reason();};
         route_service->set_walking_receipts(
             [](const lcs::CapturedScriptTask& captured)->std::optional<lcs::EpochScriptTask>{return task_observer?task_observer->accept(captured):std::nullopt;},
             [](const lcs::EpochScriptTask& token)->std::optional<lcs::EpochScriptTask>{return task_observer?task_observer->refresh(token):std::nullopt;},
@@ -2267,6 +2269,64 @@ bool install_cylinder_markers(){
 }
 // Retail shows the yellow cylinder for a coordinate blip the script puts at a door while the player is not on a
 // mission (PS2 tutorial, "Walk into the yellow marker in the doorway"); SA's Draw3dMarkers skips that blip type.
+// Native C3dMarkers pool (0xC7DD58, 32 entries of 0xA0): +0x50 type, +0x53 used, +0x54 id, +0x74 camera distance.
+bool read_native_marker(uint32_t id,char* text,size_t size){
+    // Summary of every slot that is not free (type word 0x101 marks a free slot), then whether our id is among them.
+    __try {
+        size_t at=0;bool found=false;int busy=0;
+        for(int n=0;n<32;++n) {
+            const auto base=0xC7DD58+uintptr_t(n)*0xA0;
+            const auto type=*reinterpret_cast<const uint16_t*>(base+0x50);
+            if(type==0x101)continue;
+            ++busy;
+            const auto marker_id=*reinterpret_cast<const uint32_t*>(base+0x54);
+            if(marker_id==id)found=true;
+            if(at+60<size)at+=size_t(std::snprintf(text+at,size-at,"[%d t%u u%u/%u id%08X%s z%.2f] ",n,unsigned(type),
+                unsigned(*reinterpret_cast<const uint8_t*>(base+0x52)),unsigned(*reinterpret_cast<const uint8_t*>(base+0x53)),marker_id,
+                marker_id==id?" OURS":"",*reinterpret_cast<const float*>(base+0x38)));
+        }
+        if(at<size)std::snprintf(text+at,size-at,"busy=%d ours=%d",busy,found?1:0);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+void mark_native_markers_ready(uint32_t id){
+    __try {
+        for(int n=0;n<32;++n) {
+            const auto base=0xC7DD58+uintptr_t(n)*0xA0;
+            if(*reinterpret_cast<const uint32_t*>(base+0x54)==id && *reinterpret_cast<const uint16_t*>(base+0x50)!=0x101)
+                *reinterpret_cast<uint8_t*>(base+0x53)=1;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void log_ground_probe(const float* position,float from_above,float plain,float from_below){
+    static int logged=0;
+    if(logged>=6)return;
+    ++logged;
+    log("Door marker ground probe: script z="+std::to_string(position[2])+" floor from above="+std::to_string(from_above)+
+        " plain ground="+std::to_string(plain)+" floor from below="+std::to_string(from_below));
+}
+void log_coordinate_marker(const char* what,uint32_t blip,const float* position,uint32_t id){
+    static std::set<std::string> seen;
+    const auto key=std::string(what)+std::to_string(blip)+":"+std::to_string(int(position[0]))+","+std::to_string(int(position[1]));
+    if(seen.size()>=40 || !seen.insert(key).second)return;
+    char slot[1400]="";
+    if(what[0]=='p' && !read_native_marker(id,slot,sizeof(slot)))std::snprintf(slot,sizeof(slot),"not in the native pool right after placing");
+    log(std::string("Coordinate blip marker ")+what+": blip="+std::to_string(blip)+" pos="+std::to_string(position[0])+","+std::to_string(position[1])+","+std::to_string(position[2])+" "+slot);
+}
+// Metres a coordinate-blip cylinder is sunk below the script's floor height; DoorMarkerDrop=<metres> in the .ini.
+float door_marker_drop(){
+    static float value=-1.f;
+    if(value<0.f){
+        value=0.8f;
+        const auto text=setting(L"DoorMarkerDrop");
+        if(!text.empty()) {
+            wchar_t* end=nullptr;const float parsed=std::wcstof(text.c_str(),&end);
+            if(end!=text.c_str() && std::isfinite(parsed) && parsed>=0.f && parsed<=3.f)value=parsed;
+        }
+    }
+    return value;
+}
 void place_coord_markers(){
     if(!original_contact_marker || !cylinder_markers_on || !campaign || campaign->halted)return;
     // Read SA's own radar traces (the same walk as CRadar::Draw3dMarkers at 0x585BF0), so blips restored by a LOAD
@@ -2279,6 +2339,21 @@ void place_coord_markers(){
             float position[3];std::memcpy(position,reinterpret_cast<const void*>(edi-0x1E),12);
             if(!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]))continue;
             if(position[2]<=-100.f)position[2]=reinterpret_cast<float(__cdecl*)(float,float)>(0x569660)(position[0],position[1]);
+            else {
+                // The script gives the LCS floor; SA keeps a cylinder at the height it is given when that is above its own
+                // floor (CWorld::FindGroundZFor3DCoord, 0x5696C0), so a doorway lower than the LCS value left it floating.
+                bool found=false;
+                const float height=reinterpret_cast<float(__cdecl*)(float,float,float,bool*,void**)>(0x5696C0)(position[0],position[1],position[2]+1.f,&found,nullptr);
+                if(found && std::isfinite(height) && height<position[2] && position[2]-height<3.f)position[2]=height;
+                const float plain=reinterpret_cast<float(__cdecl*)(float,float)>(0x569660)(position[0],position[1]);
+                bool found_low=false;
+                const float low=reinterpret_cast<float(__cdecl*)(float,float,float,bool*,void**)>(0x5696C0)(position[0],position[1],position[2]-0.5f,&found_low,nullptr);
+                log_ground_probe(position,found?height:-999.f,plain,found_low?low:-999.f);
+                // SA's floor query is not usable at a doorway (it finds the street far below), and the cylinder then
+                // floated about 40 cm above the threshold (measured in game): sit it on the threshold.
+                const float drop=door_marker_drop();
+                position[2]-=drop;
+            }
             // A script sphere already marks the same place (mission destinations pair ADD_SPHERE with the blip).
             bool covered=false;
             for(uintptr_t sphere=0xA91268;sphere<0xA91268+0x180;sphere+=0x18){
@@ -2286,9 +2361,17 @@ void place_coord_markers(){
                 const auto* centre=reinterpret_cast<const float*>(sphere+8);
                 if(std::fabs(centre[0]-position[0])<3.f && std::fabs(centre[1]-position[1])<3.f){covered=true;break;}
             }
-            if(covered)continue;
+            if(covered){log_coordinate_marker("skipped, covered by a script sphere",0,position,0);continue;}
             const auto blip=uint32_t(*reinterpret_cast<const uint16_t*>(edi-0x12));
-            reinterpret_cast<PlaceMarkerSetFn>(original_contact_marker)((blip<<16|uint32_t((edi-0xBA8716)/0x28))+0x7E000000u,1,position,2.0f,255,255,128,228,0x800,0.2f,0);
+            const uint32_t marker_id=(blip<<16|uint32_t((edi-0xBA8716)/0x28))+0x7E000000u;
+            // SA copies "placed this frame" (+0x52) to "draw this frame" (+0x53) in its own update, which runs BEFORE
+            // this point; C3dMarkers::Render then frees every cylinder whose +0x53 is clear. A marker placed here would
+            // be freed unseen each frame, so raise +0x53 right after placing. Three shells as in the LCS (1.00/0.93/0.86).
+            static constexpr struct {float scale;int32_t rotate;} shells[]={{1.f,1},{.93f,2},{.86f,-1}};
+            for(const auto& shell:shells)
+                reinterpret_cast<PlaceMarkerSetFn>(original_contact_marker)(marker_id,1,position,2.0f*shell.scale,255,255,128,228,0x800,0.2f,shell.rotate);
+            mark_native_markers_ready(marker_id);
+            log_coordinate_marker("placed",blip,position,marker_id);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }

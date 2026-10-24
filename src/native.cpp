@@ -1828,7 +1828,7 @@ StepResult NativeAdapter::dispatch(Vm& vm,Thread& thread,uint16_t opcode) {
         }
         const auto completed=char_objective_passed(actor);
         if(!completed) {
-            thread.diagnostic="Native objective completion evidence unavailable";
+            thread.diagnostic=std::string("Native objective completion evidence unavailable: ")+(char_objective_reason?char_objective_reason():"");
             return StepResult::unsupported;
         }
         vm.compare(thread,*completed);return StepResult::continued;

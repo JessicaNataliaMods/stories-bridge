@@ -2,6 +2,7 @@
 #include "sa_script_marker_render.hpp"
 #include "lcs/sa_executor.hpp"
 #include <cstring>
+#include <cstdio>
 #include <iterator>
 #include <utility>
 #include <cmath>
@@ -82,7 +83,15 @@ std::optional<float> floor(const std::array<float,3>& p){
 #endif
 }
 namespace {
-template<class F>bool guard(const F& fn){__try{fn();return true;}__except(EXCEPTION_EXECUTE_HANDLER){return false;}}
+// Last SEH fault seen by guard(): kept so a refused frame can say what actually faulted.
+DWORD fault_code=0;void* fault_address=nullptr;int fault_step=0;
+LONG fault_filter(EXCEPTION_POINTERS* info){fault_code=info->ExceptionRecord->ExceptionCode;fault_address=info->ExceptionRecord->ExceptionAddress;return EXCEPTION_EXECUTE_HANDLER;}
+template<class F>bool guard(const F& fn){__try{fn();return true;}__except(fault_filter(GetExceptionInformation())){return false;}}
+char fault_text[160];
+const char* fault_report(const char* what){
+    std::snprintf(fault_text,sizeof(fault_text),"%s code=%08lX address=%p step=%d",what,static_cast<unsigned long>(fault_code),fault_address,fault_step);
+    return fault_text;
+}
 template<class T>T& field(void* p,size_t offset){return *reinterpret_cast<T*>(reinterpret_cast<uintptr_t>(p)+offset);}
 template<class T>T& global(uintptr_t p){return *reinterpret_cast<T*>(marker_rw::address(p));}
 struct Mesh {void* clump=nullptr;void* atomic=nullptr;void* frame=nullptr;};
@@ -139,13 +148,18 @@ bool capture(FrameState& f){
 }
 bool restore(FrameState& f){
     if(!owner())return why("restore: engine or thread changed");
-    bool ok=true;
-    for(size_t i=0;i<f.captured;++i)if(!f.set(states[i],reinterpret_cast<void*>(uintptr_t(f.values[i]))))ok=why("restore: render state refused");
-    if(f.lights){
+    bool ok=true;fault_step=1;
+    // Fog density (17) is the one state RW takes by pointer to a float; its captured bits are not a pointer
+    // (restoring them faulted at 0x7FE689 on every frame, which retired the LCS cylinders).
+    for(size_t i=0;i<f.captured;++i){
+        void* value=states[i]==17 ? static_cast<void*>(&f.values[i]) : reinterpret_cast<void*>(uintptr_t(f.values[i]));
+        if(!f.set(states[i],value))ok=why("restore: render state refused");
+    }
+    if(f.lights){fault_step=2;
         if(global<void*>(0xC886E8)!=f.ambient || global<void*>(0xC886EC)!=f.directional)return why("restore: a light object was replaced");
         // Like the native C3dMarkers::Render, put the captured light values back even when a callback touched them.
-        std::memcpy(&global<uint8_t>(0xC88694),f.globals,32);
-        std::memcpy(&field<uint8_t>(f.ambient,0x18),f.ambient_colour,16);
+        fault_step=3;std::memcpy(&global<uint8_t>(0xC88694),f.globals,32);fault_step=4;
+        std::memcpy(&field<uint8_t>(f.ambient,0x18),f.ambient_colour,16);fault_step=5;
         std::memcpy(&field<uint8_t>(f.directional,0x18),f.directional_colour,16);
         field<uint8_t>(f.ambient,3)=f.ambient_flag;field<uint8_t>(f.directional,3)=f.directional_flag;
     }
@@ -173,6 +187,16 @@ bool draw(const ScriptMarkerInstance& entry,FrameState& state){
     if(!executable(reinterpret_cast<void*>(callback))){field<uint32_t>(material,4)=colour;return why("draw: atomic render callback not executable");}
     const auto previous_z=state.z_write;
     if(entry.source.type==5 && !state.set(8,nullptr)){field<uint32_t>(material,4)=colour;return why("draw: z-write state refused");}
+    // The render state at this phase is whatever the previous pass left. Put the states a translucent,
+    // double-sided cylinder needs in place; restore() puts every captured state back afterwards.
+    state.set(1,nullptr);                                // no stale texture raster (material texture is bound by the pipeline)
+    state.set(6,reinterpret_cast<void*>(1));             // z test
+    state.set(10,reinterpret_cast<void*>(5));            // src blend: src alpha
+    state.set(11,reinterpret_cast<void*>(6));            // dest blend: inverse src alpha
+    state.set(12,reinterpret_cast<void*>(1));            // vertex alpha
+    state.set(20,reinterpret_cast<void*>(1));            // cull none
+    state.set(29,reinterpret_cast<void*>(8));            // alpha test: always
+    state.set(30,nullptr);
     callback(mesh.atomic);
     field<uint32_t>(material,4)=colour;
     if(entry.source.type==5 && !state.set(8,reinterpret_cast<void*>(uintptr_t(previous_z))))return why("draw: z-write restore refused");
@@ -261,8 +285,8 @@ bool sa_script_marker_frame(ScriptMarkerPool& pool){
         ok=pool.frame([&](size_t,const auto& entry){return draw(entry,state);});
     });
     bool restored=false;const bool cleanup=guard([&]{restored=restore(state);});
-    if(!safe)why("frame: native exception while drawing");
-    else if(ok && !cleanup)why("frame: native exception while restoring");
+    if(!safe)why(fault_report("frame: native exception while drawing"));
+    else if(ok && !cleanup)why(fault_report("frame: native exception while restoring"));
     if(!safe || !ok || !cleanup || !restored){resources.faulted=true;return false;}
     return true;
 }

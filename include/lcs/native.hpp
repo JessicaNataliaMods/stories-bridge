@@ -367,6 +367,7 @@ public:
     std::function<bool(uint16_t)> set_enter_car_range_multiplier;
     // 299: script objective completion observed by the production route service.
     std::function<std::optional<bool>(int32_t)> char_objective_passed;
+    std::function<const char*()> char_objective_reason;
     ExclusiveGarages exclusive_garages;
     CraneService crane_service;
     FerryService ferry_service;

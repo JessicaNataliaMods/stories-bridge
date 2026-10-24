@@ -131,6 +131,7 @@ private:
     bool servicing_=false;
     uint32_t service_now_=0;
     std::string last_diagnostic_;
+    const char* objective_reason_="";
 
     // If native reference cleanup cannot prove unlinking, keep the cell alive
     // for the rest of the process. Freeing it would leave SA with a dangling
@@ -519,7 +520,7 @@ private:
         auto ownership=walking_ownership(watch);
         if(ownership==WalkingOwnership::lost && !watch.released_arrived && !watch.rearm_pending) {
             const auto release=walking_released_&&watch.walking_receipt?walking_released_(*watch.walking_receipt):std::nullopt;
-            if(!release)return std::nullopt;     // replaced by a foreign writer, flushed, or observation lost: nothing is proven
+            if(!release){objective_reason_="walk task replaced or not observed (ownership lost, no release verdict)";return std::nullopt;}     // replaced by a foreign writer, flushed, or observation lost: nothing is proven
             if(release->probed && release->verdict==ScriptTaskRelease::arrived) {
                 // SA finished the walk at the target inside one frame and freed the task: that is the completion, whatever
                 // the ped does afterwards.
@@ -530,7 +531,7 @@ private:
             else watch.rearm_pending=true;
         }
         const auto near=arrival_now(watch.kind,watch.actor,watch.target_actor,watch.point);
-        if(!near)return std::nullopt;
+        if(!near){objective_reason_="arrival position unreadable";return std::nullopt;}
         const bool timer=!timed || service_now_>watch.armed_ms+goto_char_timer_ms;
         if(ownership==WalkingOwnership::pending || ownership==WalkingOwnership::inactive)return false;
         if(ownership==WalkingOwnership::active || watch.released_arrived) {
@@ -544,20 +545,22 @@ private:
             if(!timer)return false;
             watch.released_arrived=false;watch.rearm_pending=true;
         }
-        if(watch.rearm_pending && !rearm_walking(watch))return std::nullopt;
+        if(watch.rearm_pending && !rearm_walking(watch)){objective_reason_="walk could not be re-armed";return std::nullopt;}
         return false;
     }
     std::optional<bool> evaluate_objective_watch(ObjectiveWatch& watch) {
-        if(watch.kind==ObjectiveWatchKind::unknown)return std::nullopt;
+        if(watch.kind==ObjectiveWatchKind::unknown){objective_reason_="objective was set by a command the bridge does not track (watch kind unknown)";return std::nullopt;}
         const auto live=sa_live_objective_actor(watch.actor.handle);
-        if(!live || !(*live==watch.actor))return std::nullopt;
+        if(!live || !(*live==watch.actor)){objective_reason_="ped identity changed";return std::nullopt;}
         const auto intent=intents_.state(watch.actor);
-        if(!intent || intent->revision!=watch.source_revision || intent->current!=watch.source_current)
+        if(!intent || intent->revision!=watch.source_revision || intent->current!=watch.source_current){
+            objective_reason_=!intent?"no route intent for the ped":"route intent changed since the objective was set";
             return std::nullopt;
+        }
         if(watch.completed)return true;
         if(watch.kind==ObjectiveWatchKind::never)return false;
         const auto ped=sa_route_actor_vehicle_snapshot(watch.actor);
-        if(!ped || !(ped->actor==watch.actor) || !ped->alive)return std::nullopt;
+        if(!ped || !(ped->actor==watch.actor) || !ped->alive){objective_reason_="ped not alive or unreadable";return std::nullopt;}
         switch(watch.kind) {
         case ObjectiveWatchKind::position:return evaluate_walking(watch,false);
         case ObjectiveWatchKind::enter_car: {
@@ -1846,12 +1849,14 @@ public:
 
     // nullopt means the current objective or its owner cannot be proved.
     std::optional<bool> objective_passed(int32_t handle) {
+        objective_reason_="";
         const auto live=sa_live_objective_actor(handle);
-        if(!live)return std::nullopt;
+        if(!live){objective_reason_="ped handle is not a live native ped";return std::nullopt;}
         const auto found=objective_watches_.find(handle);
         if(found==objective_watches_.end() || !(found->second.actor==*live)) {
             const auto state=intents_.state(*live);
-            return state && state->current!=OriginalRouteIntents::none?std::nullopt:std::optional<bool>(false);
+            if(state && state->current!=OriginalRouteIntents::none){objective_reason_="ped has an active objective but no watch was registered for it";return std::nullopt;}
+            return std::optional<bool>(false);
         }
         // Latch ordering: a cleared latch is only republished by the frame
         // consumer, so a query before that tick sees the source reset value.
@@ -1859,8 +1864,11 @@ public:
         // completion guess; after the tick, unknown watches stay unavailable.
         if(found->second.reset_pending)
             return false;
-        return evaluate_objective_watch(found->second);
+        const auto verdict=evaluate_objective_watch(found->second);
+        if(!verdict && !*objective_reason_)objective_reason_="watch evaluation unavailable";
+        return verdict;
     }
+    const char* objective_reason()const{return objective_reason_;}
 
     void service_objective_watches() {
         servicing_=true;service_now_=frame_now();
